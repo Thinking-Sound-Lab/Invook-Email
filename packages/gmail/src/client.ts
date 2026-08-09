@@ -1,0 +1,151 @@
+export type GmailProfile = {
+  emailAddress: string;
+  messagesTotal: number;
+  threadsTotal: number;
+  historyId: string;
+};
+
+export type GmailMessageReference = {
+  id: string;
+  threadId: string;
+};
+
+export type GmailMessagePart = {
+  mimeType?: string;
+  filename?: string;
+  headers?: Array<{ name: string; value: string }>;
+  body?: {
+    attachmentId?: string;
+    data?: string;
+    size?: number;
+  };
+  parts?: GmailMessagePart[];
+};
+
+export type GmailMessage = {
+  id: string;
+  threadId: string;
+  labelIds?: string[];
+  snippet?: string;
+  internalDate?: string;
+  payload?: GmailMessagePart;
+};
+
+export type GmailMessagePage = {
+  messages?: GmailMessageReference[];
+  nextPageToken?: string;
+  resultSizeEstimate?: number;
+};
+
+export class GmailApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly responseBody: string,
+  ) {
+    super(message);
+    this.name = "GmailApiError";
+  }
+}
+
+async function gmailRequest<T>(
+  accessToken: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const response = await fetch(`https://gmail.googleapis.com/gmail/v1${path}`, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${accessToken}`,
+      ...init?.headers,
+    },
+  });
+
+  if (!response.ok) {
+    const responseBody = await response.text();
+    throw new GmailApiError(
+      `Gmail API request failed with status ${response.status}.`,
+      response.status,
+      responseBody,
+    );
+  }
+
+  return (await response.json()) as T;
+}
+
+export function getGmailProfile(accessToken: string): Promise<GmailProfile> {
+  return gmailRequest<GmailProfile>(accessToken, "/users/me/profile");
+}
+
+export function getGmailMessage(
+  accessToken: string,
+  messageId: string,
+): Promise<GmailMessage> {
+  return gmailRequest<GmailMessage>(
+    accessToken,
+    `/users/me/messages/${encodeURIComponent(messageId)}?format=full`,
+  );
+}
+
+export function listGmailMessages(
+  accessToken: string,
+  options: {
+    labelId?: "INBOX" | "SENT";
+    maxResults: number;
+    pageToken?: string;
+  },
+): Promise<GmailMessagePage> {
+  const search = new URLSearchParams({
+    maxResults: String(options.maxResults),
+  });
+  if (options.labelId) search.set("labelIds", options.labelId);
+  if (options.pageToken) search.set("pageToken", options.pageToken);
+
+  return gmailRequest<GmailMessagePage>(
+    accessToken,
+    `/users/me/messages?${search.toString()}`,
+  );
+}
+
+export async function refreshGoogleAccessToken(options: {
+  refreshToken: string;
+  clientId: string;
+  clientSecret: string;
+}): Promise<{ accessToken: string; expiresIn: number; scope?: string }> {
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: options.clientId,
+      client_secret: options.clientSecret,
+      grant_type: "refresh_token",
+      refresh_token: options.refreshToken,
+    }),
+  });
+
+  if (!response.ok) {
+    const responseBody = await response.text();
+    throw new GmailApiError(
+      `Google token refresh failed with status ${response.status}.`,
+      response.status,
+      responseBody,
+    );
+  }
+
+  const result = (await response.json()) as {
+    access_token?: string;
+    expires_in?: number;
+    scope?: string;
+  };
+
+  if (!result.access_token || !result.expires_in) {
+    throw new Error("Google did not return a usable refreshed access token.");
+  }
+
+  return {
+    accessToken: result.access_token,
+    expiresIn: result.expires_in,
+    scope: result.scope,
+  };
+}

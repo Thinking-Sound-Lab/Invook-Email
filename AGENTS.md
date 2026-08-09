@@ -1,0 +1,12 @@
+## Project rules
+
+- Never guess or imagine requirements, behavior, data, states, labels, fields, actions, or design details. Implement only what the user explicitly provides or what the repository, connected services, or real stored data prove. When information is absent, preserve an honest empty or unavailable state.
+- Never use dummy, mock, placeholder, synthetic, seeded, or fixture product data. Product flows must use real connected data. If a live integration is unavailable, show an honest empty or setup state instead of fabricating content.
+- Never use `setTimeout`, deadline options named `timeout`, or timer-based polling in project code or configuration. Prefer event-driven signals, database notifications, queue state, and platform-native health or retry behavior.
+- Use an open-source-friendly repository structure. Put deployable applications in `apps/`, shared libraries and configuration in `packages/`, and container-related files in `docker/`.
+- For frontend interfaces, use `shadcn/ui` components and conventions.
+- Use Plus Jakarta Sans for all product interface typography. Do not introduce another product font without explicit approval.
+- For frontend icons, use only the free Hugeicons icon pack unless the user explicitly approves another icon source.
+- Do not use icon fonts, emoji, text glyphs, or hand-drawn SVGs as interface icons.
+- Do not add borders or divider lines by default. Use spacing, typography, color, and surface contrast first; add a border only when it conveys necessary structure or state.
+

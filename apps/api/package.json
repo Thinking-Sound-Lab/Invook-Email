@@ -1,0 +1,23 @@
+{
+  "name": "@invook/api",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs watch src/index.ts",
+    "start": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@invook/ai": "workspace:*",
+    "@invook/contracts": "workspace:*",
+    "@invook/database": "workspace:*",
+    "@invook/gmail": "workspace:*",
+    "standardwebhooks": "1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

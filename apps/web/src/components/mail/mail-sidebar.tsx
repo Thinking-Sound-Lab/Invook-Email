@@ -1,0 +1,175 @@
+import {
+  Airplane01Icon,
+  AppleReminderIcon,
+  Calendar03Icon,
+  CheckmarkCircle02Icon,
+  Delete02Icon,
+  FileEditIcon,
+  HonourStarIcon,
+  InboxIcon,
+  Logout01Icon,
+  Mail01Icon,
+  Megaphone01Icon,
+  News01Icon,
+  PencilEdit01Icon,
+  Search02Icon,
+  SentIcon,
+  Settings01Icon,
+  Share01Icon,
+  StarIcon,
+  WorkflowSquare01Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import Link from "next/link";
+
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import { cn } from "@/lib/utils";
+
+import { initials } from "./mail-format";
+import type { MailboxView, MailSurface } from "./types";
+
+const workspaceItems = [
+  { label: "Search", icon: Search02Icon, surface: "search" },
+  { label: "Settings", icon: Settings01Icon, surface: "settings" },
+  { label: "Automations", icon: WorkflowSquare01Icon, surface: "automations" },
+] as const;
+
+const labelItems = [
+  { label: "All", icon: InboxIcon, view: "all" },
+  { label: "Important", icon: HonourStarIcon, view: "important" },
+  { label: "Travel", icon: Airplane01Icon, view: "travel" },
+  { label: "Pitch", icon: Megaphone01Icon, view: "pitch" },
+  { label: "Newsletter", icon: News01Icon, view: "newsletter" },
+] as const;
+
+const mailItems = [
+  { label: "Starred", icon: StarIcon, view: "starred" },
+  { label: "Shared", icon: Share01Icon, view: "shared" },
+  { label: "Reminders", icon: AppleReminderIcon, view: "reminders" },
+  { label: "Scheduled", icon: Calendar03Icon, view: "scheduled" },
+  { label: "Drafts", icon: FileEditIcon, view: "drafts" },
+  { label: "Done", icon: CheckmarkCircle02Icon, view: "done" },
+  { label: "Sent", icon: SentIcon, view: "sent" },
+  { label: "Trash", icon: Delete02Icon, view: "trash" },
+] as const;
+
+function NavLink({
+  label,
+  icon,
+  active,
+  href,
+}: {
+  label: string;
+  icon: typeof Mail01Icon;
+  active: boolean;
+  href: string;
+}) {
+  return (
+    <Link
+      href={href}
+      aria-current={active ? "page" : undefined}
+      className={cn(
+        "group flex h-8 items-center gap-2.5 rounded-md px-2.5 text-[13px] font-medium text-muted-foreground transition-colors",
+        "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+        active && "bg-sidebar-accent text-sidebar-accent-foreground",
+      )}
+    >
+      <HugeiconsIcon icon={icon} size={16} strokeWidth={1.7} className="shrink-0" />
+      <span className="hidden truncate lg:block">{label}</span>
+    </Link>
+  );
+}
+
+export function MailSidebar({
+  email,
+  currentView,
+  currentSurface,
+}: {
+  email: string;
+  currentView: MailboxView;
+  currentSurface: MailSurface;
+}) {
+  return (
+    <aside className="flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar px-2 py-3 lg:px-3">
+      <div className="flex h-10 items-center gap-2.5 px-1.5 lg:px-2">
+        <span className="grid size-7 shrink-0 place-items-center rounded-md bg-sidebar-foreground text-[11px] font-extrabold tracking-[-0.08em] text-sidebar">
+          in
+        </span>
+        <span className="hidden text-sm font-semibold tracking-[-0.025em] lg:block">Invook</span>
+      </div>
+
+      <Button
+        asChild
+        className="mt-3 h-9 w-full justify-center gap-2 bg-sidebar-foreground text-sidebar hover:bg-sidebar-foreground/85 lg:justify-start lg:px-3"
+      >
+        <Link href="/mail?surface=compose">
+          <HugeiconsIcon icon={PencilEdit01Icon} size={16} strokeWidth={1.8} />
+          <span className="hidden lg:block">Compose</span>
+        </Link>
+      </Button>
+
+      <nav className="mt-3 space-y-0.5" aria-label="Workspace">
+        {workspaceItems.map((item) => (
+          <NavLink
+            key={item.label}
+            label={item.label}
+            icon={item.icon}
+            active={currentSurface === item.surface}
+            href={`/mail?surface=${item.surface}`}
+          />
+        ))}
+      </nav>
+
+      <Separator className="my-3 bg-sidebar-border" />
+
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <p className="mb-1.5 hidden px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/65 lg:block">
+          Labels
+        </p>
+        <nav className="space-y-0.5" aria-label="Labels">
+          {labelItems.map((item) => (
+            <NavLink
+              key={item.label}
+              label={item.label}
+              icon={item.icon}
+              active={currentSurface === "mail" && currentView === item.view}
+              href={`/mail?view=${item.view}`}
+            />
+          ))}
+        </nav>
+
+        <p className="mb-1.5 mt-4 hidden px-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground/65 lg:block">
+          Mail
+        </p>
+        <nav className="space-y-0.5" aria-label="Mail">
+          {mailItems.map((item) => (
+            <NavLink
+              key={item.label}
+              label={item.label}
+              icon={item.icon}
+              active={currentSurface === "mail" && currentView === item.view}
+              href={`/mail?view=${item.view}`}
+            />
+          ))}
+        </nav>
+      </div>
+
+      <Separator className="my-3 bg-sidebar-border" />
+      <div className="flex items-center gap-2 overflow-hidden px-1 lg:px-2">
+        <span className="grid size-7 shrink-0 place-items-center rounded-full bg-sidebar-accent text-[10px] font-semibold text-sidebar-accent-foreground">
+          {initials(email)}
+        </span>
+        <div className="hidden min-w-0 flex-1 lg:block">
+          <p className="truncate text-[11px] font-medium">{email}</p>
+          <p className="text-[10px] text-muted-foreground">Gmail connected</p>
+        </div>
+        <form action="/v1/auth/sign-out" method="post" className="hidden lg:block">
+          <Button variant="ghost" size="icon-xs" type="submit" aria-label="Sign out">
+            <HugeiconsIcon icon={Logout01Icon} size={14} />
+          </Button>
+        </form>
+      </div>
+    </aside>
+  );
+}

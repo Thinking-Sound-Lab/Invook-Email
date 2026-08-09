@@ -1,0 +1,96 @@
+name: invook
+
+services:
+  db:
+    image: postgres:17-alpine
+    ports:
+      - "${POSTGRES_PORT:-54322}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-invook}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-invook}
+      POSTGRES_DB: ${POSTGRES_DB:-invook}
+    volumes:
+      - invook-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: worker
+    command: ["pnpm", "db:migrate"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: api
+    ports:
+      - "4000:4000"
+    environment:
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+      GEMINI_WEBHOOK_SECRET: ${GEMINI_WEBHOOK_SECRET:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 3s
+      retries: 20
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runner
+    ports:
+      - "3000:3000"
+    environment:
+      API_INTERNAL_URL: http://api:4000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_WEBHOOK_SECRET: ${GEMINI_WEBHOOK_SECRET:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  invook-postgres:

@@ -1,0 +1,19 @@
+{
+  "name": "@invook/gmail",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "google-auth-library": "^11.0.0"
+  }
+}

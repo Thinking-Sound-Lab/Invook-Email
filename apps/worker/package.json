@@ -1,0 +1,21 @@
+{
+  "name": "@invook/worker",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gemini:webhook:create": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs src/create-gemini-webhook.ts",
+    "start": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@invook/ai": "workspace:*",
+    "@invook/database": "workspace:*",
+    "@invook/gmail": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
