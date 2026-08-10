@@ -58,10 +58,10 @@ export function SmartLabelControls({
 
   return (
     <div className="mt-4">
-      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-        Invook labels
+      <p className="text-xs font-medium text-muted-foreground">
+        Labels
       </p>
-      <div className="mt-2 flex flex-wrap gap-1.5">
+      <div className="mt-1.5 flex flex-wrap gap-1">
         {labelDefinitions.map((definition) => {
           const current = labels.find((label) => label.key === definition.key);
           const applied = Boolean(current);
@@ -70,22 +70,19 @@ export function SmartLabelControls({
               key={definition.key}
               type="button"
               size="sm"
-              variant={applied ? "secondary" : "outline"}
-              className="h-7 gap-1.5 px-2 text-[10px]"
+              variant={applied ? "secondary" : "ghost"}
+              className="h-8 gap-1.5 px-2.5 text-xs text-muted-foreground data-[state=on]:text-foreground"
               aria-pressed={applied}
               disabled={pendingLabel !== null}
               onClick={() => void setLabel(definition.key, !applied)}
             >
               <HugeiconsIcon icon={definition.icon} size={12} />
               {definition.label}
-              {current?.source === "ai" ? (
-                <span className="text-[8px] uppercase tracking-wide text-muted-foreground">AI</span>
-              ) : null}
             </Button>
           );
         })}
       </div>
-      {error ? <p className="mt-2 text-[10px] text-destructive">{error}</p> : null}
+      {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
     </div>
   );
 }

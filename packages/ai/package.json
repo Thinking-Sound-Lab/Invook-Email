@@ -14,9 +14,9 @@
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.27",
-    "@google/genai": "2.16.0",
     "@invook/contracts": "workspace:*",
     "ai": "^7.0.58",
+    "openai": "^7.4.0",
     "zod": "^4.4.3"
   }
 }

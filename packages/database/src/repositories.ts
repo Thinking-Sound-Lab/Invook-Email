@@ -37,7 +37,7 @@ const initialSyncState: AccountSyncState = {
   history: "pending",
 };
 
-export const MEMORY_SCHEMA_VERSION = 2;
+export const MEMORY_SCHEMA_VERSION = 3;
 export const DRAFT_FEEDBACK_VERSION = 1;
 
 export type MemoryType = "preference" | "contact" | "scheduling";
@@ -426,9 +426,24 @@ export async function getMailboxWorkspace(
     updatedAt: memory.updatedAt.toISOString(),
   }));
 
+  const [memoryBatchSubmission] = await database
+    .select({ result: jobs.result })
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.accountId, account.id),
+        eq(jobs.status, "complete"),
+        inArray(jobs.jobType, ["memory.extract", "memory.batch.retry"]),
+        sql`${jobs.result}->>'status' = 'submitted'`,
+      ),
+    )
+    .orderBy(desc(jobs.updatedAt))
+    .limit(1);
+
   if (!selectedThread) {
     return {
       account,
+      memoryBatchSubmission: memoryBatchSubmission?.result ?? null,
       memories: serializedMemories,
       threads: mailboxThreadsWithLabels,
       selectedThread: null,
@@ -474,6 +489,7 @@ export async function getMailboxWorkspace(
 
   return {
     account,
+    memoryBatchSubmission: memoryBatchSubmission?.result ?? null,
     memories: serializedMemories,
     threads: mailboxThreadsWithLabels,
     selectedThread: {
@@ -1787,14 +1803,12 @@ export async function completeJob(
     .where(eq(jobs.id, jobId));
 }
 
-export async function enqueueGeminiBatchEvent(
+export async function enqueueMemoryBatchEvent(
   input: {
+    provider: "openai" | "azure-openai";
     webhookId: string;
     eventType: string;
     providerBatchId: string;
-    outputFileUri?: string;
-    errorCode?: string;
-    errorMessage?: string;
   },
   database: Database = getDatabase(),
 ): Promise<{ submissionJobId: string } | null> {
@@ -1810,11 +1824,8 @@ export async function enqueueGeminiBatchEvent(
         and(
           eq(jobs.status, "complete"),
           inArray(jobs.jobType, ["memory.extract", "memory.batch.retry"]),
-          or(
-            sql`${jobs.result}->>'providerBatchName' = ${input.providerBatchId}`,
-            sql`${jobs.result}->>'providerBatchId' = ${input.providerBatchId}`,
-            sql`${jobs.result}->>'providerBatchName' like ${`%/${input.providerBatchId}`}`,
-          ),
+          sql`${jobs.result}->>'provider' = ${input.provider}`,
+          sql`${jobs.result}->>'providerBatchId' = ${input.providerBatchId}`,
         ),
       )
       .orderBy(desc(jobs.updatedAt))
@@ -1832,13 +1843,11 @@ export async function enqueueGeminiBatchEvent(
           submissionJobId: submission.id,
           webhookId: input.webhookId,
           eventType: input.eventType,
+          provider: input.provider,
           providerBatchId: input.providerBatchId,
-          ...(input.outputFileUri ? { outputFileUri: input.outputFileUri } : {}),
-          ...(input.errorCode ? { errorCode: input.errorCode } : {}),
-          ...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
         },
         attempts: 0,
-        idempotencyKey: `gemini.webhook:${input.webhookId}`,
+        idempotencyKey: `${input.provider}.webhook:${input.webhookId}`,
       })
       .onConflictDoNothing({ target: jobs.idempotencyKey });
 

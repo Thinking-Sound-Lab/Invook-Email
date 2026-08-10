@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "gemini:webhook:create": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs src/create-gemini-webhook.ts",
     "start": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs src/index.ts",
     "typecheck": "tsc --noEmit"
   },

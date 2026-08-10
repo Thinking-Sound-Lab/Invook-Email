@@ -17,8 +17,7 @@
     "test": "pnpm --recursive --if-present run test",
     "db:generate": "pnpm --filter @invook/database run db:generate",
     "db:migrate": "pnpm --filter @invook/database run db:migrate",
-    "db:studio": "pnpm --filter @invook/database run db:studio",
-    "gemini:webhook:create": "pnpm --filter @invook/worker run gemini:webhook:create"
+    "db:studio": "pnpm --filter @invook/database run db:studio"
   },
   "engines": {
     "node": ">=22",

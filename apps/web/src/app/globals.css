@@ -6,39 +6,39 @@
 
 :root {
   color-scheme: dark;
-  --background: oklch(0.198 0.003 84);
-  --foreground: oklch(0.94 0.006 80);
-  --card: oklch(0.235 0.004 84);
-  --card-foreground: oklch(0.94 0.006 80);
-  --popover: oklch(0.235 0.004 84);
-  --popover-foreground: oklch(0.94 0.006 80);
-  --primary: oklch(0.94 0.006 80);
-  --primary-foreground: oklch(0.198 0.003 84);
-  --secondary: oklch(0.28 0.004 84);
-  --secondary-foreground: oklch(0.91 0.005 80);
-  --muted: oklch(0.265 0.004 84);
-  --muted-foreground: oklch(0.68 0.008 78);
-  --accent: oklch(0.3 0.005 84);
-  --accent-foreground: oklch(0.94 0.006 80);
-  --destructive: oklch(0.63 0.2 27);
-  --border: oklch(0.31 0.005 84);
-  --input: oklch(0.31 0.005 84);
-  --ring: oklch(0.66 0.01 80);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.215 0.004 84);
-  --sidebar-foreground: oklch(0.94 0.006 80);
-  --sidebar-primary: oklch(0.94 0.006 80);
-  --sidebar-primary-foreground: oklch(0.198 0.003 84);
-  --sidebar-accent: oklch(0.28 0.004 84);
-  --sidebar-accent-foreground: oklch(0.94 0.006 80);
-  --sidebar-border: oklch(0.31 0.005 84);
-  --sidebar-ring: oklch(0.66 0.01 80);
-  --success: oklch(0.69 0.13 151);
-  --warning: oklch(0.76 0.13 77);
+  --background: #191919;
+  --foreground: #f2f2f2;
+  --card: #171717;
+  --card-foreground: #f2f2f2;
+  --popover: #242424;
+  --popover-foreground: #f2f2f2;
+  --primary: #8884ff;
+  --primary-foreground: #ffffff;
+  --secondary: #242424;
+  --secondary-foreground: #e8e8e8;
+  --muted: #242424;
+  --muted-foreground: #929292;
+  --accent: #2c2c2c;
+  --accent-foreground: #f5f5f5;
+  --destructive: #e86666;
+  --border: #2d2d2d;
+  --input: #343434;
+  --ring: #8884ff;
+  --radius: 0.55rem;
+  --sidebar: #202020;
+  --sidebar-foreground: #ececec;
+  --sidebar-primary: #8884ff;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #303030;
+  --sidebar-accent-foreground: #f5f5f5;
+  --sidebar-border: #303030;
+  --sidebar-ring: #8884ff;
+  --success: #66bd91;
+  --warning: #d1a45c;
 }
 
 @theme inline {
-  --font-sans: var(--font-jakarta), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Plus Jakarta Sans", "Plus Jakarta Sans Fallback", ui-sans-serif, system-ui, sans-serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -85,18 +85,16 @@
 
   body {
     @apply min-h-screen bg-background font-sans text-foreground antialiased;
+    font-size: 14px;
+    letter-spacing: -0.006em;
+  }
+
+  ::selection {
+    background: color-mix(in oklch, var(--primary), transparent 55%);
   }
 
   button:not(:disabled),
   [role="button"]:not([aria-disabled="true"]) {
     cursor: pointer;
   }
-}
-
-.permission-canvas {
-  background-image:
-    linear-gradient(to right, color-mix(in oklch, var(--border), transparent 65%) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in oklch, var(--border), transparent 65%) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: linear-gradient(to bottom, black, transparent 82%);
 }

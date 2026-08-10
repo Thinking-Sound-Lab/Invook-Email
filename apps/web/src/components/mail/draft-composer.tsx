@@ -10,9 +10,7 @@ import type { ApiProblem, ReplyDraft } from "@invook/contracts";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -103,21 +101,20 @@ export function DraftComposer({
   }
 
   return (
-    <Card className="mt-8 border border-border bg-card/55 ring-0">
-      <CardHeader className="border-b">
+    <section className="mt-12 rounded-xl bg-card/65 p-4 sm:p-5" aria-label="Draft reply">
+      <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-2">
-          <span className="grid size-7 place-items-center rounded-md bg-foreground/[0.06]">
-            <HugeiconsIcon icon={SparklesIcon} size={14} />
-          </span>
-          <CardTitle className="text-sm">Draft with Memory</CardTitle>
+          <HugeiconsIcon icon={SparklesIcon} size={16} className="text-primary" />
+          <h2 className="text-sm font-semibold">Draft with memory</h2>
         </div>
         {draft ? (
-          <Badge variant="outline" className="h-5 text-[9px]">
-            {draft.usedMemoryIds.length} used
-          </Badge>
+          <p className="text-xs text-muted-foreground">
+            {draft.usedMemoryIds.length} {draft.usedMemoryIds.length === 1 ? "memory" : "memories"} used
+          </p>
         ) : null}
-      </CardHeader>
-      <CardContent className="space-y-3">
+      </div>
+
+      <div className="mt-4 space-y-3">
         <Input
           value={instruction}
           onChange={(event) => setInstruction(event.target.value)}
@@ -130,14 +127,14 @@ export function DraftComposer({
           <Textarea
             value={text}
             onChange={(event) => setText(event.target.value)}
-            className="min-h-48 resize-y text-[13px] leading-6"
+            className="min-h-48 resize-y bg-background/45 text-sm leading-6"
             maxLength={12_000}
             aria-label="Reply draft"
           />
         ) : (
-          <div className="rounded-lg border border-dashed px-4 py-6 text-center">
-            <p className="text-xs font-medium">No reply draft yet</p>
-            <p className="mt-1 text-[10px] leading-4 text-muted-foreground">
+          <div className="rounded-lg bg-background/35 px-5 py-7 text-center">
+            <p className="text-sm font-medium">No reply draft yet</p>
+            <p className="mx-auto mt-1.5 max-w-md text-xs leading-5 text-muted-foreground">
               {aiConfigured
                 ? "Invook will use the current thread and only the memories that apply."
                 : "Add an AI model before drafting replies."}
@@ -146,7 +143,7 @@ export function DraftComposer({
         )}
 
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="max-w-md text-[9px] leading-4 text-muted-foreground">
+          <p className="max-w-md text-xs leading-5 text-muted-foreground">
             When you edit and save, Invook compares your version with its draft. A new memory
             requires the same edit across at least three drafts.
           </p>
@@ -184,13 +181,13 @@ export function DraftComposer({
           </div>
         </div>
 
-        {notice ? <p className="text-[10px] text-success">{notice}</p> : null}
+        {notice ? <p className="text-xs text-success">{notice}</p> : null}
         {error ? (
-          <p role="alert" className="text-[10px] text-destructive">
+          <p role="alert" className="text-xs text-destructive">
             {error}
           </p>
         ) : null}
-      </CardContent>
-    </Card>
+      </div>
+    </section>
   );
 }

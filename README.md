@@ -10,7 +10,7 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and creates an indexing job.
 3. The worker indexes the real mailbox by following every Gmail result page.
 4. A configured model applies Invook's predefined Important, Travel, Pitch, and Newsletter labels. A user's label changes take precedence over later model runs.
-5. The worker sends full eligible email threads to Gemini's native Batch API. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
+5. The worker sends full eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
    - **Preferences:** repeated behavior that applies across contacts and should shape every draft.
    - **Contacts:** repeated communication behavior for one normalized email address.
    - **Scheduling:** repeated behavior used when coordinating meetings or times.
@@ -18,7 +18,7 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 7. A reply draft receives the current thread plus applicable global, contact, and scheduling memories. It never receives unrelated contact memory.
 8. Saving an edited AI draft records feedback. A new memory is proposed only when the same correction appears across at least three real drafts.
 
-Memory v2 does not require embeddings. This is deliberate: Gemini Batch discovers repeated behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting. PostgreSQL full-text search remains available for exact mailbox search.
+Memory v3 does not require embeddings. This is deliberate: native Batch analysis discovers repeated behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting. PostgreSQL full-text search remains available for exact mailbox search.
 
 The right panel currently communicates the agent's Find, Write, and Automate responsibilities. General conversational actions and sending mail are not claimed as complete yet.
 
@@ -30,7 +30,7 @@ apps/
   api/                 Native Node.js HTTP API, OAuth, sessions, and product endpoints
   worker/              Gmail indexing, labeling, Memory extraction, and feedback jobs
 packages/
-  ai/                  Gemini Batch Memory analysis plus structured labels, feedback, and drafts
+  ai/                  OpenAI and Azure OpenAI Batch Memory analysis plus labels, feedback, and drafts
   contracts/           Shared JSON API types
   database/            Drizzle schema, migrations, repositories, and credential encryption
   gmail/               Gmail API client, OAuth scopes, and MIME parsing
@@ -65,15 +65,19 @@ Put the generated value in `TOKEN_ENCRYPTION_KEY`. Invook uses the official Goog
 
 Labeling, feedback analysis, and drafting use an OpenAI-compatible HTTP endpoint. Set `AI_BASE_URL` and `AI_MODEL`; `AI_API_KEY` is optional for a local model. When the worker runs in Docker and a local model runs on the host, use a host-reachable URL such as `http://host.docker.internal:11434/v1`.
 
-Initial Preferences, Contacts, and Scheduling analysis uses `gemini-3.5-flash-lite` through the official Gemini Batch API. Set `GEMINI_API_KEY` for a Google AI Studio project with active billing; Batch capacity starts at paid Tier 1. Invook creates one global request and one request per qualifying contact; it splits a request only when the model's reported context limit requires it. There is no mandatory second analysis batch and no embedding step.
+Initial Preferences, Contacts, and Scheduling analysis uses one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Invook creates one global request and one request per qualifying contact, then splits a scope only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure. There is no mandatory second analysis batch and no embedding step.
 
-Gemini reports completion to `POST /v1/webhooks/gemini`. The API verifies the Standard Webhooks signature and queues result processing; the worker does not poll. Expose that route at a public HTTPS URL, then register it once:
+For OpenAI, set `MEMORY_BATCH_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_WEBHOOK_SECRET`. Invook uses the pinned `gpt-5.4-nano-2026-03-17` model. Register these events in the [OpenAI project webhook settings](https://platform.openai.com/settings/project/webhooks):
 
-```bash
-pnpm gemini:webhook:create -- https://your-domain.example/v1/webhooks/gemini
-```
+- URL: `https://your-domain.example/v1/webhooks/openai`
+- Events: `batch.completed`, `batch.failed`, `batch.expired`, and `batch.cancelled`
 
-Copy the one-time signing secret printed by the command into `GEMINI_WEBHOOK_SECRET`. Add `--write-env` to store it directly in `.env.local` without printing it. For a fully local run, use an HTTPS tunnel to the local app and register the tunnel URL. If Gemini or the general model is not configured, the corresponding jobs remain queued without fabricating output.
+For Azure OpenAI, create a `Global-Batch` or `Data Zone Batch` deployment, then set `MEMORY_BATCH_PROVIDER=azure-openai`, `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_BATCH_DEPLOYMENT`, `AZURE_OPENAI_BATCH_INPUT_TOKEN_LIMIT`, and `AZURE_OPENAI_WEBHOOK_SECRET`. The deployment name is the JSONL `model` value. Its input-token limit is explicit because a custom Azure deployment name does not identify its backing model reliably. Register the same four events through the [Azure OpenAI webhook API](https://learn.microsoft.com/azure/foundry/openai/how-to/webhooks) using:
+
+- URL: `https://your-domain.example/v1/webhooks/azure-openai`
+- Events: `batch.completed`, `batch.failed`, `batch.expired`, and `batch.cancelled`
+
+Both providers use Standard Webhooks. The API verifies the provider-specific signing secret and queues result processing; the worker does not poll. For a fully local run, expose the selected route through an HTTPS tunnel. If the selected Batch provider or general model is not configured, its jobs remain queued without fabricating output.
 
 ## Run locally with Docker
 

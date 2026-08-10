@@ -1,16 +1,20 @@
 import {
   AiConfigurationError,
-  deleteGeminiMemoryBatchFiles,
   classifyThreads,
+  deleteMemoryBatchFiles,
   extractFeedbackMemories,
-  GeminiMemoryConfigurationError,
+  isAnyMemoryBatchProviderConfigured,
   isAiConfigured,
-  isGeminiMemoryConfigured,
-  readGeminiMemoryBatch,
-  submitGeminiMemoryBatch,
+  isMemoryBatchConfigured,
+  isMemoryBatchProviderConfigured,
+  memoryBatchProviders,
+  MemoryBatchConfigurationError,
+  readMemoryBatch,
+  submitMemoryBatch,
   type FeedbackMemoryCandidate,
   type MemoryAnalysisThread,
   type MemoryBatchManifestEntry,
+  type MemoryBatchProvider,
   type MessageMemoryCandidate,
 } from "@invook/ai";
 import {
@@ -267,9 +271,9 @@ async function runMailClassification(job: ClaimedJob) {
 type IndexedMemoryThread = Awaited<ReturnType<typeof getMemoryAnalysisThreads>>[number];
 
 type MemorySubmissionResult = {
-  providerBatchName: string;
+  provider: MemoryBatchProvider;
   providerBatchId: string;
-  inputFileName: string;
+  inputFileId: string;
   modelId: string;
   requestCount: number;
   manifest: MemoryBatchManifestEntry[];
@@ -340,33 +344,45 @@ function requiredInteger(value: unknown, name: string): number {
   return value;
 }
 
-function parseSubmissionResult(value: unknown): MemorySubmissionResult {
+function parseSubmissionResult(value: unknown): MemorySubmissionResult | null {
   if (!value || typeof value !== "object") {
-    throw new Error("The Gemini Memory submission result is missing.");
+    throw new Error("The Memory Batch submission result is missing.");
   }
   const result = value as Record<string, unknown>;
+  if (!memoryBatchProviders.includes(result.provider as MemoryBatchProvider)) {
+    return null;
+  }
+  const provider = result.provider as MemoryBatchProvider;
   if (typeof result.replaceExisting !== "boolean") {
-    throw new Error("The Gemini Memory replacement state is missing.");
+    throw new Error("The Memory Batch replacement state is missing.");
   }
   const manifest = parseManifest(result.manifest);
-  const requestCount = requiredInteger(result.requestCount, "Gemini request count");
+  const requestCount = requiredInteger(
+    result.requestCount,
+    "Memory Batch request count",
+  );
   if (
     manifest.length !== requestCount ||
     new Set(manifest.map((entry) => entry.key)).size !== manifest.length
   ) {
-    throw new Error("The Gemini Memory batch manifest does not match its request count.");
+    throw new Error(
+      "The Memory Batch manifest does not match its request count.",
+    );
   }
   return {
-    providerBatchName: requiredString(
-      result.providerBatchName,
-      "Gemini batch name",
+    provider,
+    providerBatchId: requiredString(
+      result.providerBatchId,
+      "provider batch ID",
     ),
-    providerBatchId: requiredString(result.providerBatchId, "Gemini batch ID"),
-    inputFileName: requiredString(result.inputFileName, "Gemini input file"),
-    modelId: requiredString(result.modelId, "Gemini model"),
+    inputFileId: requiredString(result.inputFileId, "provider input file"),
+    modelId: requiredString(result.modelId, "Memory Batch model"),
     requestCount,
     manifest,
-    batchAttempt: requiredInteger(result.batchAttempt, "Gemini batch attempt"),
+    batchAttempt: requiredInteger(
+      result.batchAttempt,
+      "Memory Batch attempt",
+    ),
     rootSubmissionJobId: requiredString(
       result.rootSubmissionJobId,
       "Root Memory submission job ID",
@@ -483,10 +499,10 @@ async function runMemoryExtraction(job: ClaimedJob) {
       memoryCount: 0,
     };
   }
-  if (!isGeminiMemoryConfigured()) throw new GeminiMemoryConfigurationError();
+  if (!isMemoryBatchConfigured()) throw new MemoryBatchConfigurationError();
 
   await setMemorySyncStage(account.id, "running");
-  const submission = await submitGeminiMemoryBatch({
+  const submission = await submitMemoryBatch({
     submissionId: job.id,
     batchAttempt: 1,
     threads,
@@ -521,11 +537,31 @@ async function runMemoryExtraction(job: ClaimedJob) {
 
 async function runMemoryBatchRetry(job: ClaimedJob) {
   if (!job.accountId) throw new Error("The Memory retry has no connected account.");
+  const parentSubmissionJobId = requiredString(
+    job.payload.parentSubmissionJobId,
+    "Parent Memory submission job ID",
+  );
+  const parentSubmission = await getMemoryBatchSubmission(parentSubmissionJobId);
+  if (parentSubmission?.accountId !== job.accountId) {
+    throw new Error("The parent Memory submission could not be matched to this account.");
+  }
+  const parentDetails = parseSubmissionResult(parentSubmission.result);
+  if (!parentDetails) {
+    return { status: "superseded", provider: "unsupported" };
+  }
+
   const account = await getWorkerAccount(job.accountId);
   if (!account) throw new Error("The connected Gmail account was not found.");
-  if (!isGeminiMemoryConfigured()) throw new GeminiMemoryConfigurationError();
+  if (!isMemoryBatchProviderConfigured(parentDetails.provider)) {
+    throw new MemoryBatchConfigurationError(
+      `The ${parentDetails.provider} provider used by this Memory Batch retry is not configured.`,
+    );
+  }
 
-  const batchAttempt = requiredInteger(job.payload.batchAttempt, "Gemini batch attempt");
+  const batchAttempt = requiredInteger(
+    job.payload.batchAttempt,
+    "Memory Batch attempt",
+  );
   const rootSubmissionJobId = requiredString(
     job.payload.rootSubmissionJobId,
     "Root Memory submission job ID",
@@ -538,14 +574,17 @@ async function runMemoryBatchRetry(job: ClaimedJob) {
     await getMemoryAnalysisThreads(account.id),
     account.email,
   );
-  const submission = await submitGeminiMemoryBatch({
+  const submission = await submitMemoryBatch({
+    provider: parentDetails.provider,
     submissionId: job.id,
     batchAttempt,
     threads,
     protectedMemories: await getUserAuthoredMemories(account.id),
     retryManifest: manifest,
   });
-  if (!submission) throw new Error("The Gemini Memory retry produced no requests.");
+  if (!submission) {
+    throw new Error("The Memory Batch retry produced no requests.");
+  }
 
   return {
     status: "submitted",
@@ -564,16 +603,21 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
   );
   const submission = await getMemoryBatchSubmission(submissionJobId);
   if (!submission?.accountId || !submission.userId || submission.accountId !== job.accountId) {
-    throw new Error("The Gemini Memory submission could not be matched to this account.");
+    throw new Error("The Memory Batch submission could not be matched to this account.");
   }
   const details = parseSubmissionResult(submission.result);
-  const providerBatchId = requiredString(job.payload.providerBatchId, "Gemini event batch ID");
-  if (
-    providerBatchId !== details.providerBatchId &&
-    providerBatchId !== details.providerBatchName &&
-    !details.providerBatchName.endsWith(`/${providerBatchId}`)
-  ) {
-    throw new Error("The Gemini event does not match its Memory submission.");
+  if (!details) {
+    return { status: "superseded", provider: "unsupported" };
+  }
+  const providerBatchId = requiredString(
+    job.payload.providerBatchId,
+    "provider event batch ID",
+  );
+  if (job.payload.provider !== details.provider) {
+    throw new Error("The provider event does not match its Memory submission.");
+  }
+  if (providerBatchId !== details.providerBatchId) {
+    throw new Error("The provider event does not match its Memory submission.");
   }
 
   const account = await getWorkerAccount(job.accountId);
@@ -587,31 +631,24 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
       thread.messages.map((message) => [message.id, message] as const),
     ),
   );
-  const batch = await readGeminiMemoryBatch({
-    providerBatchName: details.providerBatchName,
-    outputFileUri:
-      typeof job.payload.outputFileUri === "string"
-        ? job.payload.outputFileUri
-        : undefined,
+  const batch = await readMemoryBatch({
+    provider: details.provider,
+    providerBatchId: details.providerBatchId,
+    modelId: details.modelId,
     expectedKeys: details.manifest.map((entry) => entry.key),
   });
-  const successfulState =
-    batch.state === "JOB_STATE_SUCCEEDED" ||
-    batch.state === "JOB_STATE_PARTIALLY_SUCCEEDED";
   const terminalState =
-    successfulState ||
-    batch.state === "JOB_STATE_FAILED" ||
-    batch.state === "JOB_STATE_CANCELLED" ||
-    batch.state === "JOB_STATE_EXPIRED";
+    batch.state === "completed" ||
+    batch.state === "failed" ||
+    batch.state === "cancelled" ||
+    batch.state === "expired";
   if (!terminalState) {
-    throw new Error(`Gemini emitted a completion event while the batch is ${batch.state}.`);
+    throw new Error(
+      `${details.provider} emitted a terminal event while the batch is ${batch.state}.`,
+    );
   }
 
-  const failedKeys = new Set(
-    successfulState
-      ? batch.failedKeys
-      : details.manifest.map((entry) => entry.key),
-  );
+  const failedKeys = new Set(batch.failedKeys);
   const candidates: MessageMemoryCandidate[] = [];
   for (const entry of details.manifest) {
     if (failedKeys.has(entry.key)) continue;
@@ -656,12 +693,15 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
     await setMemorySyncStage(submission.accountId, "complete");
   }
 
-  const cleanupFailures = await deleteGeminiMemoryBatchFiles({
-    inputFileName: details.inputFileName,
-    outputFileName: batch.outputFileName,
+  const cleanupFailures = await deleteMemoryBatchFiles({
+    provider: details.provider,
+    inputFileId: details.inputFileId,
+    outputFileId: batch.outputFileId,
+    errorFileId: batch.errorFileId,
   });
   if (cleanupFailures.length > 0) {
-    console.error("worker: Gemini Memory files could not be deleted", {
+    console.error("worker: Memory Batch files could not be deleted", {
+      provider: details.provider,
       submissionJobId: submission.id,
       fileCount: cleanupFailures.length,
     });
@@ -675,6 +715,8 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
           ? "retry_submitted"
           : "failed",
     providerState: batch.state,
+    provider: details.provider,
+    providerError: batch.providerError,
     candidateCount: candidates.length,
     memoryCount: memories.length,
     failedRequestCount: failedManifest.length,
@@ -803,8 +845,9 @@ async function markJobFailed(job: ClaimedJob, error: unknown) {
 async function processNextJob() {
   const jobTypes = ["gmail.initial_sync"];
   if (isAiConfigured()) jobTypes.push("mail.classify", "memory.feedback");
-  if (isGeminiMemoryConfigured()) {
-    jobTypes.push("memory.extract", "memory.batch.retry", "memory.batch.event");
+  if (isMemoryBatchConfigured()) jobTypes.push("memory.extract");
+  if (isAnyMemoryBatchProviderConfigured()) {
+    jobTypes.push("memory.batch.retry", "memory.batch.event");
   }
   const job = await claimNextJob(workerId, jobTypes);
   if (!job) return false;
@@ -837,7 +880,7 @@ async function processNextJob() {
   } catch (error) {
     if (
       error instanceof AiConfigurationError ||
-      error instanceof GeminiMemoryConfigurationError
+      error instanceof MemoryBatchConfigurationError
     ) {
       if (job.jobType === "memory.extract" && job.accountId) {
         await setMemorySyncStage(job.accountId, "pending");

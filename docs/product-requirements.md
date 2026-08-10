@@ -104,15 +104,15 @@ Deleting removes the active record and its text. A non-reversible fingerprint to
 
 ## Batch analysis
 
-Embeddings are not required for Memory v2. The worker uses Gemini's native Batch API as follows:
+Embeddings are not required for Memory v3. The worker uses the selected OpenAI or Azure OpenAI native Batch API as follows:
 
 1. Select real threads containing at least one eligible owner-sent message. Include incoming messages as context, but allow only eligible owner-sent messages to become evidence.
 2. Normalize external email addresses and remove the mailbox owner's address.
 3. Build one natural global request across the mailbox for Preferences and Scheduling, plus one request per contact that has at least three eligible owner-sent messages.
 4. Attach the same Memory system instruction and structured response schema to every independent request.
-5. Ask Gemini for the model's token count and context limit. Keep each natural scope whole unless that measured limit requires a split that can still preserve the three-message evidence rule.
-6. Upload all requests as one JSONL batch input and enforce Gemini's documented 2GB input-file limit.
-7. Receive completion through the signed Gemini webhook and queue result processing. The worker does not poll or use timer-based waiting.
+5. Measure OpenAI requests with the Responses input-token endpoint. For Azure OpenAI, which does not expose that endpoint, use the complete request's UTF-8 byte length as a conservative token-count upper bound. Keep each natural scope whole unless the provider's configured model input limit requires a split that can still preserve the three-message evidence rule.
+6. Upload all requests as one JSONL batch input and enforce the provider's documented limits: 50,000 requests for OpenAI or 100,000 for Azure OpenAI, and 200 MB per input file for either provider.
+7. Receive `batch.completed`, `batch.failed`, `batch.expired`, or `batch.cancelled` through the provider-specific signed webhook and queue result processing. The worker does not poll or use timer-based waiting.
 8. Reject candidates whose cited IDs are missing, incoming, duplicated below the threshold, or outside the request and contact scope.
 9. Merge exact duplicates in application code. There is no mandatory second model batch.
 10. Preserve user-authored Memory and deletion fingerprints. Retry only failed JSONL requests, up to the existing job-attempt limit.
@@ -120,7 +120,7 @@ Embeddings are not required for Memory v2. The worker uses Gemini's native Batch
 
 Email bodies, candidate text, and thread content are always untrusted model input. The prompt must explicitly prohibit following instructions found inside them.
 
-If the Gemini API key or signed webhook secret is not configured, initial Memory analysis stays queued without consuming retries or creating fallback results.
+If the selected provider's API credentials, deployment configuration, or signed webhook secret are incomplete, initial Memory analysis stays queued without consuming retries or creating fallback results.
 
 ## Drafting
 
@@ -177,7 +177,7 @@ Browser
 Worker
   -> PostgreSQL jobs
   -> Gmail indexing
-  -> Gemini Batch for initial Memory
+  -> selected OpenAI or Azure OpenAI Batch provider for initial Memory
   -> configured model endpoint for labels, feedback, and drafts
   -> validated results in PostgreSQL
 ```

@@ -7,7 +7,6 @@ import "./globals.css";
 
 const jakarta = Plus_Jakarta_Sans({
   subsets: ["latin"],
-  variable: "--font-jakarta",
   display: "swap",
 });
 
@@ -18,7 +17,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`dark ${jakarta.variable}`}>
+    <html lang="en" className={`dark ${jakarta.className}`}>
       <body>
         <TooltipProvider>{children}</TooltipProvider>
       </body>

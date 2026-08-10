@@ -6,6 +6,22 @@ export type AccountSyncState = {
   history: AccountSyncStage;
 };
 
+export type MemoryGenerationProgress = {
+  stage:
+    | "indexing"
+    | "preparing"
+    | "validating"
+    | "analyzing"
+    | "finalizing"
+    | "complete"
+    | "failed";
+  completedRequestCount: number | null;
+  failedRequestCount: number | null;
+  totalRequestCount: number | null;
+  evidenceMessageCount: number | null;
+  memoryCount: number;
+};
+
 export const invookLabelKeys = [
   "important",
   "travel",
@@ -91,6 +107,7 @@ export type MailboxSelectedThread = Omit<MailboxThreadSummary, "snippet"> & {
 export type MailboxWorkspace = {
   aiConfigured: boolean;
   account: MailboxAccount;
+  memoryProgress: MemoryGenerationProgress;
   memories: MemoryEntry[];
   threads: MailboxThreadSummary[];
   selectedThread: MailboxSelectedThread | null;

@@ -3,11 +3,17 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import {
   invookLabelKeys,
+  type MemoryGenerationProgress,
   type InvookLabelKey,
   type MailboxWorkspace,
   type SessionState,
 } from "@invook/contracts";
-import { isAiConfigured } from "@invook/ai";
+import {
+  getMemoryBatchRequestProgress,
+  isAiConfigured,
+  memoryBatchProviders,
+  type MemoryBatchProvider,
+} from "@invook/ai";
 import {
   checkDatabaseConnection,
   decryptGoogleCredential,
@@ -51,7 +57,7 @@ import {
 } from "./http/request";
 import { sendJson, sendProblem, sendRedirect } from "./http/responses";
 import { handleGenerateDraft, handleUpdateDraft } from "./routes/drafts";
-import { handleGeminiWebhook } from "./routes/gemini-webhook";
+import { handleMemoryBatchWebhook } from "./routes/memory-batch-webhook";
 import {
   handleCreateMemory,
   handleDeleteMemory,
@@ -72,15 +78,124 @@ function connectionErrorUrl(reason: ConnectionErrorReason): string {
   return target.toString();
 }
 
-function serializeWorkspace(
+function resultNumber(
+  value: Record<string, unknown> | null,
+  key: string,
+): number | null {
+  const candidate = value?.[key];
+  return typeof candidate === "number" && Number.isFinite(candidate)
+    ? candidate
+    : null;
+}
+
+async function serializeMemoryProgress(
   workspace: NonNullable<Awaited<ReturnType<typeof getMailboxWorkspace>>>,
-): MailboxWorkspace {
+): Promise<MemoryGenerationProgress> {
+  const memoryCount = workspace.memories.length;
+  const submission = workspace.memoryBatchSubmission;
+  const requestCount = resultNumber(submission, "requestCount");
+  const evidenceMessageCount = resultNumber(submission, "evidenceMessageCount");
+
+  if (
+    workspace.account.syncState.recent === "pending" ||
+    workspace.account.syncState.recent === "running"
+  ) {
+    return {
+      stage: "indexing",
+      completedRequestCount: null,
+      failedRequestCount: null,
+      totalRequestCount: null,
+      evidenceMessageCount,
+      memoryCount,
+    };
+  }
+
+  if (workspace.account.syncState.memory === "complete") {
+    return {
+      stage: "complete",
+      completedRequestCount: null,
+      failedRequestCount: null,
+      totalRequestCount: requestCount,
+      evidenceMessageCount,
+      memoryCount,
+    };
+  }
+
+  if (workspace.account.syncState.memory === "failed") {
+    return {
+      stage: "failed",
+      completedRequestCount: null,
+      failedRequestCount: null,
+      totalRequestCount: requestCount,
+      evidenceMessageCount,
+      memoryCount,
+    };
+  }
+
+  const provider = submission?.provider;
+  const providerBatchId = submission?.providerBatchId;
+  if (
+    typeof provider !== "string" ||
+    !memoryBatchProviders.includes(provider as MemoryBatchProvider) ||
+    typeof providerBatchId !== "string" ||
+    !providerBatchId
+  ) {
+    return {
+      stage: "preparing",
+      completedRequestCount: null,
+      failedRequestCount: null,
+      totalRequestCount: requestCount,
+      evidenceMessageCount,
+      memoryCount,
+    };
+  }
+
+  try {
+    const progress = await getMemoryBatchRequestProgress({
+      provider: provider as MemoryBatchProvider,
+      providerBatchId,
+    });
+    const stage =
+      progress.state === "validating"
+        ? "validating"
+        : progress.state === "in_progress"
+          ? "analyzing"
+          : progress.state === "finalizing" ||
+              progress.state === "completed" ||
+              progress.state === "cancelling"
+            ? "finalizing"
+            : "failed";
+
+    return {
+      stage,
+      completedRequestCount: progress.completedRequestCount,
+      failedRequestCount: progress.failedRequestCount,
+      totalRequestCount: progress.totalRequestCount ?? requestCount,
+      evidenceMessageCount,
+      memoryCount,
+    };
+  } catch {
+    return {
+      stage: "validating",
+      completedRequestCount: null,
+      failedRequestCount: null,
+      totalRequestCount: requestCount,
+      evidenceMessageCount,
+      memoryCount,
+    };
+  }
+}
+
+async function serializeWorkspace(
+  workspace: NonNullable<Awaited<ReturnType<typeof getMailboxWorkspace>>>,
+): Promise<MailboxWorkspace> {
   return {
     aiConfigured: isAiConfigured(),
     account: {
       ...workspace.account,
       lastSyncedAt: workspace.account.lastSyncedAt?.toISOString() ?? null,
     },
+    memoryProgress: await serializeMemoryProgress(workspace),
     memories: workspace.memories,
     threads: workspace.threads.map((thread) => ({
       ...thread,
@@ -274,7 +389,7 @@ async function handleMailbox(
     return;
   }
 
-  sendJson(response, requestId, 200, serializeWorkspace(workspace));
+  sendJson(response, requestId, 200, await serializeWorkspace(workspace));
 }
 
 async function handleThreadLabel(
@@ -353,8 +468,21 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
       return;
     }
 
-    if (request.method === "POST" && pathname === "/v1/webhooks/gemini") {
-      await handleGeminiWebhook(request, response, requestId);
+    if (request.method === "POST" && pathname === "/v1/webhooks/openai") {
+      await handleMemoryBatchWebhook(request, response, requestId, "openai");
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      pathname === "/v1/webhooks/azure-openai"
+    ) {
+      await handleMemoryBatchWebhook(
+        request,
+        response,
+        requestId,
+        "azure-openai",
+      );
       return;
     }
 

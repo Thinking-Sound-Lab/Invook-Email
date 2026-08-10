@@ -30,16 +30,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -116,22 +107,21 @@ function MemoryCard({
   onDelete: (memory: MemoryEntry) => Promise<void>;
 }) {
   return (
-    <Card size="sm" className="gap-3 bg-card/65">
-      <CardHeader>
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="size-1.5 shrink-0 rounded-full bg-foreground/65" />
-          <CardTitle className="min-w-0 text-[13px] leading-5 font-medium">
-            {memory.statement}
-          </CardTitle>
+    <article className="rounded-lg bg-card/65 px-4 py-3.5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-start gap-2.5">
+            <span className="mt-2 size-1.5 shrink-0 rounded-full bg-foreground/65" />
+            <p className="min-w-0 text-sm leading-6 font-medium">
+              {memory.statement}
+            </p>
+          </div>
+          <p className="mt-1 pl-4 text-xs leading-5 text-muted-foreground">
+            {memory.contactEmail ? `${memory.contactEmail} · ` : ""}
+            {evidenceLabel(memory)} · {sourceLabel(memory)}
+          </p>
         </div>
-        <CardDescription className="pl-3.5 text-[10px] leading-4">
-          {memory.contactEmail ? `${memory.contactEmail} · ` : ""}
-          {evidenceLabel(memory)}
-        </CardDescription>
-        <CardAction className="flex items-center gap-1">
-          <Badge variant="outline" className="h-5 px-1.5 text-[9px] font-medium">
-            {sourceLabel(memory)}
-          </Badge>
+        <div className="flex shrink-0 items-center gap-1">
           <Button
             type="button"
             variant="ghost"
@@ -168,9 +158,9 @@ function MemoryCard({
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
-        </CardAction>
-      </CardHeader>
-    </Card>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -190,22 +180,20 @@ function MemoryList({
   const definition = memoryDefinitions[type];
   if (memories.length === 0) {
     return (
-      <Card className="mt-5 border-dashed bg-transparent py-10 text-center ring-1 ring-border">
-        <CardContent>
-          <span className="mx-auto grid size-9 place-items-center rounded-lg bg-muted text-muted-foreground">
-            <HugeiconsIcon icon={definition.icon} size={17} />
-          </span>
-          <p className="mt-3 text-sm font-medium">No {definition.label.toLowerCase()} yet</p>
-          <p className="mx-auto mt-1 max-w-sm text-xs leading-5 text-muted-foreground">
-            Add one yourself. Inferred memories appear only after repeated behavior is found
-            in real sent email.
-          </p>
-          <Button type="button" variant="outline" className="mt-4" onClick={onAdd}>
-            <HugeiconsIcon icon={Add01Icon} size={14} />
-            Add {definition.singular}
-          </Button>
-        </CardContent>
-      </Card>
+      <div className="mt-5 rounded-xl bg-card/45 px-6 py-10 text-center">
+        <span className="mx-auto grid size-9 place-items-center rounded-lg bg-muted text-muted-foreground">
+          <HugeiconsIcon icon={definition.icon} size={17} />
+        </span>
+        <p className="mt-3 text-sm font-medium">No {definition.label.toLowerCase()} yet</p>
+        <p className="mx-auto mt-1.5 max-w-sm text-sm leading-6 text-muted-foreground">
+          Add one yourself. Inferred memories appear only after repeated behavior is found
+          in real sent email.
+        </p>
+        <Button type="button" className="mt-5" onClick={onAdd}>
+          <HugeiconsIcon icon={Add01Icon} size={14} />
+          Add {definition.singular}
+        </Button>
+      </div>
     );
   }
 
@@ -312,31 +300,38 @@ export function MemorySettings({
   }
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-5 py-7 sm:px-8">
+    <div className="mx-auto w-full max-w-3xl px-6 py-8 sm:px-10 sm:py-10">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="grid size-8 place-items-center rounded-lg border bg-secondary/45">
-              <HugeiconsIcon icon={Brain02Icon} size={16} />
-            </span>
+          <div className="flex items-center gap-3">
+            <HugeiconsIcon icon={Brain02Icon} size={20} className="text-primary" />
             <div>
-              <h2 className="text-lg font-semibold tracking-[-0.03em]">Memory</h2>
-              <p className="text-[10px] text-muted-foreground">Used whenever Invook drafts</p>
+              <h2 className="text-xl font-semibold tracking-[-0.03em]">Memory</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">Used whenever Invook drafts</p>
             </div>
           </div>
-          <p className="mt-4 max-w-xl text-xs leading-5 text-muted-foreground">
+          <p className="mt-5 max-w-xl text-sm leading-6 text-muted-foreground">
             Memory is the set of explicit and learned rules Invook applies to replies. You can
             add, correct, or delete every rule.
           </p>
           {!aiConfigured ? (
-            <p className="mt-2 max-w-xl text-[10px] leading-4 text-muted-foreground">
+            <p className="mt-2 max-w-xl text-xs leading-5 text-muted-foreground">
               Add an AI model to analyze sent mail. You can still add Memory yourself.
             </p>
           ) : null}
         </div>
-        <Badge variant="outline" className="shrink-0 text-[9px]">
+        <div className="flex shrink-0 items-center gap-2 pt-1 text-xs text-muted-foreground">
+          <span
+            className={`size-1.5 rounded-full ${
+              syncState === "failed"
+                ? "bg-destructive"
+                : syncState === "complete"
+                  ? "bg-success"
+                  : "bg-primary"
+            }`}
+          />
           {statusLabel}
-        </Badge>
+        </div>
       </div>
 
       <Tabs
@@ -344,16 +339,16 @@ export function MemorySettings({
         onValueChange={(value) => setActiveType(value as MemoryType)}
         className="mt-7"
       >
-        <div className="flex items-center justify-between gap-3 border-b pb-2">
-          <TabsList variant="line" className="h-8">
+        <div className="flex items-center justify-between gap-3">
+          <TabsList variant="line" className="h-9">
             {(Object.keys(memoryDefinitions) as MemoryType[]).map((type) => {
               const definition = memoryDefinitions[type];
               const count = memories.filter((memory) => memory.type === type).length;
               return (
-                <TabsTrigger key={type} value={type} className="gap-1.5 px-2.5">
+                <TabsTrigger key={type} value={type} className="gap-1.5 px-3 text-[13px]">
                   <HugeiconsIcon icon={definition.icon} size={13} />
                   {definition.label}
-                  <span className="text-[9px] tabular-nums text-muted-foreground">{count}</span>
+                  <span className="text-xs tabular-nums text-muted-foreground">{count}</span>
                 </TabsTrigger>
               );
             })}
@@ -366,7 +361,7 @@ export function MemorySettings({
 
         {(Object.keys(memoryDefinitions) as MemoryType[]).map((type) => (
           <TabsContent key={type} value={type}>
-            <p className="mt-4 text-[11px] leading-5 text-muted-foreground">
+            <p className="mt-5 text-sm leading-6 text-muted-foreground">
               {memoryDefinitions[type].description}
             </p>
             <MemoryList
@@ -401,7 +396,7 @@ export function MemorySettings({
 
             <div className="mt-5 space-y-4">
               {activeType === "contact" ? (
-                <label className="block space-y-1.5 text-xs font-medium">
+                <label className="block space-y-1.5 text-sm font-medium">
                   Email address
                   <Input
                     type="email"
@@ -412,7 +407,7 @@ export function MemorySettings({
                   />
                 </label>
               ) : null}
-              <label className="block space-y-1.5 text-xs font-medium">
+              <label className="block space-y-1.5 text-sm font-medium">
                 Memory
                 <Textarea
                   required

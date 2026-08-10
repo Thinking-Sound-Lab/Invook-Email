@@ -177,24 +177,22 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         importantThreads={importantThreads}
         remainingThreads={remainingThreads}
         query={currentSurface === "search" ? query : undefined}
-        aiConfigured={workspace.aiConfigured}
       />
     );
   }
 
   return (
     <main className="h-dvh overflow-hidden bg-background">
-      <div className="grid h-full grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[228px_minmax(0,1fr)] xl:grid-cols-[228px_minmax(500px,1fr)_352px]">
+      <div className="grid h-full grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
         <MailSidebar
           email={workspace.account.email}
           currentView={currentView}
           currentSurface={currentSurface}
+          memoryProgress={workspace.memoryProgress}
         />
         {centerPane}
         <AgentPanel
           openThreadSubject={selectedThread?.subject || undefined}
-          memories={workspace.memories}
-          memorySyncState={workspace.account.syncState.memory}
           aiConfigured={workspace.aiConfigured}
         />
       </div>

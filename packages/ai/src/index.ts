@@ -8,9 +8,9 @@ import {
 import { generateText, Output } from "ai";
 import { z } from "zod";
 
-import type { ProtectedMemory } from "./gemini-memory-batch";
+import type { ProtectedMemory } from "./memory-batch";
 
-export * from "./gemini-memory-batch";
+export * from "./memory-batch";
 
 const labelSchema = z.object({
   key: z.enum(invookLabelKeys),

@@ -16,13 +16,13 @@ import { Textarea } from "@/components/ui/textarea";
 
 function SurfaceHeader({ title }: { title: string }) {
   return (
-    <header className="flex h-14 shrink-0 items-center gap-2 border-b px-3">
+    <header className="flex h-15 shrink-0 items-center gap-2 border-b border-border/45 px-4">
       <Button asChild variant="ghost" size="icon-sm">
         <Link href="/mail" aria-label="Return to mail">
           <HugeiconsIcon icon={ArrowLeft02Icon} size={15} />
         </Link>
       </Button>
-      <h1 className="text-sm font-semibold tracking-[-0.02em]">{title}</h1>
+      <h1 className="text-[15px] font-semibold tracking-[-0.02em]">{title}</h1>
     </header>
   );
 }
@@ -32,11 +32,11 @@ export function SearchSurface() {
     <section className="flex min-h-0 flex-col bg-background">
       <SurfaceHeader title="Search" />
       <div className="mx-auto flex w-full max-w-xl flex-1 flex-col justify-center px-6 py-12">
-        <span className="grid size-10 place-items-center rounded-xl border bg-secondary/45">
-          <HugeiconsIcon icon={Search02Icon} size={18} />
+        <span className="grid size-10 place-items-center rounded-xl bg-secondary/55">
+          <HugeiconsIcon icon={Search02Icon} size={18} className="text-muted-foreground" />
         </span>
-        <h2 className="mt-4 text-lg font-semibold tracking-[-0.03em]">Search indexed Gmail</h2>
-        <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
+        <h2 className="mt-4 text-xl font-semibold tracking-[-0.03em]">Search indexed Gmail</h2>
+        <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
           Search uses the real subjects, participants, and message previews already stored by the Gmail worker.
         </p>
         <form action="/mail" method="get" className="mt-5 flex gap-2">
@@ -53,23 +53,23 @@ export function ComposeSurface() {
   return (
     <section className="flex min-h-0 flex-col bg-background">
       <SurfaceHeader title="New message" />
-      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-5 py-6 sm:px-8">
-        <div className="flex items-center gap-2 text-xs">
-          <span className="w-12 text-muted-foreground">To</span>
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col px-6 py-8 sm:px-10">
+        <div className="flex items-center gap-3 text-sm">
+          <span className="w-14 text-muted-foreground">To</span>
           <Input aria-label="Recipients" className="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0" />
         </div>
         <Separator />
-        <div className="flex items-center gap-2 text-xs">
-          <span className="w-12 text-muted-foreground">Subject</span>
+        <div className="flex items-center gap-3 text-sm">
+          <span className="w-14 text-muted-foreground">Subject</span>
           <Input aria-label="Subject" className="h-8 border-0 bg-transparent px-0 shadow-none focus-visible:ring-0" />
         </div>
         <Separator />
         <Textarea
           aria-label="Message body"
-          className="min-h-64 flex-1 resize-none border-0 bg-transparent px-0 py-5 text-sm leading-6 shadow-none focus-visible:ring-0"
+          className="min-h-64 flex-1 resize-none border-0 bg-transparent px-0 py-6 text-[15px] leading-7 shadow-none focus-visible:ring-0"
         />
         <div className="flex items-center justify-between border-t pt-3">
-          <p className="text-[10px] text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             Gmail draft creation and sending are not connected in this UI slice.
           </p>
           <Button disabled>
@@ -117,11 +117,11 @@ export function PendingSurface() {
     <section className="flex min-h-0 flex-col bg-background">
       <SurfaceHeader title={content.title} />
       <div className="mx-auto flex w-full max-w-lg flex-1 flex-col justify-center px-6 py-12 text-center">
-        <span className="mx-auto grid size-10 place-items-center rounded-xl border bg-secondary/45">
-          <HugeiconsIcon icon={content.icon} size={18} />
+        <span className="mx-auto grid size-10 place-items-center rounded-xl bg-secondary/55">
+          <HugeiconsIcon icon={content.icon} size={18} className="text-muted-foreground" />
         </span>
-        <h2 className="mt-4 text-base font-semibold">{content.title} is not connected yet</h2>
-        <p className="mt-2 text-xs leading-5 text-muted-foreground">{content.description}</p>
+        <h2 className="mt-4 text-lg font-semibold">{content.title} is not connected yet</h2>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">{content.description}</p>
       </div>
     </section>
   );
