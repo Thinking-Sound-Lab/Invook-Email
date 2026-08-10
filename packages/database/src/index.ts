@@ -15,5 +15,5 @@ export type {
   AccountSyncStage,
   AccountSyncState,
   ClaimedJob,
-  IndexedMessage,
+  MailboxMessage,
 } from "./types";

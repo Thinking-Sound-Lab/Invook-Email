@@ -14,10 +14,11 @@ import type {
 import {
   ComposeSurface,
   PendingSurface,
+  SearchResultsSurface,
   SearchSurface,
   SettingsSurface,
 } from "@/components/mail/workspace-surface";
-import { getMailboxWorkspace } from "@/lib/api";
+import { getMailboxWorkspace, searchMailbox } from "@/lib/api";
 
 type MailPageProps = {
   searchParams: Promise<{
@@ -106,18 +107,6 @@ function filterByView(threads: MailThreadSummary[], view: MailboxView): MailThre
   }
 }
 
-function filterByQuery(threads: MailThreadSummary[], query: string): MailThreadSummary[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) return threads;
-
-  return threads.filter((thread) =>
-    [thread.subject, thread.snippet, ...thread.participants]
-      .join("\n")
-      .toLocaleLowerCase()
-      .includes(normalizedQuery),
-  );
-}
-
 export default async function MailPage({ searchParams }: MailPageProps) {
   await connection();
   const params = await searchParams;
@@ -133,10 +122,9 @@ export default async function MailPage({ searchParams }: MailPageProps) {
 
   const mailboxThreads = workspace.threads as MailThreadSummary[];
   const selectedThread = workspace.selectedThread as SelectedThread | null;
-  const filteredThreads =
-    currentSurface === "search" && query
-      ? filterByQuery(mailboxThreads, query)
-      : filterByView(mailboxThreads, currentView);
+  const searchResults =
+    currentSurface === "search" && query ? await searchMailbox(query) : [];
+  const filteredThreads = filterByView(mailboxThreads, currentView);
   const importantThreads =
     currentView === "all" && !query
       ? filteredThreads.filter((thread) => hasInvookLabel(thread, "important"))
@@ -159,6 +147,8 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     centerPane = <ComposeSurface />;
   } else if (currentSurface === "search" && !query) {
     centerPane = <SearchSurface />;
+  } else if (currentSurface === "search" && query) {
+    centerPane = <SearchResultsSurface query={query} results={searchResults} />;
   } else if (currentSurface === "settings") {
     centerPane = (
       <SettingsSurface
@@ -192,8 +182,10 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         />
         {centerPane}
         <AgentPanel
+          openThreadId={selectedThread?.id}
           openThreadSubject={selectedThread?.subject || undefined}
           aiConfigured={workspace.aiConfigured}
+          indexingState={workspace.account.syncState.indexing}
         />
       </div>
     </main>

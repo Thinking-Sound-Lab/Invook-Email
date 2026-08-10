@@ -29,6 +29,22 @@ const searchVector = customType<{ data: string }>({
   },
 });
 
+const embeddingVector = customType<{ data: number[]; driverData: string }>({
+  dataType() {
+    return "vector";
+  },
+  toDriver(value) {
+    return `[${value.join(",")}]`;
+  },
+  fromDriver(value) {
+    return value
+      .slice(1, -1)
+      .split(",")
+      .filter(Boolean)
+      .map(Number);
+  },
+});
+
 export const profiles = pgTable("profiles", {
   id: uuid("id").primaryKey(),
   displayName: text("display_name"),
@@ -60,7 +76,7 @@ export const connectedAccounts = pgTable(
     syncState: jsonb("sync_state")
       .$type<AccountSyncState>()
       .notNull()
-      .default({ recent: "pending", memory: "pending", history: "pending" }),
+      .default({ mailSync: "pending", indexing: "pending", memory: "pending" }),
     lastSyncedAt: timestampWithTimezone("last_synced_at"),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
@@ -203,6 +219,11 @@ export const messages = pgTable(
     searchDocument: searchVector("search_document").generatedAlwaysAs(
       sql`to_tsvector('simple', coalesce(${sql.raw("subject")}, '') || ' ' || coalesce(${sql.raw("body_text")}, ''))`,
     ),
+    metadataSearchDocument: searchVector(
+      "metadata_search_document",
+    ).generatedAlwaysAs(
+      sql`to_tsvector('simple', coalesce(${sql.raw("sender")}->>'raw', '') || ' ' || coalesce(${sql.raw("sender")}->>'email', '') || ' ' || coalesce(${sql.raw("recipients")}::text, ''))`,
+    ),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -216,12 +237,111 @@ export const messages = pgTable(
     ),
     index("messages_thread_sent_idx").on(table.threadId, table.sentAt),
     index("messages_search_idx").using("gin", table.searchDocument),
+    index("messages_metadata_search_idx").using(
+      "gin",
+      table.metadataSearchDocument,
+    ),
     index("messages_memory_eligible_idx")
       .on(table.userId, table.sentAt)
       .where(
         sql`${table.direction} = 'outgoing' and ${table.isMemoryEligible} and not ${table.excludedFromMemory}`,
       ),
     check("messages_direction_check", sql`${table.direction} in ('incoming', 'outgoing')`),
+  ],
+);
+
+export const messageAttachments = pgTable(
+  "message_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    providerAttachmentId: text("provider_attachment_id"),
+    filename: text("filename").notNull(),
+    filenameSearchDocument: searchVector(
+      "filename_search_document",
+    ).generatedAlwaysAs(
+      sql`to_tsvector('simple', regexp_replace(${sql.raw("filename")}, '[_\\.-]+', ' ', 'g'))`,
+    ),
+    mimeType: text("mime_type"),
+    size: integer("size"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("message_attachments_message_idx").on(table.messageId),
+    index("message_attachments_account_filename_idx").on(
+      table.accountId,
+      table.filename,
+    ),
+    index("message_attachments_filename_search_idx").using(
+      "gin",
+      table.filenameSearchDocument,
+    ),
+    check(
+      "message_attachments_size_check",
+      sql`${table.size} is null or ${table.size} >= 0`,
+    ),
+  ],
+);
+
+export const messageEmbeddings = pgTable(
+  "message_embeddings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    modelId: text("model_id").notNull(),
+    dimensions: integer("dimensions").notNull(),
+    indexVersion: integer("index_version").notNull(),
+    contentHash: text("content_hash").notNull(),
+    status: text("status")
+      .$type<"pending" | "submitted" | "complete" | "failed">()
+      .notNull()
+      .default("pending"),
+    embedding: embeddingVector("embedding"),
+    providerBatchId: text("provider_batch_id"),
+    lastError: text("last_error"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("message_embeddings_message_model_version_idx").on(
+      table.messageId,
+      table.modelId,
+      table.indexVersion,
+    ),
+    index("message_embeddings_account_status_idx").on(
+      table.accountId,
+      table.modelId,
+      table.indexVersion,
+      table.status,
+    ),
+    check("message_embeddings_dimensions_check", sql`${table.dimensions} > 0`),
+    check(
+      "message_embeddings_status_check",
+      sql`${table.status} in ('pending', 'submitted', 'complete', 'failed')`,
+    ),
   ],
 );
 

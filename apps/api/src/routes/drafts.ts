@@ -1,12 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { AiConfigurationError, generateReplyDraft } from "@invook/ai";
-import {
-  getReplyDraftContext,
-  saveDraftEdit,
-  saveGeneratedDraft,
-} from "@invook/database";
-import { extractEmailAddress } from "@invook/gmail";
+import { AiConfigurationError } from "@invook/ai";
+import { saveDraftEdit } from "@invook/database";
 
 import { getCurrentSession } from "../auth/session";
 import { sendJson, sendProblem } from "../http/responses";
@@ -16,6 +11,7 @@ import {
   readJsonBody,
 } from "../http/request";
 import { serializeReplyDraft } from "../serializers";
+import { generateDraftForUser } from "../services/drafts";
 
 function requireMutationAccess(
   request: IncomingMessage,
@@ -32,14 +28,6 @@ function requireMutationAccess(
     return null;
   }
   return session;
-}
-
-function contactEmails(values: string[], accountEmail: string): Set<string> {
-  return new Set(
-    values
-      .map(extractEmailAddress)
-      .filter((email) => email.includes("@") && email !== accountEmail.toLowerCase()),
-  );
 }
 
 export async function handleGenerateDraft(
@@ -74,57 +62,14 @@ export async function handleGenerateDraft(
     return;
   }
 
-  const context = await getReplyDraftContext(session.userId, threadId);
-  if (!context) {
-    sendProblem(response, requestId, 404, "Email thread not found");
-    return;
-  }
-
-  const contacts = contactEmails(
-    [
-      ...context.participants,
-      ...context.messages.flatMap((message) => [
-        message.sender.raw,
-        ...message.recipients,
-      ]),
-    ],
-    context.accountEmail,
-  );
-  const applicableMemories = context.memories.filter(
-    (memory) =>
-      memory.type !== "contact" ||
-      Boolean(memory.contactEmail && contacts.has(memory.contactEmail.toLowerCase())),
-  );
-
   try {
-    const result = await generateReplyDraft({
-      subject: context.subject,
-      messages: context.messages.map((message) => ({
-        direction: message.direction,
-        sender: message.sender.raw || message.sender.email,
-        recipients: message.recipients,
-        bodyText: message.bodyText,
-        sentAt: message.sentAt.toISOString(),
-      })),
-      memories: applicableMemories,
+    const draft = await generateDraftForUser({
+      userId: session.userId,
+      threadId,
       instruction:
         typeof instruction === "string" && instruction.trim()
           ? instruction.trim()
           : undefined,
-    });
-    const applicableIds = new Set(applicableMemories.map((memory) => memory.id));
-    if (result.usedMemoryIds.some((id) => !applicableIds.has(id))) {
-      throw new Error("The draft model cited a memory outside its supplied context.");
-    }
-
-    const draft = await saveGeneratedDraft({
-      userId: session.userId,
-      accountId: context.accountId,
-      threadId: context.id,
-      text: result.text,
-      usedMemoryIds: result.usedMemoryIds,
-      modelId: result.modelId,
-      schedulingRelevant: result.schedulingRelevant,
     });
     if (!draft) {
       sendProblem(response, requestId, 404, "Email thread not found");

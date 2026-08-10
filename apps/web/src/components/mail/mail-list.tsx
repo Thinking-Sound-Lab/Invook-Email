@@ -144,8 +144,9 @@ export function MailList({
   remainingThreads: MailThreadSummary[];
   query?: string;
 }) {
-  const noIndexedMail = importantThreads.length === 0 && remainingThreads.length === 0;
-  const indexing = account.syncState.recent === "pending" || account.syncState.recent === "running";
+  const noMail = importantThreads.length === 0 && remainingThreads.length === 0;
+  const syncing =
+    account.syncState.mailSync === "pending" || account.syncState.mailSync === "running";
 
   return (
     <section className="flex min-h-0 flex-col bg-background" aria-label="Mailbox">
@@ -155,7 +156,7 @@ export function MailList({
         </h1>
         <div className="flex items-center gap-1">
           <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
-            <Link href="/mail?surface=search" aria-label="Search indexed mail">
+            <Link href="/mail?surface=search" aria-label="Search mail">
               <HugeiconsIcon icon={Search02Icon} size={16} />
             </Link>
           </Button>
@@ -196,15 +197,15 @@ export function MailList({
           />
         )}
 
-        {noIndexedMail ? (
+        {noMail ? (
           <div className="mx-auto max-w-sm px-6 py-20 text-center">
             <p className="text-sm font-medium">
-              {indexing ? "Scanning Gmail" : "No mail in this view"}
+              {syncing ? "Syncing Gmail" : "No mail in this view"}
             </p>
             <p className="mt-2 text-xs leading-5 text-muted-foreground">
-              {indexing
+              {syncing
                 ? "Messages will appear here as Invook stores them."
-                : "This view has no indexed Gmail threads."}
+                : "This view has no synchronized Gmail threads."}
             </p>
           </div>
         ) : null}

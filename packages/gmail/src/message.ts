@@ -11,6 +11,12 @@ export type ParsedGmailMessage = {
   bodyText: string;
   snippet: string;
   sentAt: string;
+  attachments: Array<{
+    providerAttachmentId: string | null;
+    filename: string;
+    mimeType: string | null;
+    size: number | null;
+  }>;
 };
 
 function decodeBase64Url(value: string): string {
@@ -43,6 +49,32 @@ function collectTextParts(part: GmailMessagePart | undefined): {
   }
 
   return result;
+}
+
+function collectAttachments(
+  part: GmailMessagePart | undefined,
+): ParsedGmailMessage["attachments"] {
+  if (!part) return [];
+
+  const filename = part.filename?.trim() ?? "";
+  const current = filename
+    ? [
+        {
+          providerAttachmentId: part.body?.attachmentId?.trim() || null,
+          filename,
+          mimeType: part.mimeType?.trim() || null,
+          size:
+            typeof part.body?.size === "number" && part.body.size >= 0
+              ? part.body.size
+              : null,
+        },
+      ]
+    : [];
+
+  return [
+    ...current,
+    ...(part.parts ?? []).flatMap((child) => collectAttachments(child)),
+  ];
 }
 
 function htmlToText(html: string): string {
@@ -109,6 +141,7 @@ export function parseGmailMessage(message: GmailMessage): ParsedGmailMessage {
     sentAt: Number.isFinite(timestamp)
       ? new Date(timestamp).toISOString()
       : new Date(getHeader(message.payload, "Date")).toISOString(),
+    attachments: collectAttachments(message.payload),
   };
 }
 

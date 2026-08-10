@@ -11,8 +11,8 @@ import {
 import {
   getMemoryBatchRequestProgress,
   isAiConfigured,
-  memoryBatchProviders,
-  type MemoryBatchProvider,
+  batchProviders,
+  type BatchProvider,
 } from "@invook/ai";
 import {
   checkDatabaseConnection,
@@ -57,13 +57,15 @@ import {
 } from "./http/request";
 import { sendJson, sendProblem, sendRedirect } from "./http/responses";
 import { handleGenerateDraft, handleUpdateDraft } from "./routes/drafts";
-import { handleMemoryBatchWebhook } from "./routes/memory-batch-webhook";
+import { handleMailAgent } from "./routes/agent";
+import { handleBatchWebhook } from "./routes/batch-webhook";
 import {
   handleCreateMemory,
   handleDeleteMemory,
   handleGetMemories,
   handleUpdateMemory,
 } from "./routes/memories";
+import { searchMailForUser } from "./services/search";
 
 type ConnectionErrorReason =
   | "authorization"
@@ -97,11 +99,11 @@ async function serializeMemoryProgress(
   const evidenceMessageCount = resultNumber(submission, "evidenceMessageCount");
 
   if (
-    workspace.account.syncState.recent === "pending" ||
-    workspace.account.syncState.recent === "running"
+    workspace.account.syncState.mailSync === "pending" ||
+    workspace.account.syncState.mailSync === "running"
   ) {
     return {
-      stage: "indexing",
+      stage: "waiting_for_mail",
       completedRequestCount: null,
       failedRequestCount: null,
       totalRequestCount: null,
@@ -136,7 +138,7 @@ async function serializeMemoryProgress(
   const providerBatchId = submission?.providerBatchId;
   if (
     typeof provider !== "string" ||
-    !memoryBatchProviders.includes(provider as MemoryBatchProvider) ||
+    !batchProviders.includes(provider as BatchProvider) ||
     typeof providerBatchId !== "string" ||
     !providerBatchId
   ) {
@@ -152,7 +154,7 @@ async function serializeMemoryProgress(
 
   try {
     const progress = await getMemoryBatchRequestProgress({
-      provider: provider as MemoryBatchProvider,
+      provider: provider as BatchProvider,
       providerBatchId,
     });
     const stage =
@@ -392,6 +394,36 @@ async function handleMailbox(
   sendJson(response, requestId, 200, await serializeWorkspace(workspace));
 }
 
+async function handleMailSearch(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  requestUrl: URL,
+) {
+  const session = getCurrentSession(request);
+  if (!session) {
+    sendProblem(response, requestId, 401, "Authentication required");
+    return;
+  }
+  const query = requestUrl.searchParams.get("q")?.trim() ?? "";
+  if (!query || query.length > 1_000) {
+    sendProblem(response, requestId, 400, "A valid mail search query is required");
+    return;
+  }
+
+  const results = await searchMailForUser({
+    userId: session.userId,
+    query,
+    onSemanticError: (error) => {
+      console.error("api: semantic mail search unavailable", {
+        requestId,
+        name: error instanceof Error ? error.name : "UnknownError",
+      });
+    },
+  });
+  sendJson(response, requestId, 200, { results });
+}
+
 async function handleThreadLabel(
   request: IncomingMessage,
   response: ServerResponse,
@@ -469,7 +501,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
     }
 
     if (request.method === "POST" && pathname === "/v1/webhooks/openai") {
-      await handleMemoryBatchWebhook(request, response, requestId, "openai");
+      await handleBatchWebhook(request, response, requestId, "openai");
       return;
     }
 
@@ -477,7 +509,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
       request.method === "POST" &&
       pathname === "/v1/webhooks/azure-openai"
     ) {
-      await handleMemoryBatchWebhook(
+      await handleBatchWebhook(
         request,
         response,
         requestId,
@@ -514,6 +546,16 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
 
     if (request.method === "GET" && pathname === "/v1/mailbox") {
       await handleMailbox(request, response, requestId, requestUrl);
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/v1/mail/search") {
+      await handleMailSearch(request, response, requestId, requestUrl);
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/v1/agent") {
+      await handleMailAgent(request, response, requestId);
       return;
     }
 

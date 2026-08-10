@@ -1,14 +1,14 @@
 export type AccountSyncStage = "pending" | "running" | "complete" | "failed";
 
 export type AccountSyncState = {
-  recent: AccountSyncStage;
+  mailSync: AccountSyncStage;
+  indexing: AccountSyncStage;
   memory: AccountSyncStage;
-  history: AccountSyncStage;
 };
 
 export type MemoryGenerationProgress = {
   stage:
-    | "indexing"
+    | "waiting_for_mail"
     | "preparing"
     | "validating"
     | "analyzing"
@@ -97,6 +97,35 @@ export type MailboxThreadMessage = {
   subject: string;
   bodyText: string;
   sentAt: string;
+  attachments: MailboxAttachment[];
+};
+
+export type MailboxAttachment = {
+  id: string;
+  messageId: string;
+  providerAttachmentId: string | null;
+  filename: string;
+  mimeType: string | null;
+  size: number | null;
+};
+
+export type MailSearchMatch =
+  | "full_text"
+  | "metadata"
+  | "attachment"
+  | "semantic";
+
+export type MailSearchResult = {
+  messageId: string;
+  threadId: string;
+  subject: string;
+  snippet: string;
+  bodyPreview: string;
+  sender: { raw: string; email: string };
+  sentAt: string;
+  attachments: MailboxAttachment[];
+  matches: MailSearchMatch[];
+  score: number;
 };
 
 export type MailboxSelectedThread = Omit<MailboxThreadSummary, "snippet"> & {

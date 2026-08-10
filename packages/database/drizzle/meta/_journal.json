@@ -29,6 +29,27 @@
       "when": 1786286246371,
       "tag": "0003_powerful_roland_deschain",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786376178222,
+      "tag": "0004_absent_the_leader",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786377828151,
+      "tag": "0005_overrated_bushwacker",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786387561257,
+      "tag": "0006_reconcile_mail_sync_state",
+      "breakpoints": true
     }
   ]
 }

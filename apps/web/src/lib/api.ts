@@ -1,4 +1,8 @@
-import type { MailboxWorkspace, SessionState } from "@invook/contracts";
+import type {
+  MailboxWorkspace,
+  MailSearchResult,
+  SessionState,
+} from "@invook/contracts";
 import { headers } from "next/headers";
 
 function getApiOrigin(): string {
@@ -36,4 +40,15 @@ export async function getMailboxWorkspace(
     throw new Error(`The mailbox API returned ${response.status}.`);
   }
   return (await response.json()) as MailboxWorkspace;
+}
+
+export async function searchMailbox(query: string): Promise<MailSearchResult[]> {
+  const search = new URLSearchParams({ q: query });
+  const response = await apiRequest(`/v1/mail/search?${search.toString()}`);
+  if (response.status === 401) return [];
+  if (!response.ok) {
+    throw new Error(`The mail search API returned ${response.status}.`);
+  }
+  const body = (await response.json()) as { results: MailSearchResult[] };
+  return body.results;
 }

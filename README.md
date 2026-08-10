@@ -1,14 +1,14 @@
 # Invook
 
-Invook is an open-source, AI-native Gmail client. It indexes the connected mailbox, applies an opinionated set of labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
+Invook is an open-source, AI-native Gmail client. It synchronizes and indexes the connected mailbox, applies an opinionated set of labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
 
 The application starts with one Google sign-in action. Until a real Gmail account is connected, it shows an honest setup or empty state and never manufactures mailbox data.
 
 ## What works today
 
 1. Direct Google OAuth authenticates the user and grants Gmail access.
-2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and creates an indexing job.
-3. The worker indexes the real mailbox by following every Gmail result page.
+2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and creates a Gmail synchronization job.
+3. The worker synchronizes the real mailbox by following every Gmail result page. Mail synchronization, search indexing, and writing-memory extraction have independent state.
 4. A configured model applies Invook's predefined Important, Travel, Pitch, and Newsletter labels. A user's label changes take precedence over later model runs.
 5. The worker sends full eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
    - **Preferences:** repeated behavior that applies across contacts and should shape every draft.
@@ -17,10 +17,13 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 6. Settings → Memory lets the user add, edit, and delete every memory. Deleted text is removed; only a fingerprint remains to stop the same automatic inference from being recreated.
 7. A reply draft receives the current thread plus applicable global, contact, and scheduling memories. It never receives unrelated contact memory.
 8. Saving an edited AI draft records feedback. A new memory is proposed only when the same correction appears across at least three real drafts.
+9. Historical subject/body embeddings use OpenAI Batch. Later stored messages use the regular OpenAI embeddings API with the same explicitly configured model, dimensions, content hash, and index version.
+10. Search combines PostgreSQL full text, sender/recipient metadata, attachment filenames, and available vector similarity. Attachment contents are not downloaded or embedded.
+11. The right sidebar runs a tool-using agent that can search mail, inspect a thread, list attachment metadata, and generate a saved reply draft with cited thread and message IDs.
 
-Memory v3 does not require embeddings. This is deliberate: native Batch analysis discovers repeated behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting. PostgreSQL full-text search remains available for exact mailbox search.
+Memory v3 does not depend on indexing or embeddings. Native Batch analysis discovers repeated writing behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting.
 
-The right panel currently communicates the agent's Find, Write, and Automate responsibilities. General conversational actions and sending mail are not claimed as complete yet.
+The right panel supports mailbox finding and reply drafting. Sending mail and autonomous inbox automations are not claimed as complete.
 
 ## Repository structure
 
@@ -28,9 +31,9 @@ The right panel currently communicates the agent's Find, Write, and Automate res
 apps/
   web/                 Next.js App Router UI
   api/                 Native Node.js HTTP API, OAuth, sessions, and product endpoints
-  worker/              Gmail indexing, labeling, Memory extraction, and feedback jobs
+  worker/              Gmail sync, search indexing, labeling, Memory, and feedback jobs
 packages/
-  ai/                  OpenAI and Azure OpenAI Batch Memory analysis plus labels, feedback, and drafts
+  ai/                  Mail agent, OpenAI embeddings, Batch Memory, labels, feedback, and drafts
   contracts/           Shared JSON API types
   database/            Drizzle schema, migrations, repositories, and credential encryption
   gmail/               Gmail API client, OAuth scopes, and MIME parsing
@@ -65,7 +68,9 @@ Put the generated value in `TOKEN_ENCRYPTION_KEY`. Invook uses the official Goog
 
 Labeling, feedback analysis, and drafting use an OpenAI-compatible HTTP endpoint. Set `AI_BASE_URL` and `AI_MODEL`; `AI_API_KEY` is optional for a local model. When the worker runs in Docker and a local model runs on the host, use a host-reachable URL such as `http://host.docker.internal:11434/v1`.
 
-Initial Preferences, Contacts, and Scheduling analysis uses one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Invook creates one global request and one request per qualifying contact, then splits a scope only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure. There is no mandatory second analysis batch and no embedding step.
+Initial Preferences, Contacts, and Scheduling analysis uses one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Invook creates one global request and one request per qualifying contact, then splits a scope only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure. This Memory domain is separate from search indexing.
+
+Search embeddings currently use OpenAI. Set `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL`, and `OPENAI_EMBEDDING_DIMENSIONS`; historical mail additionally requires `OPENAI_WEBHOOK_SECRET`. Registering the OpenAI Batch events below serves both Memory batches and embedding batches. The database uses pgvector, stores one vector per message subject/body, and keeps attachment metadata outside the embedding input.
 
 For OpenAI, set `MEMORY_BATCH_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_WEBHOOK_SECRET`. Invook uses the pinned `gpt-5.4-nano-2026-03-17` model. Register these events in the [OpenAI project webhook settings](https://platform.openai.com/settings/project/webhooks):
 
@@ -113,7 +118,7 @@ pnpm worker
 
 ## Database and migrations
 
-Drizzle ORM accesses PostgreSQL through the server-only `DATABASE_URL`. The same application code can use local Docker PostgreSQL or a compatible hosted PostgreSQL database.
+Drizzle ORM accesses PostgreSQL through the server-only `DATABASE_URL`. The same application code can use the local pgvector Docker image or a compatible hosted PostgreSQL database where the `vector` extension can be enabled.
 
 After changing `packages/database/src/schema.ts`:
 

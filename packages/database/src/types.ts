@@ -1,9 +1,9 @@
 export type AccountSyncStage = "pending" | "running" | "complete" | "failed";
 
 export type AccountSyncState = {
-  recent: AccountSyncStage;
+  mailSync: AccountSyncStage;
+  indexing: AccountSyncStage;
   memory: AccountSyncStage;
-  history: AccountSyncStage;
 };
 
 export type ClaimedJob = {
@@ -16,7 +16,7 @@ export type ClaimedJob = {
   maxAttempts: number;
 };
 
-export type IndexedMessage = {
+export type MailboxMessage = {
   userId: string;
   accountId: string;
   providerThreadId: string;
@@ -31,4 +31,10 @@ export type IndexedMessage = {
   recipients: string[];
   bodyText: string;
   isMemoryEligible: boolean;
+  attachments: Array<{
+    providerAttachmentId: string | null;
+    filename: string;
+    mimeType: string | null;
+    size: number | null;
+  }>;
 };

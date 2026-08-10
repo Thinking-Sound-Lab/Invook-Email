@@ -1,20 +1,30 @@
 import {
   AiConfigurationError,
+  buildEmbeddingInput,
   classifyThreads,
+  deleteEmbeddingBatchFiles,
   deleteMemoryBatchFiles,
+  embedMailboxTexts,
+  EmbeddingConfigurationError,
   extractFeedbackMemories,
+  getEmbeddingConfiguration,
   isAnyMemoryBatchProviderConfigured,
   isAiConfigured,
+  isEmbeddingBatchConfigured,
+  isEmbeddingConfigured,
   isMemoryBatchConfigured,
   isMemoryBatchProviderConfigured,
-  memoryBatchProviders,
+  batchProviders,
   MemoryBatchConfigurationError,
+  readEmbeddingBatch,
   readMemoryBatch,
+  submitEmbeddingBatch,
   submitMemoryBatch,
+  type EmbeddingBatchManifestEntry,
   type FeedbackMemoryCandidate,
   type MemoryAnalysisThread,
   type MemoryBatchManifestEntry,
-  type MemoryBatchProvider,
+  type BatchProvider,
   type MessageMemoryCandidate,
 } from "@invook/ai";
 import {
@@ -25,26 +35,34 @@ import {
   deferJobWithoutAttempt,
   DRAFT_FEEDBACK_VERSION,
   encryptGoogleCredential,
-  enqueueAnalysisJobsForIndexedAccounts,
+  enqueueEmbeddingBackfillContinuation,
+  enqueuePostSyncJobsForAccounts,
   enqueueMemoryBatchRetry,
   failAnalysisJob,
   failJobAndAccount,
+  getEmbeddingCandidates,
   getDraftFeedbackSamples,
   getMemoryAnalysisThreads,
-  getMemoryBatchSubmission,
+  getBatchSubmission,
   getThreadsForClassification,
   getUserAuthoredMemories,
   getWorkerAccount,
   listenForJobNotifications,
+  MAIL_INDEX_VERSION,
   MAIL_CLASSIFICATION_VERSION,
   MEMORY_SCHEMA_VERSION,
   markDraftFeedbackAnalyzed,
+  markEmbeddingBatchSubmitted,
+  markMessageEmbeddingsFailed,
+  countIncompleteEmbeddings,
+  saveMessageEmbeddings,
   saveExtractedMemories,
   saveThreadClassifications,
   setAccountSyncState,
+  setIndexingSyncStage,
   setMemorySyncStage,
   updateStoredCredential,
-  upsertIndexedMessage,
+  upsertMailboxMessage,
   type ClaimedJob,
   type GoogleCredential,
   type MemoryType,
@@ -152,7 +170,7 @@ async function storeMessage(options: {
       ? "outgoing"
       : "incoming";
 
-  await upsertIndexedMessage({
+  await upsertMailboxMessage({
     userId,
     accountId,
     providerThreadId: message.providerThreadId,
@@ -167,6 +185,7 @@ async function storeMessage(options: {
     recipients: [...message.to, ...message.cc],
     bodyText: message.bodyText,
     isMemoryEligible: direction === "outgoing" && isMemoryEligible(message),
+    attachments: message.attachments,
   });
 }
 
@@ -214,9 +233,9 @@ async function runInitialSync(job: ClaimedJob) {
   const credential = await refreshCredentialIfRequired(job.accountId, storedCredential);
 
   await setAccountSyncState(job.accountId, {
-    recent: "running",
+    mailSync: "running",
+    indexing: "pending",
     memory: "pending",
-    history: "running",
   });
 
   await syncMailbox({
@@ -268,10 +287,297 @@ async function runMailClassification(job: ClaimedJob) {
   return { classifiedCount, analysisVersion: MAIL_CLASSIFICATION_VERSION };
 }
 
-type IndexedMemoryThread = Awaited<ReturnType<typeof getMemoryAnalysisThreads>>[number];
+type EmbeddingSubmissionResult = {
+  provider: "openai";
+  providerBatchId: string;
+  inputFileId: string;
+  modelId: string;
+  dimensions: number;
+  requestCount: number;
+  manifest: EmbeddingBatchManifestEntry[];
+  indexVersion: number;
+  hasMore: boolean;
+};
+
+function parseEmbeddingManifest(value: unknown): EmbeddingBatchManifestEntry[] {
+  if (!Array.isArray(value)) {
+    throw new Error("The embedding batch manifest is missing.");
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error("The embedding batch manifest is invalid.");
+    }
+    const key = "key" in entry ? entry.key : undefined;
+    const messageId = "messageId" in entry ? entry.messageId : undefined;
+    const contentHash = "contentHash" in entry ? entry.contentHash : undefined;
+    if (
+      typeof key !== "string" ||
+      typeof messageId !== "string" ||
+      typeof contentHash !== "string" ||
+      key !== messageId
+    ) {
+      throw new Error("The embedding batch manifest is invalid.");
+    }
+    return { key, messageId, contentHash };
+  });
+}
+
+function parseEmbeddingSubmissionResult(value: unknown): EmbeddingSubmissionResult {
+  if (!value || typeof value !== "object") {
+    throw new Error("The embedding batch submission result is missing.");
+  }
+  const result = value as Record<string, unknown>;
+  const manifest = parseEmbeddingManifest(result.manifest);
+  const requestCount = requiredInteger(
+    result.requestCount,
+    "Embedding batch request count",
+  );
+  if (
+    manifest.length !== requestCount ||
+    new Set(manifest.map((entry) => entry.key)).size !== manifest.length
+  ) {
+    throw new Error("The embedding batch manifest does not match its request count.");
+  }
+  if (result.provider !== "openai" || typeof result.hasMore !== "boolean") {
+    throw new Error("The embedding batch provider details are invalid.");
+  }
+  return {
+    provider: "openai",
+    providerBatchId: requiredString(result.providerBatchId, "provider batch ID"),
+    inputFileId: requiredString(result.inputFileId, "provider input file"),
+    modelId: requiredString(result.modelId, "embedding model"),
+    dimensions: requiredInteger(result.dimensions, "embedding dimensions"),
+    requestCount,
+    manifest,
+    indexVersion: requiredInteger(result.indexVersion, "embedding index version"),
+    hasMore: result.hasMore,
+  };
+}
+
+async function runEmbeddingBackfill(job: ClaimedJob) {
+  if (!job.accountId || !job.userId) {
+    throw new Error("The embedding backfill has no connected account.");
+  }
+  const config = getEmbeddingConfiguration();
+  await setIndexingSyncStage(job.accountId, "running");
+  const candidates = await getEmbeddingCandidates({
+    accountId: job.accountId,
+    modelId: config.modelId,
+    indexVersion: MAIL_INDEX_VERSION,
+    limit: 50_000,
+    includeFailed: job.payload.includeFailed !== false,
+  });
+  if (candidates.length === 0) {
+    const incompleteCount = await countIncompleteEmbeddings({
+      accountId: job.accountId,
+      modelId: config.modelId,
+      indexVersion: MAIL_INDEX_VERSION,
+    });
+    await setIndexingSyncStage(
+      job.accountId,
+      incompleteCount === 0 ? "complete" : "failed",
+    );
+    return { status: incompleteCount === 0 ? "complete" : "failed", incompleteCount };
+  }
+
+  const submission = await submitEmbeddingBatch({
+    submissionId: job.id,
+    messages: candidates,
+  });
+  if (!submission) {
+    await setIndexingSyncStage(job.accountId, "complete");
+    return { status: "complete", requestCount: 0 };
+  }
+  const candidatesById = new Map(
+    candidates.map((candidate) => [candidate.messageId, candidate]),
+  );
+  await markEmbeddingBatchSubmitted({
+    accountId: job.accountId,
+    modelId: submission.modelId,
+    dimensions: submission.dimensions,
+    indexVersion: MAIL_INDEX_VERSION,
+    providerBatchId: submission.providerBatchId,
+    messages: submission.manifest.map((entry) => {
+      const candidate = candidatesById.get(entry.messageId);
+      if (!candidate) throw new Error("An embedding batch candidate is missing.");
+      return {
+        messageId: entry.messageId,
+        userId: candidate.userId,
+        contentHash: entry.contentHash,
+      };
+    }),
+  });
+  return {
+    status: "submitted",
+    batchPurpose: "embedding",
+    ...submission,
+    indexVersion: MAIL_INDEX_VERSION,
+    hasMore: submission.requestCount < candidates.length,
+  };
+}
+
+async function runIncrementalEmbedding(job: ClaimedJob) {
+  if (!job.accountId) {
+    throw new Error("The incremental embedding job has no connected account.");
+  }
+  const messageId = requiredString(job.payload.messageId, "message ID");
+  const config = getEmbeddingConfiguration();
+  const candidates = await getEmbeddingCandidates({
+    accountId: job.accountId,
+    modelId: config.modelId,
+    indexVersion: MAIL_INDEX_VERSION,
+    messageIds: [messageId],
+  });
+  if (candidates.length === 0) return { status: "current", messageId };
+
+  const result = await embedMailboxTexts(
+    candidates.map((candidate) => buildEmbeddingInput(candidate)),
+  );
+  const savedCount = await saveMessageEmbeddings({
+    accountId: job.accountId,
+    modelId: result.modelId,
+    dimensions: result.dimensions,
+    indexVersion: MAIL_INDEX_VERSION,
+    values: candidates.map((candidate, index) => ({
+      messageId: candidate.messageId,
+      userId: candidate.userId,
+      contentHash: candidate.contentHash,
+      embedding: result.embeddings[index]!,
+    })),
+  });
+  const incompleteCount = await countIncompleteEmbeddings({
+    accountId: job.accountId,
+    modelId: result.modelId,
+    indexVersion: MAIL_INDEX_VERSION,
+  });
+  if (incompleteCount === 0) await setIndexingSyncStage(job.accountId, "complete");
+  return { status: "complete", messageId, savedCount, incompleteCount };
+}
+
+async function runEmbeddingBatchEvent(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The embedding batch event has no account.");
+  const submissionJobId = requiredString(
+    job.payload.submissionJobId,
+    "embedding submission job ID",
+  );
+  const submission = await getBatchSubmission(submissionJobId);
+  if (
+    !submission?.accountId ||
+    !submission.userId ||
+    submission.accountId !== job.accountId ||
+    submission.jobType !== "embedding.backfill"
+  ) {
+    throw new Error("The embedding batch submission could not be matched.");
+  }
+  const details = parseEmbeddingSubmissionResult(submission.result);
+  if (
+    job.payload.provider !== details.provider ||
+    job.payload.providerBatchId !== details.providerBatchId
+  ) {
+    throw new Error("The provider event does not match its embedding submission.");
+  }
+  const batch = await readEmbeddingBatch({
+    providerBatchId: details.providerBatchId,
+    expectedKeys: details.manifest.map((entry) => entry.key),
+    expectedDimensions: details.dimensions,
+  });
+  const terminalState = ["completed", "failed", "cancelled", "expired"].includes(
+    batch.state,
+  );
+  if (!terminalState) {
+    throw new Error(
+      `OpenAI emitted a terminal event while the embedding batch is ${batch.state}.`,
+    );
+  }
+
+  const manifestByKey = new Map(details.manifest.map((entry) => [entry.key, entry]));
+  const savedCount = await saveMessageEmbeddings({
+    accountId: submission.accountId,
+    modelId: details.modelId,
+    dimensions: details.dimensions,
+    indexVersion: details.indexVersion,
+    values: [...batch.embeddingsByKey].flatMap(([key, embedding]) => {
+      const entry = manifestByKey.get(key);
+      return entry
+        ? [{
+            messageId: entry.messageId,
+            userId: submission.userId!,
+            contentHash: entry.contentHash,
+            embedding,
+          }]
+        : [];
+    }),
+  });
+  const failedEntries = batch.failedKeys.flatMap((key) => {
+    const entry = manifestByKey.get(key);
+    return entry ? [{ messageId: entry.messageId, contentHash: entry.contentHash }] : [];
+  });
+  if (failedEntries.length > 0) {
+    await markMessageEmbeddingsFailed({
+      modelId: details.modelId,
+      indexVersion: details.indexVersion,
+      values: failedEntries,
+      error: batch.providerError ?? `OpenAI embedding batch ended as ${batch.state}.`,
+    });
+  }
+
+  let continuationJobId: string | null = null;
+  if (details.hasMore) {
+    continuationJobId = await enqueueEmbeddingBackfillContinuation({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      modelId: details.modelId,
+      indexVersion: details.indexVersion,
+      predecessorBatchId: details.providerBatchId,
+    });
+  }
+  const incompleteCount = await countIncompleteEmbeddings({
+    accountId: submission.accountId,
+    modelId: details.modelId,
+    indexVersion: details.indexVersion,
+  });
+  await setIndexingSyncStage(
+    submission.accountId,
+    continuationJobId
+      ? "running"
+      : failedEntries.length > 0
+        ? "failed"
+        : incompleteCount > 0
+          ? "running"
+          : "complete",
+  );
+
+  const cleanupFailures = await deleteEmbeddingBatchFiles({
+    inputFileId: details.inputFileId,
+    outputFileId: batch.outputFileId,
+    errorFileId: batch.errorFileId,
+  });
+  if (cleanupFailures.length > 0) {
+    console.error("worker: embedding batch files could not be deleted", {
+      submissionJobId: submission.id,
+      fileCount: cleanupFailures.length,
+    });
+  }
+  return {
+    status:
+      failedEntries.length > 0
+        ? "failed"
+        : continuationJobId || incompleteCount > 0
+          ? "continuing"
+          : "complete",
+    providerState: batch.state,
+    providerError: batch.providerError,
+    savedCount,
+    failedRequestCount: failedEntries.length,
+    incompleteCount,
+    continuationJobId,
+  };
+}
+
+type StoredMemoryThread = Awaited<ReturnType<typeof getMemoryAnalysisThreads>>[number];
 
 type MemorySubmissionResult = {
-  provider: MemoryBatchProvider;
+  provider: BatchProvider;
   providerBatchId: string;
   inputFileId: string;
   modelId: string;
@@ -283,7 +589,7 @@ type MemorySubmissionResult = {
 };
 
 function toMemoryAnalysisThreads(
-  threads: IndexedMemoryThread[],
+  threads: StoredMemoryThread[],
   ownerEmail: string,
 ): MemoryAnalysisThread[] {
   return threads.map((thread) => ({
@@ -349,10 +655,10 @@ function parseSubmissionResult(value: unknown): MemorySubmissionResult | null {
     throw new Error("The Memory Batch submission result is missing.");
   }
   const result = value as Record<string, unknown>;
-  if (!memoryBatchProviders.includes(result.provider as MemoryBatchProvider)) {
+  if (!batchProviders.includes(result.provider as BatchProvider)) {
     return null;
   }
-  const provider = result.provider as MemoryBatchProvider;
+  const provider = result.provider as BatchProvider;
   if (typeof result.replaceExisting !== "boolean") {
     throw new Error("The Memory Batch replacement state is missing.");
   }
@@ -541,7 +847,7 @@ async function runMemoryBatchRetry(job: ClaimedJob) {
     job.payload.parentSubmissionJobId,
     "Parent Memory submission job ID",
   );
-  const parentSubmission = await getMemoryBatchSubmission(parentSubmissionJobId);
+  const parentSubmission = await getBatchSubmission(parentSubmissionJobId);
   if (parentSubmission?.accountId !== job.accountId) {
     throw new Error("The parent Memory submission could not be matched to this account.");
   }
@@ -601,7 +907,7 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
     job.payload.submissionJobId,
     "Memory submission job ID",
   );
-  const submission = await getMemoryBatchSubmission(submissionJobId);
+  const submission = await getBatchSubmission(submissionJobId);
   if (!submission?.accountId || !submission.userId || submission.accountId !== job.accountId) {
     throw new Error("The Memory Batch submission could not be matched to this account.");
   }
@@ -845,6 +1151,10 @@ async function markJobFailed(job: ClaimedJob, error: unknown) {
 async function processNextJob() {
   const jobTypes = ["gmail.initial_sync"];
   if (isAiConfigured()) jobTypes.push("mail.classify", "memory.feedback");
+  if (isEmbeddingConfigured()) jobTypes.push("embedding.incremental");
+  if (isEmbeddingBatchConfigured()) {
+    jobTypes.push("embedding.backfill", "embedding.batch.event");
+  }
   if (isMemoryBatchConfigured()) jobTypes.push("memory.extract");
   if (isAnyMemoryBatchProviderConfigured()) {
     jobTypes.push("memory.batch.retry", "memory.batch.event");
@@ -860,6 +1170,15 @@ async function processNextJob() {
         break;
       case "mail.classify":
         result = await runMailClassification(job);
+        break;
+      case "embedding.backfill":
+        result = await runEmbeddingBackfill(job);
+        break;
+      case "embedding.incremental":
+        result = await runIncrementalEmbedding(job);
+        break;
+      case "embedding.batch.event":
+        result = await runEmbeddingBatchEvent(job);
         break;
       case "memory.extract":
         result = await runMemoryExtraction(job);
@@ -880,10 +1199,14 @@ async function processNextJob() {
   } catch (error) {
     if (
       error instanceof AiConfigurationError ||
+      error instanceof EmbeddingConfigurationError ||
       error instanceof MemoryBatchConfigurationError
     ) {
       if (job.jobType === "memory.extract" && job.accountId) {
         await setMemorySyncStage(job.accountId, "pending");
+      }
+      if (job.jobType.startsWith("embedding.") && job.accountId) {
+        await setIndexingSyncStage(job.accountId, "pending");
       }
       await deferJobWithoutAttempt({
         jobId: job.id,
@@ -911,7 +1234,11 @@ async function run() {
   process.once("SIGTERM", requestStop);
 
   try {
-    await enqueueAnalysisJobsForIndexedAccounts();
+    await enqueuePostSyncJobsForAccounts(
+      isEmbeddingConfigured()
+        ? { ...getEmbeddingConfiguration(), indexVersion: MAIL_INDEX_VERSION }
+        : null,
+    );
     signal.notify();
 
     while (!stopRequested) {
