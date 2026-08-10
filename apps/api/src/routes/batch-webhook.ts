@@ -1,14 +1,17 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type {
+  FastifyPluginAsync,
+  FastifyReply,
+  FastifyRequest,
+} from "fastify";
 
 import {
-  getMemoryBatchWebhookSecret,
+  getBatchWebhookSecret,
   type MemoryBatchProvider,
 } from "@invook/ai";
-import { enqueueMemoryBatchEvent } from "@invook/database";
+import { enqueueBatchEvent } from "@invook/database";
 import { Webhook, WebhookVerificationError } from "standardwebhooks";
 
-import { readRawBody } from "../http/request";
-import { sendJson, sendProblem } from "../http/responses";
+import { sendJson, sendProblem } from "../responses";
 
 const supportedEvents = new Set([
   "batch.completed",
@@ -17,23 +20,22 @@ const supportedEvents = new Set([
   "batch.expired",
 ]);
 
-function headerValue(request: IncomingMessage, name: string): string | null {
+function headerValue(request: FastifyRequest, name: string): string | null {
   const value = request.headers[name];
   return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
-export async function handleMemoryBatchWebhook(
-  request: IncomingMessage,
-  response: ServerResponse,
-  requestId: string,
+async function handleBatchWebhook(
+  request: FastifyRequest<{ Body: Buffer | undefined }>,
+  reply: FastifyReply,
   provider: MemoryBatchProvider,
 ) {
   const providerName = provider === "openai" ? "OpenAI" : "Azure OpenAI";
-  const signingSecret = getMemoryBatchWebhookSecret(provider);
+  const signingSecret = getBatchWebhookSecret(provider);
   if (!signingSecret) {
-    sendProblem(
-      response,
-      requestId,
+    await sendProblem(
+      request,
+      reply,
       503,
       `${providerName} webhook is not configured`,
     );
@@ -44,9 +46,9 @@ export async function handleMemoryBatchWebhook(
   const webhookTimestamp = headerValue(request, "webhook-timestamp");
   const webhookSignature = headerValue(request, "webhook-signature");
   if (!webhookId || !webhookTimestamp || !webhookSignature) {
-    sendProblem(
-      response,
-      requestId,
+    await sendProblem(
+      request,
+      reply,
       400,
       `${providerName} webhook signature is missing`,
     );
@@ -55,17 +57,16 @@ export async function handleMemoryBatchWebhook(
 
   let event: unknown;
   try {
-    const body = await readRawBody(request);
-    event = new Webhook(signingSecret).verify(body, {
+    event = new Webhook(signingSecret).verify(request.body ?? Buffer.alloc(0), {
       "webhook-id": webhookId,
       "webhook-timestamp": webhookTimestamp,
       "webhook-signature": webhookSignature,
     });
   } catch (error) {
     if (error instanceof WebhookVerificationError) {
-      sendProblem(
-        response,
-        requestId,
+      await sendProblem(
+        request,
+        reply,
         400,
         `${providerName} webhook signature is invalid`,
       );
@@ -75,9 +76,9 @@ export async function handleMemoryBatchWebhook(
   }
 
   if (!event || typeof event !== "object") {
-    sendProblem(
-      response,
-      requestId,
+    await sendProblem(
+      request,
+      reply,
       400,
       `${providerName} webhook payload is invalid`,
     );
@@ -94,29 +95,45 @@ export async function handleMemoryBatchWebhook(
     typeof data.id !== "string" ||
     !data.id.trim()
   ) {
-    sendProblem(
-      response,
-      requestId,
+    await sendProblem(
+      request,
+      reply,
       400,
       `${providerName} webhook event is unsupported`,
     );
     return;
   }
 
-  const queued = await enqueueMemoryBatchEvent({
+  const queued = await enqueueBatchEvent({
     provider,
     webhookId,
     eventType,
     providerBatchId: data.id,
   });
   if (!queued) {
-    sendProblem(
-      response,
-      requestId,
+    await sendProblem(
+      request,
+      reply,
       409,
       `${providerName} batch submission is not ready`,
     );
     return;
   }
-  sendJson(response, requestId, 202, { received: true });
+  await sendJson(reply, 202, { received: true });
 }
+
+export const registerBatchWebhookRoutes: FastifyPluginAsync = async (api) => {
+  api.removeAllContentTypeParsers();
+  api.addContentTypeParser(
+    "*",
+    { parseAs: "buffer" },
+    async (_request: FastifyRequest, body: Buffer) => body,
+  );
+
+  api.post<{ Body: Buffer | undefined }>("/openai", async (request, reply) => {
+    await handleBatchWebhook(request, reply, "openai");
+  });
+  api.post<{ Body: Buffer | undefined }>("/azure-openai", async (request, reply) => {
+    await handleBatchWebhook(request, reply, "azure-openai");
+  });
+};

@@ -1,7 +1,7 @@
 # Invook product requirements
 
 **Status:** Memory-first implementation  
-**Updated:** August 9, 2026
+**Updated:** August 10, 2026
 
 ## Product statement
 
@@ -26,7 +26,7 @@ Invook never ships dummy mailbox, contact, memory, label, or draft data. If Gmai
 
 ### Opinionated defaults, user authority
 
-Invook provides predefined Important, Travel, Pitch, and Newsletter labels. Users may change a label, and their decision wins over later model runs.
+Invook provides built-in Important, Travel, Pitch, and Newsletter labels. A user may add an account-owned label with an explicit description, which becomes the complete classification rule for a full indexed-mailbox scan. A user's thread-level label decision wins over later model runs.
 
 User-written Memory is authoritative. Automatic inference must not silently overwrite it.
 
@@ -64,12 +64,16 @@ Indexing stores real normalized messages and thread metadata in PostgreSQL and f
 The left sidebar contains:
 
 - Compose, Search, Settings, Automations;
-- predefined labels: All, Travel, Important, Pitch, Newsletter;
+- All plus every built-in or user-created label owned by the connected account;
 - mail views: Starred, Shared, Reminders, Scheduled, Drafts, Done, Sent, Trash.
 
 The center pane shows Important mail first, then a divider, then the remaining mail. Selecting a thread replaces the list with the real thread.
 
 The right pane is the future action agent for Find, Write, and Automate. It must not claim an action is available until its API and approval behavior exist.
+
+### Label settings
+
+Settings lists each label, its classification description, real analysis progress, and a delete control. Every label, including a built-in label, can be deleted. Deletion also removes that label's automatic and manual thread decisions and analysis history. Creating a label requires both a name and description. If native Batch is configured and Gmail indexing is complete, creation queues a durable PostgreSQL backfill job that checks every indexed thread. If Batch is unavailable, the label remains in an honest pending state.
 
 ### Memory settings
 
@@ -104,7 +108,9 @@ Deleting removes the active record and its text. A non-reversible fingerprint to
 
 ## Batch analysis
 
-Embeddings are not required for Memory v3. The worker uses the selected OpenAI or Azure OpenAI native Batch API as follows:
+Embeddings are not required for Memory v3 or labels. For each label, the worker creates one Batch request per indexed thread, records both matched and non-matched decisions, retries failed requests, and queues continuation jobs when a provider file limit is reached.
+
+For Memory, the worker uses the selected OpenAI or Azure OpenAI native Batch API as follows:
 
 1. Select real threads containing at least one eligible owner-sent message. Include incoming messages as context, but allow only eligible owner-sent messages to become evidence.
 2. Normalize external email addresses and remove the mailbox owner's address.
@@ -169,7 +175,7 @@ Every classification stores source, confidence, model ID, and analysis version. 
 Browser
   -> Next.js UI
   -> /v1 reverse proxy
-  -> native Node.js HTTP API
+  -> Fastify API
        -> Google OAuth and Gmail API
        -> Drizzle repositories
        -> PostgreSQL

@@ -14,6 +14,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import type { LabelAnalysisState, SystemLabelKey } from "@invook/contracts";
 
 import type { AccountSyncState } from "./types";
 
@@ -96,6 +97,57 @@ export const accountSecrets = pgTable("account_secrets", {
     .$onUpdate(() => new Date()),
 });
 
+export const mailLabels = pgTable(
+  "labels",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    normalizedName: text("normalized_name").notNull(),
+    description: text("description").notNull(),
+    systemKey: text("system_key").$type<SystemLabelKey>(),
+    definitionVersion: integer("definition_version").notNull().default(1),
+    analysisState: text("analysis_state")
+      .$type<LabelAnalysisState>()
+      .notNull()
+      .default("pending"),
+    lastAnalyzedAt: timestampWithTimezone("last_analyzed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("labels_account_name_idx").on(table.accountId, table.normalizedName),
+    uniqueIndex("labels_account_system_key_idx").on(table.accountId, table.systemKey),
+    index("labels_account_created_idx").on(table.accountId, table.createdAt),
+    check("labels_name_check", sql`char_length(btrim(${table.name})) > 0`),
+    check(
+      "labels_normalized_name_check",
+      sql`char_length(btrim(${table.normalizedName})) > 0`,
+    ),
+    check(
+      "labels_description_check",
+      sql`char_length(btrim(${table.description})) > 0`,
+    ),
+    check(
+      "labels_system_key_check",
+      sql`${table.systemKey} is null or ${table.systemKey} in ('important', 'travel', 'pitch', 'newsletter')`,
+    ),
+    check("labels_definition_version_check", sql`${table.definitionVersion} > 0`),
+    check(
+      "labels_analysis_state_check",
+      sql`${table.analysisState} in ('pending', 'running', 'complete', 'failed')`,
+    ),
+  ],
+);
+
 export const threads = pgTable(
   "threads",
   {
@@ -111,8 +163,6 @@ export const threads = pgTable(
     snippet: text("snippet").notNull().default(""),
     participants: jsonb("participants").$type<string[]>().notNull().default([]),
     labelIds: text("label_ids").array().notNull().default(sql`ARRAY[]::text[]`),
-    classificationVersion: integer("classification_version").notNull().default(0),
-    classifiedAt: timestampWithTimezone("classified_at"),
     latestMessageAt: timestampWithTimezone("latest_message_at"),
     messageCount: integer("message_count").notNull().default(0),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
@@ -144,9 +194,9 @@ export const threadLabels = pgTable(
     threadId: uuid("thread_id")
       .notNull()
       .references(() => threads.id, { onDelete: "cascade" }),
-    labelKey: text("label_key")
-      .$type<"important" | "travel" | "pitch" | "newsletter">()
-      .notNull(),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => mailLabels.id, { onDelete: "cascade" }),
     source: text("source").$type<"ai" | "user">().notNull(),
     state: text("state").$type<"applied" | "dismissed">().notNull(),
     confidence: numeric("confidence", { precision: 5, scale: 2 }),
@@ -159,21 +209,53 @@ export const threadLabels = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
-    uniqueIndex("thread_labels_thread_key_idx").on(table.threadId, table.labelKey),
-    index("thread_labels_account_key_state_idx").on(
+    uniqueIndex("thread_labels_thread_label_idx").on(table.threadId, table.labelId),
+    index("thread_labels_account_label_state_idx").on(
       table.accountId,
-      table.labelKey,
+      table.labelId,
       table.state,
-    ),
-    check(
-      "thread_labels_key_check",
-      sql`${table.labelKey} in ('important', 'travel', 'pitch', 'newsletter')`,
     ),
     check("thread_labels_source_check", sql`${table.source} in ('ai', 'user')`),
     check("thread_labels_state_check", sql`${table.state} in ('applied', 'dismissed')`),
     check(
       "thread_labels_confidence_check",
       sql`${table.confidence} is null or ${table.confidence} between 0 and 100`,
+    ),
+  ],
+);
+
+export const threadLabelAnalyses = pgTable(
+  "thread_label_analyses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => mailLabels.id, { onDelete: "cascade" }),
+    definitionVersion: integer("definition_version").notNull(),
+    modelId: text("model_id"),
+    analyzedAt: timestampWithTimezone("analyzed_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("thread_label_analyses_thread_label_idx").on(
+      table.threadId,
+      table.labelId,
+    ),
+    index("thread_label_analyses_label_version_idx").on(
+      table.labelId,
+      table.definitionVersion,
+    ),
+    check(
+      "thread_label_analyses_definition_version_check",
+      sql`${table.definitionVersion} > 0`,
     ),
   ],
 );

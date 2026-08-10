@@ -6,14 +6,18 @@
   "scripts": {
     "dev": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs watch src/index.ts",
     "start": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs src/index.ts",
+    "test": "node --import tsx --test src/app.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@fastify/cookie": "^11.1.2",
     "@invook/ai": "workspace:*",
     "@invook/contracts": "workspace:*",
     "@invook/database": "workspace:*",
     "@invook/gmail": "workspace:*",
-    "standardwebhooks": "1.0.0"
+    "fastify": "^5.11.3",
+    "standardwebhooks": "1.0.0",
+    "uuid": "^14.0.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

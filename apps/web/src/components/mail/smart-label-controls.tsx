@@ -5,52 +5,55 @@ import {
   HonourStarIcon,
   Megaphone01Icon,
   News01Icon,
+  Tag01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { InvookLabelKey, InvookThreadLabel } from "@invook/contracts";
+import axios from "axios";
+import type {
+  InvookThreadLabel,
+  MailLabel,
+  SystemLabelKey,
+} from "@invook/contracts";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { apiErrorMessage } from "@/lib/http-error";
 
-const labelDefinitions = [
-  { key: "important", label: "Important", icon: HonourStarIcon },
-  { key: "travel", label: "Travel", icon: Airplane01Icon },
-  { key: "pitch", label: "Pitch", icon: Megaphone01Icon },
-  { key: "newsletter", label: "Newsletter", icon: News01Icon },
-] satisfies Array<{
-  key: InvookLabelKey;
-  label: string;
-  icon: typeof HonourStarIcon;
-}>;
+const labelIcons = {
+  important: HonourStarIcon,
+  travel: Airplane01Icon,
+  pitch: Megaphone01Icon,
+  newsletter: News01Icon,
+} satisfies Record<SystemLabelKey, typeof Tag01Icon>;
 
 export function SmartLabelControls({
   threadId,
   initialLabels,
+  availableLabels,
 }: {
   threadId: string;
   initialLabels: InvookThreadLabel[];
+  availableLabels: MailLabel[];
 }) {
   const router = useRouter();
   const [labels, setLabels] = useState(initialLabels);
-  const [pendingLabel, setPendingLabel] = useState<InvookLabelKey | null>(null);
+  const [pendingLabel, setPendingLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function setLabel(label: InvookLabelKey, applied: boolean) {
-    setPendingLabel(label);
+  async function setLabel(labelId: string, applied: boolean) {
+    setPendingLabel(labelId);
     setError(null);
     try {
-      const response = await fetch(`/v1/threads/${threadId}/labels`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ label, applied }),
-      });
-      if (!response.ok) throw new Error("Invook could not save this label.");
-      const body = (await response.json()) as { labels: InvookThreadLabel[] };
+      const response = await axios.patch<{ labels: InvookThreadLabel[] }>(
+        `/v1/threads/${threadId}/labels`,
+        { labelId, applied },
+      );
+      const body = response.data;
       setLabels(body.labels);
       router.refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Invook could not save this label.");
+      setError(apiErrorMessage(cause, "Invook could not save this label."));
     } finally {
       setPendingLabel(null);
     }
@@ -62,22 +65,25 @@ export function SmartLabelControls({
         Labels
       </p>
       <div className="mt-1.5 flex flex-wrap gap-1">
-        {labelDefinitions.map((definition) => {
-          const current = labels.find((label) => label.key === definition.key);
+        {availableLabels.map((definition) => {
+          const current = labels.find((label) => label.labelId === definition.id);
           const applied = Boolean(current);
+          const icon = definition.systemKey
+            ? labelIcons[definition.systemKey]
+            : Tag01Icon;
           return (
             <Button
-              key={definition.key}
+              key={definition.id}
               type="button"
               size="sm"
               variant={applied ? "secondary" : "ghost"}
               className="h-8 gap-1.5 px-2.5 text-xs text-muted-foreground data-[state=on]:text-foreground"
               aria-pressed={applied}
               disabled={pendingLabel !== null}
-              onClick={() => void setLabel(definition.key, !applied)}
+              onClick={() => void setLabel(definition.id, !applied)}
             >
-              <HugeiconsIcon icon={definition.icon} size={12} />
-              {definition.label}
+              <HugeiconsIcon icon={icon} size={12} />
+              {definition.name}
             </Button>
           );
         })}

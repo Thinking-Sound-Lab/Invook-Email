@@ -4,6 +4,7 @@ import {
   StarIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import type { MailLabel } from "@invook/contracts";
 import Link from "next/link";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -25,10 +26,12 @@ export function ThreadReader({
   thread,
   currentView,
   aiConfigured,
+  availableLabels,
 }: {
   thread: SelectedThread;
   currentView: MailboxView;
   aiConfigured: boolean;
+  availableLabels: MailLabel[];
 }) {
   return (
     <section className="flex min-h-0 flex-col bg-background" aria-label="Open email thread">
@@ -61,6 +64,7 @@ export function ThreadReader({
             key={thread.id}
             threadId={thread.id}
             initialLabels={thread.invookLabels}
+            availableLabels={availableLabels}
           />
 
           <div className="mt-10 space-y-10">

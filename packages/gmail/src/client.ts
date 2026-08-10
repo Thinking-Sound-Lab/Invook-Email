@@ -1,3 +1,5 @@
+import axios from "axios";
+
 export type GmailProfile = {
   emailAddress: string;
   messagesTotal: number;
@@ -51,27 +53,35 @@ export class GmailApiError extends Error {
 async function gmailRequest<T>(
   accessToken: string,
   path: string,
-  init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(`https://gmail.googleapis.com/gmail/v1${path}`, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${accessToken}`,
-      ...init?.headers,
-    },
-  });
-
-  if (!response.ok) {
-    const responseBody = await response.text();
+  try {
+    const response = await axios.get<T>(
+      `https://gmail.googleapis.com/gmail/v1${path}`,
+      {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+      },
+    );
+    return response.data;
+  } catch (error) {
+    if (!axios.isAxiosError(error) || !error.response) throw error;
     throw new GmailApiError(
-      `Gmail API request failed with status ${response.status}.`,
-      response.status,
-      responseBody,
+      `Gmail API request failed with status ${error.response.status}.`,
+      error.response.status,
+      responseText(error.response.data),
     );
   }
+}
 
-  return (await response.json()) as T;
+function responseText(data: unknown): string {
+  if (typeof data === "string") return data;
+  try {
+    return JSON.stringify(data) ?? String(data);
+  } catch {
+    return String(data);
+  }
 }
 
 export function getGmailProfile(accessToken: string): Promise<GmailProfile> {
@@ -113,31 +123,31 @@ export async function refreshGoogleAccessToken(options: {
   clientId: string;
   clientSecret: string;
 }): Promise<{ accessToken: string; expiresIn: number; scope?: string }> {
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: options.clientId,
-      client_secret: options.clientSecret,
-      grant_type: "refresh_token",
-      refresh_token: options.refreshToken,
-    }),
-  });
-
-  if (!response.ok) {
-    const responseBody = await response.text();
-    throw new GmailApiError(
-      `Google token refresh failed with status ${response.status}.`,
-      response.status,
-      responseBody,
-    );
-  }
-
-  const result = (await response.json()) as {
+  let result: {
     access_token?: string;
     expires_in?: number;
     scope?: string;
   };
+  try {
+    const response = await axios.post<typeof result>(
+      "https://oauth2.googleapis.com/token",
+      new URLSearchParams({
+        client_id: options.clientId,
+        client_secret: options.clientSecret,
+        grant_type: "refresh_token",
+        refresh_token: options.refreshToken,
+      }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+    );
+    result = response.data;
+  } catch (error) {
+    if (!axios.isAxiosError(error) || !error.response) throw error;
+    throw new GmailApiError(
+      `Google token refresh failed with status ${error.response.status}.`,
+      error.response.status,
+      responseText(error.response.data),
+    );
+  }
 
   if (!result.access_token || !result.expires_in) {
     throw new Error("Google did not return a usable refreshed access token.");

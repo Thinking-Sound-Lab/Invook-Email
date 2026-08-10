@@ -5,12 +5,8 @@ import type {
   MailboxThreadSummary,
 } from "@invook/contracts";
 
-export type MailboxView =
+export type StaticMailboxView =
   | "all"
-  | "travel"
-  | "important"
-  | "pitch"
-  | "newsletter"
   | "starred"
   | "shared"
   | "reminders"
@@ -19,6 +15,8 @@ export type MailboxView =
   | "done"
   | "sent"
   | "trash";
+
+export type MailboxView = StaticMailboxView | `label:${string}`;
 
 export type MailSurface = "mail" | "compose" | "search" | "settings" | "automations";
 

@@ -29,6 +29,13 @@
       "when": 1786286246371,
       "tag": "0003_powerful_roland_deschain",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786377341962,
+      "tag": "0004_overjoyed_miracleman",
+      "breakpoints": true
     }
   ]
 }

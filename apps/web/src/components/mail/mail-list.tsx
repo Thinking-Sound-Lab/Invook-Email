@@ -7,14 +7,15 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
-import type { MailAccount, MailboxView, MailThreadSummary } from "./types";
+import type {
+  MailAccount,
+  MailboxView,
+  MailThreadSummary,
+  StaticMailboxView,
+} from "./types";
 
-const viewTitles: Record<MailboxView, string> = {
+const viewTitles: Record<StaticMailboxView, string> = {
   all: "All mail",
-  travel: "Travel",
-  important: "Important",
-  pitch: "Pitch",
-  newsletter: "Newsletter",
   starred: "Starred",
   shared: "Shared",
   reminders: "Reminders",
@@ -81,10 +82,12 @@ function MailRow({
           <span
             className={cn(
               "hidden shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium capitalize 2xl:inline-flex",
-              labelStyles[primaryLabel.key],
+              primaryLabel.systemKey
+                ? labelStyles[primaryLabel.systemKey]
+                : "bg-secondary text-muted-foreground",
             )}
           >
-            {primaryLabel.key}
+            {primaryLabel.name}
           </span>
         ) : null}
         {starred ? (
@@ -137,12 +140,16 @@ export function MailList({
   importantThreads,
   remainingThreads,
   query,
+  title,
+  importantView = false,
 }: {
   account: MailAccount;
   currentView: MailboxView;
   importantThreads: MailThreadSummary[];
   remainingThreads: MailThreadSummary[];
   query?: string;
+  title?: string;
+  importantView?: boolean;
 }) {
   const noIndexedMail = importantThreads.length === 0 && remainingThreads.length === 0;
   const indexing = account.syncState.recent === "pending" || account.syncState.recent === "running";
@@ -151,7 +158,12 @@ export function MailList({
     <section className="flex min-h-0 flex-col bg-background" aria-label="Mailbox">
       <header className="flex h-15 shrink-0 items-center justify-between border-b border-border/45 px-5">
         <h1 className="truncate text-base font-semibold tracking-[-0.025em]">
-          {query ? `Search: ${query}` : viewTitles[currentView]}
+          {query
+            ? `Search: ${query}`
+            : title ??
+              (currentView.startsWith("label:")
+                ? "Label"
+                : viewTitles[currentView as StaticMailboxView])}
         </h1>
         <div className="flex items-center gap-1">
           <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
@@ -192,7 +204,7 @@ export function MailList({
             threads={remainingThreads}
             accountEmail={account.email}
             currentView={currentView}
-            important={currentView === "important"}
+            important={importantView}
           />
         )}
 

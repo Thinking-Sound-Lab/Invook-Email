@@ -22,17 +22,63 @@ export type MemoryGenerationProgress = {
   memoryCount: number;
 };
 
-export const invookLabelKeys = [
+export const systemLabelKeys = [
   "important",
   "travel",
   "pitch",
   "newsletter",
 ] as const;
 
-export type InvookLabelKey = (typeof invookLabelKeys)[number];
+export type SystemLabelKey = (typeof systemLabelKeys)[number];
+
+export const systemLabelDefinitions = [
+  {
+    key: "important",
+    name: "Important",
+    description:
+      "Requires timely attention, a reply, a decision, or has meaningful financial, legal, security, or personal consequence. Routine bulk mail does not belong here.",
+  },
+  {
+    key: "travel",
+    name: "Travel",
+    description:
+      "Bookings, itineraries, tickets, lodging, visas, check-in, transport, or trip changes.",
+  },
+  {
+    key: "pitch",
+    name: "Pitch",
+    description:
+      "Sales, recruiting, partnership, fundraising, investment, sponsorship, or service proposals.",
+  },
+  {
+    key: "newsletter",
+    name: "Newsletter",
+    description:
+      "Recurring editorial, digest, product-update, community-update, or marketing publications sent in bulk.",
+  },
+] as const satisfies ReadonlyArray<{
+  key: SystemLabelKey;
+  name: string;
+  description: string;
+}>;
+
+export type LabelAnalysisState = "pending" | "running" | "complete" | "failed";
+
+export type MailLabel = {
+  id: string;
+  name: string;
+  description: string;
+  systemKey: SystemLabelKey | null;
+  definitionVersion: number;
+  analysisState: LabelAnalysisState;
+  analyzedThreadCount: number;
+  totalThreadCount: number;
+};
 
 export type InvookThreadLabel = {
-  key: InvookLabelKey;
+  labelId: string;
+  name: string;
+  systemKey: SystemLabelKey | null;
   source: "ai" | "user";
   confidence: number | null;
 };
@@ -106,9 +152,11 @@ export type MailboxSelectedThread = Omit<MailboxThreadSummary, "snippet"> & {
 
 export type MailboxWorkspace = {
   aiConfigured: boolean;
+  batchConfigured: boolean;
   account: MailboxAccount;
   memoryProgress: MemoryGenerationProgress;
   memories: MemoryEntry[];
+  labels: MailLabel[];
   threads: MailboxThreadSummary[];
   selectedThread: MailboxSelectedThread | null;
 };

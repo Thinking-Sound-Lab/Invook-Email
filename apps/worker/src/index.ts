@@ -1,7 +1,6 @@
 import {
   AiConfigurationError,
-  classifyThreads,
-  deleteMemoryBatchFiles,
+  deleteBatchFiles,
   extractFeedbackMemories,
   isAnyMemoryBatchProviderConfigured,
   isAiConfigured,
@@ -9,9 +8,13 @@ import {
   isMemoryBatchProviderConfigured,
   memoryBatchProviders,
   MemoryBatchConfigurationError,
+  readLabelBatch,
   readMemoryBatch,
+  submitLabelBatch,
   submitMemoryBatch,
   type FeedbackMemoryCandidate,
+  type LabelAnalysisThread,
+  type LabelBatchManifestEntry,
   type MemoryAnalysisThread,
   type MemoryBatchManifestEntry,
   type MemoryBatchProvider,
@@ -26,22 +29,27 @@ import {
   DRAFT_FEEDBACK_VERSION,
   encryptGoogleCredential,
   enqueueAnalysisJobsForIndexedAccounts,
+  enqueueLabelBackfillContinuation,
+  enqueueLabelBatchRetry,
   enqueueMemoryBatchRetry,
   failAnalysisJob,
   failJobAndAccount,
   getDraftFeedbackSamples,
+  getLabelBatchSubmission,
+  getLabelForAnalysis,
   getMemoryAnalysisThreads,
   getMemoryBatchSubmission,
-  getThreadsForClassification,
+  getThreadsForLabelBackfill,
+  getThreadsForLabelRetry,
   getUserAuthoredMemories,
   getWorkerAccount,
   listenForJobNotifications,
-  MAIL_CLASSIFICATION_VERSION,
   MEMORY_SCHEMA_VERSION,
   markDraftFeedbackAnalyzed,
+  saveLabelBatchResults,
   saveExtractedMemories,
-  saveThreadClassifications,
   setAccountSyncState,
+  setLabelAnalysisState,
   setMemorySyncStage,
   updateStoredCredential,
   upsertIndexedMessage,
@@ -65,7 +73,6 @@ const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
 const workerId = `worker-${process.pid}`;
-const classificationBatchSize = 12;
 const feedbackBatchSize = 24;
 
 function createJobSignal() {
@@ -230,44 +237,6 @@ async function runInitialSync(job: ClaimedJob) {
   await completeInitialSync(job.accountId, gmailProfile.historyId);
 }
 
-async function runMailClassification(job: ClaimedJob) {
-  if (!job.accountId) throw new Error("The classification job has no connected account.");
-  if (!isAiConfigured()) throw new AiConfigurationError();
-
-  const account = await getWorkerAccount(job.accountId);
-  if (!account) throw new Error("The connected Gmail account was not found.");
-
-  let classifiedCount = 0;
-  while (true) {
-    const candidates = await getThreadsForClassification(
-      account.id,
-      MAIL_CLASSIFICATION_VERSION,
-      classificationBatchSize,
-    );
-    if (candidates.length === 0) break;
-
-    const analysis = await classifyThreads(candidates);
-    const expectedIds = new Set(candidates.map((thread) => thread.id));
-    const returnedIds = new Set(analysis.threads.map((thread) => thread.threadId));
-    if (
-      returnedIds.size !== expectedIds.size ||
-      analysis.threads.some((thread) => !expectedIds.has(thread.threadId))
-    ) {
-      throw new Error("The label model did not return every requested thread exactly once.");
-    }
-
-    await saveThreadClassifications({
-      userId: account.userId,
-      accountId: account.id,
-      modelId: analysis.modelId,
-      threads: analysis.threads,
-    });
-    classifiedCount += candidates.length;
-  }
-
-  return { classifiedCount, analysisVersion: MAIL_CLASSIFICATION_VERSION };
-}
-
 type IndexedMemoryThread = Awaited<ReturnType<typeof getMemoryAnalysisThreads>>[number];
 
 type MemorySubmissionResult = {
@@ -332,14 +301,14 @@ function parseManifest(value: unknown): MemoryBatchManifestEntry[] {
 
 function requiredString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${name} is missing from the Memory batch job.`);
+    throw new Error(`${name} is missing from the batch job.`);
   }
   return value;
 }
 
 function requiredInteger(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
-    throw new Error(`${name} is invalid in the Memory batch job.`);
+    throw new Error(`${name} is invalid in the batch job.`);
   }
   return value;
 }
@@ -693,7 +662,7 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
     await setMemorySyncStage(submission.accountId, "complete");
   }
 
-  const cleanupFailures = await deleteMemoryBatchFiles({
+  const cleanupFailures = await deleteBatchFiles({
     provider: details.provider,
     inputFileId: details.inputFileId,
     outputFileId: batch.outputFileId,
@@ -721,6 +690,385 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
     memoryCount: memories.length,
     failedRequestCount: failedManifest.length,
     retryJobId,
+  };
+}
+
+type LabelSubmissionResult = {
+  provider: MemoryBatchProvider;
+  providerBatchId: string;
+  inputFileId: string;
+  modelId: string;
+  requestCount: number;
+  manifest: LabelBatchManifestEntry[];
+  batchAttempt: number;
+  rootSubmissionJobId: string;
+  labelId: string;
+  definitionVersion: number;
+  continueBackfill: boolean;
+};
+
+function parseLabelManifest(value: unknown): LabelBatchManifestEntry[] {
+  if (!Array.isArray(value)) throw new Error("The label Batch manifest is missing.");
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error("The label Batch manifest is invalid.");
+    }
+    const key = "key" in entry ? entry.key : undefined;
+    const labelId = "labelId" in entry ? entry.labelId : undefined;
+    const definitionVersion =
+      "definitionVersion" in entry ? entry.definitionVersion : undefined;
+    const threadId = "threadId" in entry ? entry.threadId : undefined;
+    if (
+      typeof key !== "string" ||
+      typeof labelId !== "string" ||
+      typeof definitionVersion !== "number" ||
+      !Number.isInteger(definitionVersion) ||
+      definitionVersion < 1 ||
+      typeof threadId !== "string"
+    ) {
+      throw new Error("The label Batch manifest is invalid.");
+    }
+    return { key, labelId, definitionVersion, threadId };
+  });
+}
+
+function parseLabelSubmissionResult(value: unknown): LabelSubmissionResult | null {
+  if (!value || typeof value !== "object") {
+    throw new Error("The label Batch submission result is missing.");
+  }
+  const result = value as Record<string, unknown>;
+  if (!memoryBatchProviders.includes(result.provider as MemoryBatchProvider)) {
+    return null;
+  }
+  if (typeof result.continueBackfill !== "boolean") {
+    throw new Error("The label Batch continuation state is missing.");
+  }
+  const manifest = parseLabelManifest(result.manifest);
+  const requestCount = requiredInteger(result.requestCount, "Label Batch request count");
+  const labelId = requiredString(result.labelId, "Label ID");
+  const definitionVersion = requiredInteger(
+    result.definitionVersion,
+    "Label definition version",
+  );
+  if (
+    manifest.length !== requestCount ||
+    new Set(manifest.map((entry) => entry.key)).size !== manifest.length ||
+    manifest.some(
+      (entry) =>
+        entry.labelId !== labelId || entry.definitionVersion !== definitionVersion,
+    )
+  ) {
+    throw new Error("The label Batch manifest does not match its request count or label.");
+  }
+  return {
+    provider: result.provider as MemoryBatchProvider,
+    providerBatchId: requiredString(result.providerBatchId, "Provider batch ID"),
+    inputFileId: requiredString(result.inputFileId, "Provider input file"),
+    modelId: requiredString(result.modelId, "Label Batch model"),
+    requestCount,
+    manifest,
+    batchAttempt: requiredInteger(result.batchAttempt, "Label Batch attempt"),
+    rootSubmissionJobId: requiredString(
+      result.rootSubmissionJobId,
+      "Root label submission job ID",
+    ),
+    labelId,
+    definitionVersion,
+    continueBackfill: result.continueBackfill,
+  };
+}
+
+async function cleanupLabelBatchFiles(input: {
+  provider: MemoryBatchProvider;
+  inputFileId: string;
+  outputFileId: string | null;
+  errorFileId: string | null;
+  submissionJobId: string;
+}) {
+  const failures = await deleteBatchFiles({
+    provider: input.provider,
+    inputFileId: input.inputFileId,
+    outputFileId: input.outputFileId,
+    errorFileId: input.errorFileId,
+  });
+  if (failures.length > 0) {
+    console.error("worker: label Batch files could not be deleted", {
+      provider: input.provider,
+      submissionJobId: input.submissionJobId,
+      fileCount: failures.length,
+    });
+  }
+}
+
+async function runLabelBackfill(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The label backfill has no connected account.");
+  const labelId = requiredString(job.payload.labelId, "Label ID");
+  const definitionVersion = requiredInteger(
+    job.payload.definitionVersion,
+    "Label definition version",
+  );
+  const label = await getLabelForAnalysis(job.accountId, labelId);
+  if (!label || label.definitionVersion !== definitionVersion) {
+    return { status: "superseded", labelId, definitionVersion };
+  }
+  const threads = await getThreadsForLabelBackfill({
+    accountId: job.accountId,
+    labelId,
+    definitionVersion,
+  });
+  if (threads.length === 0) {
+    await setLabelAnalysisState({
+      accountId: job.accountId,
+      labelId,
+      definitionVersion,
+      state: "complete",
+    });
+    return { status: "complete", labelId, definitionVersion, threadCount: 0 };
+  }
+  if (!isMemoryBatchConfigured()) throw new MemoryBatchConfigurationError();
+
+  await setLabelAnalysisState({
+    accountId: job.accountId,
+    labelId,
+    definitionVersion,
+    state: "running",
+  });
+  const submission = await submitLabelBatch({
+    submissionId: job.id,
+    batchAttempt: 1,
+    label,
+    threads: threads satisfies LabelAnalysisThread[],
+  });
+  if (!submission) throw new Error("The label Batch produced no requests.");
+
+  return {
+    status: "submitted",
+    ...submission,
+    batchAttempt: 1,
+    rootSubmissionJobId: job.id,
+    labelId,
+    definitionVersion,
+    continueBackfill: true,
+  };
+}
+
+async function runLabelBatchRetry(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The label Batch retry has no connected account.");
+  const parentSubmissionJobId = requiredString(
+    job.payload.parentSubmissionJobId,
+    "Parent label submission job ID",
+  );
+  const parentSubmission = await getLabelBatchSubmission(parentSubmissionJobId);
+  if (parentSubmission?.accountId !== job.accountId) {
+    throw new Error("The parent label submission could not be matched to this account.");
+  }
+  const parentDetails = parseLabelSubmissionResult(parentSubmission.result);
+  if (!parentDetails) return { status: "superseded", provider: "unsupported" };
+  if (!isMemoryBatchProviderConfigured(parentDetails.provider)) {
+    throw new MemoryBatchConfigurationError(
+      `The ${parentDetails.provider} provider used by this label Batch retry is not configured.`,
+    );
+  }
+
+  const labelId = requiredString(job.payload.labelId, "Label ID");
+  const definitionVersion = requiredInteger(
+    job.payload.definitionVersion,
+    "Label definition version",
+  );
+  const label = await getLabelForAnalysis(job.accountId, labelId);
+  if (!label || label.definitionVersion !== definitionVersion) {
+    return { status: "superseded", labelId, definitionVersion };
+  }
+  const manifest = parseLabelManifest(job.payload.manifest);
+  const threads = await getThreadsForLabelRetry(
+    job.accountId,
+    manifest.map((entry) => entry.threadId),
+  );
+  const batchAttempt = requiredInteger(job.payload.batchAttempt, "Label Batch attempt");
+  const rootSubmissionJobId = requiredString(
+    job.payload.rootSubmissionJobId,
+    "Root label submission job ID",
+  );
+  if (typeof job.payload.continueBackfill !== "boolean") {
+    throw new Error("The label Batch continuation state is missing.");
+  }
+  const submission = await submitLabelBatch({
+    provider: parentDetails.provider,
+    submissionId: job.id,
+    batchAttempt,
+    label,
+    threads: threads satisfies LabelAnalysisThread[],
+    retryManifest: manifest,
+  });
+  if (!submission) throw new Error("The label Batch retry produced no requests.");
+
+  return {
+    status: "submitted",
+    ...submission,
+    batchAttempt,
+    rootSubmissionJobId,
+    labelId,
+    definitionVersion,
+    continueBackfill: job.payload.continueBackfill,
+  };
+}
+
+async function runLabelBatchEvent(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The label Batch event has no account.");
+  const submissionJobId = requiredString(
+    job.payload.submissionJobId,
+    "Label submission job ID",
+  );
+  const submission = await getLabelBatchSubmission(submissionJobId);
+  if (!submission?.accountId || !submission.userId || submission.accountId !== job.accountId) {
+    throw new Error("The label Batch submission could not be matched to this account.");
+  }
+  const details = parseLabelSubmissionResult(submission.result);
+  if (!details) return { status: "superseded", provider: "unsupported" };
+  const providerBatchId = requiredString(
+    job.payload.providerBatchId,
+    "Provider event batch ID",
+  );
+  if (
+    job.payload.provider !== details.provider ||
+    providerBatchId !== details.providerBatchId
+  ) {
+    throw new Error("The provider event does not match its label submission.");
+  }
+
+  const batch = await readLabelBatch({
+    provider: details.provider,
+    providerBatchId: details.providerBatchId,
+    modelId: details.modelId,
+    expectedKeys: details.manifest.map((entry) => entry.key),
+  });
+  const terminalState =
+    batch.state === "completed" ||
+    batch.state === "failed" ||
+    batch.state === "cancelled" ||
+    batch.state === "expired";
+  if (!terminalState) {
+    throw new Error(
+      `${details.provider} emitted a terminal event while the label Batch is ${batch.state}.`,
+    );
+  }
+
+  const currentLabel = await getLabelForAnalysis(
+    submission.accountId,
+    details.labelId,
+  );
+  if (!currentLabel || currentLabel.definitionVersion !== details.definitionVersion) {
+    await cleanupLabelBatchFiles({
+      provider: details.provider,
+      inputFileId: details.inputFileId,
+      outputFileId: batch.outputFileId,
+      errorFileId: batch.errorFileId,
+      submissionJobId: submission.id,
+    });
+    return { status: "superseded", reason: "label_deleted" };
+  }
+
+  const failedKeys = new Set(batch.failedKeys);
+  const results: Array<{ threadId: string; matched: boolean; confidence: number }> = [];
+  for (const entry of details.manifest) {
+    if (failedKeys.has(entry.key)) continue;
+    const candidate = batch.candidatesByKey.get(entry.key);
+    if (
+      !candidate ||
+      candidate.threadId !== entry.threadId ||
+      candidate.labelId !== entry.labelId
+    ) {
+      failedKeys.add(entry.key);
+      continue;
+    }
+    results.push({
+      threadId: candidate.threadId,
+      matched: candidate.matched,
+      confidence: candidate.confidence,
+    });
+  }
+  if (results.length > 0) {
+    const saved = await saveLabelBatchResults({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      modelId: batch.modelId,
+      results,
+    });
+    if (!saved) {
+      await cleanupLabelBatchFiles({
+        provider: details.provider,
+        inputFileId: details.inputFileId,
+        outputFileId: batch.outputFileId,
+        errorFileId: batch.errorFileId,
+        submissionJobId: submission.id,
+      });
+      return { status: "superseded", reason: "label_deleted" };
+    }
+  }
+
+  const failedManifest = details.manifest.filter((entry) => failedKeys.has(entry.key));
+  let nextJobId: string | null = null;
+  if (failedManifest.length > 0 && details.batchAttempt < submission.maxAttempts) {
+    nextJobId = await enqueueLabelBatchRetry({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      parentSubmissionJobId: submission.id,
+      rootSubmissionJobId: details.rootSubmissionJobId,
+      batchAttempt: details.batchAttempt + 1,
+      continueBackfill: details.continueBackfill,
+      manifest: failedManifest,
+    });
+  } else if (failedManifest.length > 0) {
+    await setLabelAnalysisState({
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      state: "failed",
+    });
+  } else if (details.continueBackfill) {
+    nextJobId = await enqueueLabelBackfillContinuation({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      parentSubmissionJobId: submission.id,
+    });
+  } else {
+    await setLabelAnalysisState({
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      state: "complete",
+    });
+  }
+
+  await cleanupLabelBatchFiles({
+    provider: details.provider,
+    inputFileId: details.inputFileId,
+    outputFileId: batch.outputFileId,
+    errorFileId: batch.errorFileId,
+    submissionJobId: submission.id,
+  });
+
+  return {
+    status:
+      failedManifest.length === 0
+        ? details.continueBackfill
+          ? "continuation_queued"
+          : "complete"
+        : nextJobId
+          ? "retry_submitted"
+          : "failed",
+    providerState: batch.state,
+    provider: details.provider,
+    providerError: batch.providerError,
+    analyzedThreadCount: results.length,
+    failedRequestCount: failedManifest.length,
+    nextJobId,
   };
 }
 
@@ -844,10 +1192,17 @@ async function markJobFailed(job: ClaimedJob, error: unknown) {
 
 async function processNextJob() {
   const jobTypes = ["gmail.initial_sync"];
-  if (isAiConfigured()) jobTypes.push("mail.classify", "memory.feedback");
-  if (isMemoryBatchConfigured()) jobTypes.push("memory.extract");
+  if (isAiConfigured()) jobTypes.push("memory.feedback");
+  if (isMemoryBatchConfigured()) {
+    jobTypes.push("memory.extract", "label.backfill.submit");
+  }
   if (isAnyMemoryBatchProviderConfigured()) {
-    jobTypes.push("memory.batch.retry", "memory.batch.event");
+    jobTypes.push(
+      "memory.batch.retry",
+      "memory.batch.event",
+      "label.batch.retry",
+      "label.batch.event",
+    );
   }
   const job = await claimNextJob(workerId, jobTypes);
   if (!job) return false;
@@ -858,9 +1213,6 @@ async function processNextJob() {
       case "gmail.initial_sync":
         await runInitialSync(job);
         break;
-      case "mail.classify":
-        result = await runMailClassification(job);
-        break;
       case "memory.extract":
         result = await runMemoryExtraction(job);
         break;
@@ -869,6 +1221,15 @@ async function processNextJob() {
         break;
       case "memory.batch.event":
         result = await runMemoryBatchEvent(job);
+        break;
+      case "label.backfill.submit":
+        result = await runLabelBackfill(job);
+        break;
+      case "label.batch.retry":
+        result = await runLabelBatchRetry(job);
+        break;
+      case "label.batch.event":
+        result = await runLabelBatchEvent(job);
         break;
       case "memory.feedback":
         result = await runMemoryFeedback(job);
@@ -884,6 +1245,18 @@ async function processNextJob() {
     ) {
       if (job.jobType === "memory.extract" && job.accountId) {
         await setMemorySyncStage(job.accountId, "pending");
+      }
+      if (job.jobType === "label.backfill.submit" && job.accountId) {
+        const labelId = job.payload.labelId;
+        const definitionVersion = job.payload.definitionVersion;
+        if (typeof labelId === "string" && typeof definitionVersion === "number") {
+          await setLabelAnalysisState({
+            accountId: job.accountId,
+            labelId,
+            definitionVersion,
+            state: "pending",
+          });
+        }
       }
       await deferJobWithoutAttempt({
         jobId: job.id,

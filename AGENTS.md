@@ -4,6 +4,8 @@
 - Never use dummy, mock, placeholder, synthetic, seeded, or fixture product data. Product flows must use real connected data. If a live integration is unavailable, show an honest empty or setup state instead of fabricating content.
 - When replacing an implementation, remove its superseded code, routes, scripts, dependencies, environment variables, configuration, and implementation documentation in the same change. Do not retain legacy paths or compatibility shims unless the user explicitly requires them. Finish replacement work with a repository-wide search for obsolete implementation remnants.
 - Never use `setTimeout`, deadline options named `timeout`, or timer-based polling in project code or configuration. Prefer event-driven signals, database notifications, queue state, and platform-native health or retry behavior.
+- For UUID generation and UUID utilities, always use the `uuid` package. Do not use UUID APIs from `node:crypto`, including `randomUUID`.
+- Use Fastify for the API server. For outbound HTTP client requests in both frontend and backend application code, always use `axios`. Do not use the native `fetch` API, `node:http` client APIs, or `node:https` client APIs for application requests.
 - Use an open-source-friendly repository structure. Put deployable applications in `apps/`, shared libraries and configuration in `packages/`, and container-related files in `docker/`.
 - For frontend interfaces, use `shadcn/ui` components and conventions.
 - Use Plus Jakarta Sans for all product interface typography. Do not introduce another product font without explicit approval.

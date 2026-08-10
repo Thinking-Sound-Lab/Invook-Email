@@ -10,9 +10,9 @@ import {
   UserMultiple02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import axios from "axios";
 import type {
   AccountSyncStage,
-  ApiProblem,
   MemoryEntry,
   MemoryType,
 } from "@invook/contracts";
@@ -42,6 +42,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { apiErrorMessage } from "@/lib/http-error";
 
 const memoryDefinitions = {
   preference: {
@@ -71,15 +72,6 @@ const memoryDefinitions = {
     description: string;
   }
 >;
-
-async function responseError(response: Response, fallback: string) {
-  try {
-    const problem = (await response.json()) as Partial<ApiProblem>;
-    return problem.title || fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 function evidenceLabel(memory: MemoryEntry): string {
   if (memory.source === "user") return "Added by you";
@@ -262,19 +254,16 @@ export function MemorySettings({
     setError(null);
     const endpoint = editing ? `/v1/memories/${editing.id}` : "/v1/memories";
     try {
-      const response = await fetch(endpoint, {
+      const response = await axios.request<{ memory: MemoryEntry }>({
+        url: endpoint,
         method: editing ? "PATCH" : "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+        data: {
           type: activeType,
           contactEmail: activeType === "contact" ? contactEmail : null,
           statement,
-        }),
+        },
       });
-      if (!response.ok) {
-        throw new Error(await responseError(response, "Invook could not save this memory."));
-      }
-      const body = (await response.json()) as { memory: MemoryEntry };
+      const body = response.data;
       setMemories((current) => {
         const withoutSaved = current.filter((memory) => memory.id !== body.memory.id);
         return [...withoutSaved, body.memory];
@@ -282,7 +271,7 @@ export function MemorySettings({
       setEditorOpen(false);
       router.refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Invook could not save this memory.");
+      setError(apiErrorMessage(cause, "Invook could not save this memory."));
     } finally {
       setPending(false);
     }
@@ -290,13 +279,13 @@ export function MemorySettings({
 
   async function deleteMemory(memory: MemoryEntry) {
     setError(null);
-    const response = await fetch(`/v1/memories/${memory.id}`, { method: "DELETE" });
-    if (!response.ok) {
-      setError(await responseError(response, "Invook could not delete this memory."));
-      return;
+    try {
+      await axios.delete(`/v1/memories/${memory.id}`);
+      setMemories((current) => current.filter((entry) => entry.id !== memory.id));
+      router.refresh();
+    } catch (cause) {
+      setError(apiErrorMessage(cause, "Invook could not delete this memory."));
     }
-    setMemories((current) => current.filter((entry) => entry.id !== memory.id));
-    router.refresh();
   }
 
   return (

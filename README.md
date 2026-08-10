@@ -1,6 +1,6 @@
 # Invook
 
-Invook is an open-source, AI-native Gmail client. It indexes the connected mailbox, applies an opinionated set of labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
+Invook is an open-source, AI-native Gmail client. It indexes the connected mailbox, applies built-in and user-defined labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
 
 The application starts with one Google sign-in action. Until a real Gmail account is connected, it shows an honest setup or empty state and never manufactures mailbox data.
 
@@ -9,7 +9,7 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 1. Direct Google OAuth authenticates the user and grants Gmail access.
 2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and creates an indexing job.
 3. The worker indexes the real mailbox by following every Gmail result page.
-4. A configured model applies Invook's predefined Important, Travel, Pitch, and Newsletter labels. A user's label changes take precedence over later model runs.
+4. The selected native Batch provider checks every indexed thread against Invook's Important, Travel, Pitch, and Newsletter definitions. Settings can add a new label and description, which queues the same full-mailbox analysis for that label. Every label, including a built-in label, can be deleted. A user's thread-level label changes take precedence over later model runs.
 5. The worker sends full eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
    - **Preferences:** repeated behavior that applies across contacts and should shape every draft.
    - **Contacts:** repeated communication behavior for one normalized email address.
@@ -17,6 +17,8 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 6. Settings → Memory lets the user add, edit, and delete every memory. Deleted text is removed; only a fingerprint remains to stop the same automatic inference from being recreated.
 7. A reply draft receives the current thread plus applicable global, contact, and scheduling memories. It never receives unrelated contact memory.
 8. Saving an edited AI draft records feedback. A new memory is proposed only when the same correction appears across at least three real drafts.
+
+Gmail indexing, label backfills, Memory extraction, webhook result handling, and retries use the durable PostgreSQL job table. Workers claim jobs with row locks and wake through PostgreSQL notifications; no Redis service or timer-based polling is required.
 
 Memory v3 does not require embeddings. This is deliberate: native Batch analysis discovers repeated behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting. PostgreSQL full-text search remains available for exact mailbox search.
 
@@ -63,9 +65,9 @@ Put the generated value in `TOKEN_ENCRYPTION_KEY`. Invook uses the official Goog
 
 ## Model setup
 
-Labeling, feedback analysis, and drafting use an OpenAI-compatible HTTP endpoint. Set `AI_BASE_URL` and `AI_MODEL`; `AI_API_KEY` is optional for a local model. When the worker runs in Docker and a local model runs on the host, use a host-reachable URL such as `http://host.docker.internal:11434/v1`.
+Feedback analysis and drafting use an OpenAI-compatible HTTP endpoint. Set `AI_BASE_URL` and `AI_MODEL`; `AI_API_KEY` is optional for a local model. When the worker runs in Docker and a local model runs on the host, use a host-reachable URL such as `http://host.docker.internal:11434/v1`.
 
-Initial Preferences, Contacts, and Scheduling analysis uses one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Invook creates one global request and one request per qualifying contact, then splits a scope only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure. There is no mandatory second analysis batch and no embedding step.
+Mailbox label backfills and initial Preferences, Contacts, and Scheduling analysis use one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Label analysis creates one request per indexed thread and continues in another job when a provider file limit is reached. Memory analysis creates one global request and one request per qualifying contact, then splits a scope only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure. There is no embedding step.
 
 For OpenAI, set `MEMORY_BATCH_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_WEBHOOK_SECRET`. Invook uses the pinned `gpt-5.4-nano-2026-03-17` model. Register these events in the [OpenAI project webhook settings](https://platform.openai.com/settings/project/webhooks):
 
@@ -137,11 +139,12 @@ docker compose -f docker/compose.yml config --quiet
 - Database credentials and account secrets are server-only.
 - Google identities are validated server-side and mapped to stable Invook user IDs.
 - Session cookies are signed, HTTP-only, and contain no provider token.
-- Next.js contains UI only. It reaches the native Node API through `/v1`; only the API and worker import database and Gmail packages.
+- Next.js contains UI only. It reaches the Fastify API through `/v1`; only the API and worker import database and Gmail packages.
 - Product reads are scoped by user ID. Worker operations use explicit account and job IDs.
 - Email content is treated as untrusted input in every model prompt.
 - Inferred Memory requires evidence from at least three messages; global preferences additionally require evidence across at least three contacts.
 - User-written memory wins over inferred memory.
+- A user's applied or dismissed thread label wins over automatic label analysis.
 
 ## Project documents
 
