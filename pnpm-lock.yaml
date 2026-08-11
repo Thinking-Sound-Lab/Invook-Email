@@ -146,6 +146,9 @@ importers:
       ai:
         specifier: ^7.0.58
         version: 7.0.58(zod@4.4.3)
+      js-tiktoken:
+        specifier: ^1.0.21
+        version: 1.0.21
       openai:
         specifier: ^7.4.0
         version: 7.4.0(ws@8.21.3)(zod@4.4.3)
@@ -3467,6 +3470,9 @@ packages:
 
   jose@6.2.8:
     resolution: {integrity: sha512-Bsdjwm3Qsd/P0jR+BHDe3LytDfY7WBq2HmCCLIwuVRHMuEC9ae7/R474GIUdF1NgCyZjzVo/A9DOiOBtXq8ZoQ==}
+
+  js-tiktoken@1.0.21:
+    resolution: {integrity: sha512-biOj/6M5qdgx5TKjDnFT1ymSpM5tbd3ylwDtrQvFQSu0Z7bBYko2dF+W/aUkXUPuk6IVpRxk/3Q2sHOzGlS36g==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -7788,6 +7794,10 @@ snapshots:
   jiti@2.7.0: {}
 
   jose@6.2.8: {}
+
+  js-tiktoken@1.0.21:
+    dependencies:
+      base64-js: 1.5.1
 
   js-tokens@4.0.0: {}
 

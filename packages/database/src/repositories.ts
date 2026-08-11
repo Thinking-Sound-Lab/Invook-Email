@@ -827,6 +827,30 @@ export async function getMailboxWorkspace(
   };
 }
 
+export async function getIndexingSyncStateForUser(
+  userId: string,
+  database: Database = getDatabase(),
+): Promise<{ accountId: string; state: AccountSyncState["indexing"] } | null> {
+  const [account] = await database
+    .select({
+      accountId: connectedAccounts.id,
+      syncState: connectedAccounts.syncState,
+    })
+    .from(connectedAccounts)
+    .where(
+      and(
+        eq(connectedAccounts.userId, userId),
+        not(eq(connectedAccounts.status, "disconnected")),
+      ),
+    )
+    .orderBy(desc(connectedAccounts.createdAt))
+    .limit(1);
+
+  return account
+    ? { accountId: account.accountId, state: account.syncState.indexing }
+    : null;
+}
+
 export async function claimNextJob(
   workerId: string,
   jobTypes: string[],
@@ -909,10 +933,15 @@ export async function setAccountSyncState(
   syncState: AccountSyncState,
   database: Database = getDatabase(),
 ) {
-  await database
-    .update(connectedAccounts)
-    .set({ syncState, updatedAt: new Date() })
-    .where(eq(connectedAccounts.id, accountId));
+  await database.transaction(async (transaction) => {
+    await transaction
+      .update(connectedAccounts)
+      .set({ syncState, updatedAt: new Date() })
+      .where(eq(connectedAccounts.id, accountId));
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId, state: syncState.indexing })})`,
+    );
+  });
 }
 
 export async function upsertMailboxMessage(
@@ -1839,13 +1868,18 @@ export async function setIndexingSyncStage(
   stage: AccountSyncState["indexing"],
   database: Database = getDatabase(),
 ) {
-  await database
-    .update(connectedAccounts)
-    .set({
-      syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{indexing}', to_jsonb(${stage}::text), true)`,
-      updatedAt: new Date(),
-    })
-    .where(eq(connectedAccounts.id, accountId));
+  await database.transaction(async (transaction) => {
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{indexing}', to_jsonb(${stage}::text), true)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, accountId));
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId, state: stage })})`,
+    );
+  });
 }
 
 export async function getEmbeddingCandidates(
@@ -2087,6 +2121,8 @@ export async function enqueueEmbeddingBackfillContinuation(
     modelId: string;
     indexVersion: number;
     predecessorBatchId: string;
+    includeFailed: boolean;
+    batchAttempt: number;
   },
   database: Database = getDatabase(),
 ): Promise<string | null> {
@@ -2100,7 +2136,8 @@ export async function enqueueEmbeddingBackfillContinuation(
       payload: {
         modelId: input.modelId,
         indexVersion: input.indexVersion,
-        includeFailed: false,
+        includeFailed: input.includeFailed,
+        batchAttempt: input.batchAttempt,
       },
       attempts: 0,
       idempotencyKey: `embedding.backfill.continue:${input.predecessorBatchId}`,
@@ -2355,6 +2392,9 @@ export async function completeInitialSync(
       .where(eq(connectedAccounts.id, accountId))
       .returning({ userId: connectedAccounts.userId });
     if (!account) throw new Error("The synchronized Gmail account was not found.");
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId, state: "pending" })})`,
+    );
 
     const postSyncJobs = [
       {
@@ -2690,6 +2730,9 @@ export async function failAnalysisJob(
           updatedAt: new Date(),
         })
         .where(eq(connectedAccounts.id, input.job.accountId));
+      await transaction.execute(
+        sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.job.accountId, state: "failed" })})`,
+      );
     }
   });
 }

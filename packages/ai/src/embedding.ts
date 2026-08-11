@@ -1,7 +1,10 @@
 import OpenAI, { APIError, toFile } from "openai";
+import { getEncoding } from "js-tiktoken";
 
 const OPENAI_BATCH_REQUEST_LIMIT = 50_000;
 const BATCH_FILE_LIMIT_BYTES = 200_000_000;
+const OPENAI_EMBEDDING_INPUT_TOKEN_LIMIT = 8_192;
+const embeddingEncoding = getEncoding("cl100k_base");
 
 export type EmbeddingConfiguration = {
   modelId: string;
@@ -113,7 +116,13 @@ export function buildEmbeddingInput(input: {
   subject: string;
   bodyText: string;
 }): string {
-  return `Subject: ${input.subject.trim()}\n\n${input.bodyText.trim()}`;
+  const text = `Subject: ${input.subject.trim()}\n\n${input.bodyText.trim()}`;
+  const tokens = embeddingEncoding.encode(text);
+  return tokens.length <= OPENAI_EMBEDDING_INPUT_TOKEN_LIMIT
+    ? text
+    : embeddingEncoding.decode(
+        tokens.slice(0, OPENAI_EMBEDDING_INPUT_TOKEN_LIMIT),
+      );
 }
 
 export async function embedMailboxTexts(inputs: string[]): Promise<{
@@ -275,6 +284,25 @@ function responseEmbedding(value: unknown): number[] | null {
   return embedding.embedding as number[];
 }
 
+function responseErrorMessage(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const response = "response" in value ? value.response : undefined;
+  if (response && typeof response === "object" && "body" in response) {
+    const body = response.body;
+    if (body && typeof body === "object" && "error" in body) {
+      const error = body.error;
+      if (error && typeof error === "object" && "message" in error) {
+        return typeof error.message === "string" ? error.message.trim() : null;
+      }
+    }
+  }
+  const error = "error" in value ? value.error : undefined;
+  if (error && typeof error === "object" && "message" in error) {
+    return typeof error.message === "string" ? error.message.trim() : null;
+  }
+  return null;
+}
+
 async function readJsonlFile(openai: OpenAI, fileId: string): Promise<unknown[]> {
   const response = await openai.files.content(fileId);
   const contents = await response.text();
@@ -316,6 +344,7 @@ export async function readEmbeddingBatch(input: {
   const expectedKeys = new Set(input.expectedKeys);
   const embeddingsByKey = new Map<string, number[]>();
   const failedKeys = new Set<string>();
+  const providerMessages = new Set<string>();
 
   if (batch.output_file_id) {
     for (const value of await providerCall(() =>
@@ -337,42 +366,36 @@ export async function readEmbeddingBatch(input: {
     )) {
       const key = customId(value);
       if (key && expectedKeys.has(key)) failedKeys.add(key);
+      const message = responseErrorMessage(value);
+      if (message) providerMessages.add(message);
     }
   }
   for (const key of expectedKeys) {
     if (!embeddingsByKey.has(key)) failedKeys.add(key);
   }
-  const providerMessages =
-    batch.errors?.data
-      ?.map((error) => error.message?.trim())
-      .filter((message): message is string => Boolean(message)) ?? [];
+  for (const error of batch.errors?.data ?? []) {
+    const message = error.message?.trim();
+    if (message) providerMessages.add(message);
+  }
   return {
     state: batch.status,
     outputFileId: batch.output_file_id ?? null,
     errorFileId: batch.error_file_id ?? null,
     embeddingsByKey,
     failedKeys: [...failedKeys],
-    providerError: providerMessages.length > 0 ? providerMessages.join("; ") : null,
+    providerError:
+      providerMessages.size > 0 ? [...providerMessages].join("; ") : null,
   };
 }
 
-export async function deleteEmbeddingBatchFiles(input: {
-  inputFileId: string;
-  outputFileId?: string | null;
-  errorFileId?: string | null;
-}): Promise<string[]> {
+export async function deleteEmbeddingBatchInputFile(
+  inputFileId: string,
+): Promise<boolean> {
   const openai = client();
-  const failures: string[] = [];
-  for (const fileId of new Set(
-    [input.inputFileId, input.outputFileId, input.errorFileId].filter(
-      (value): value is string => Boolean(value),
-    ),
-  )) {
-    try {
-      await openai.files.delete(fileId);
-    } catch {
-      failures.push(fileId);
-    }
+  try {
+    await openai.files.delete(inputFileId);
+    return true;
+  } catch {
+    return false;
   }
-  return failures;
 }

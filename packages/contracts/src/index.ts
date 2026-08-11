@@ -6,6 +6,10 @@ export type AccountSyncState = {
   memory: AccountSyncStage;
 };
 
+export type IndexingStatusEvent = {
+  state: AccountSyncStage;
+};
+
 export type MemoryGenerationProgress = {
   stage:
     | "waiting_for_mail"

@@ -3,6 +3,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import {
   invookLabelKeys,
+  type AccountSyncStage,
+  type IndexingStatusEvent,
   type MemoryGenerationProgress,
   type InvookLabelKey,
   type MailboxWorkspace,
@@ -19,8 +21,10 @@ import {
   decryptGoogleCredential,
   encryptGoogleCredential,
   getGmailConnectionForOAuth,
+  getIndexingSyncStateForUser,
   getMailboxWorkspace,
   hasConnectedGmailAccount,
+  listenForAccountSyncNotifications,
   saveGmailConnection,
   setUserThreadLabel,
 } from "@invook/database";
@@ -73,6 +77,49 @@ type ConnectionErrorReason =
   | "gmail_access"
   | "offline_access"
   | "unknown";
+
+const indexingStages = new Set<AccountSyncStage>([
+  "pending",
+  "running",
+  "complete",
+  "failed",
+]);
+const indexingStreams = new Map<string, Set<ServerResponse>>();
+
+function parseIndexingNotification(
+  payload: string,
+): { accountId: string; state: AccountSyncStage } | null {
+  try {
+    const value = JSON.parse(payload) as Record<string, unknown>;
+    if (
+      typeof value.accountId !== "string" ||
+      typeof value.state !== "string" ||
+      !indexingStages.has(value.state as AccountSyncStage)
+    ) {
+      return null;
+    }
+    return { accountId: value.accountId, state: value.state as AccountSyncStage };
+  } catch {
+    return null;
+  }
+}
+
+function writeIndexingEvent(response: ServerResponse, state: AccountSyncStage) {
+  const event: IndexingStatusEvent = { state };
+  response.write(`event: indexing\ndata: ${JSON.stringify(event)}\n\n`);
+}
+
+function broadcastIndexingNotification(payload: string) {
+  const notification = parseIndexingNotification(payload);
+  if (!notification) return;
+  const streams = indexingStreams.get(notification.accountId);
+  if (!streams) return;
+  for (const response of streams) {
+    if (!response.destroyed && !response.writableEnded) {
+      writeIndexingEvent(response, notification.state);
+    }
+  }
+}
 
 function connectionErrorUrl(reason: ConnectionErrorReason): string {
   const target = new URL("/auth/error", getPublicAppOrigin());
@@ -394,6 +441,48 @@ async function handleMailbox(
   sendJson(response, requestId, 200, await serializeWorkspace(workspace));
 }
 
+async function handleIndexingEvents(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+) {
+  const session = getCurrentSession(request);
+  if (!session) {
+    sendProblem(response, requestId, 401, "Authentication required");
+    return;
+  }
+
+  const indexing = await getIndexingSyncStateForUser(session.userId);
+  if (!indexing) {
+    sendProblem(response, requestId, 404, "Connected Gmail account not found");
+    return;
+  }
+
+  response.statusCode = 200;
+  response.setHeader("content-type", "text/event-stream; charset=utf-8");
+  response.setHeader("cache-control", "no-cache, no-transform");
+  response.setHeader("connection", "keep-alive");
+  response.setHeader("x-accel-buffering", "no");
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("x-request-id", requestId);
+  response.flushHeaders();
+
+  const accountStreams = indexingStreams.get(indexing.accountId) ?? new Set();
+  accountStreams.add(response);
+  indexingStreams.set(indexing.accountId, accountStreams);
+
+  let closed = false;
+  const removeStream = () => {
+    if (closed) return;
+    closed = true;
+    accountStreams.delete(response);
+    if (accountStreams.size === 0) indexingStreams.delete(indexing.accountId);
+  };
+  request.once("close", removeStream);
+  response.once("close", removeStream);
+  writeIndexingEvent(response, indexing.state);
+}
+
 async function handleMailSearch(
   request: IncomingMessage,
   response: ServerResponse,
@@ -549,6 +638,11 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
       return;
     }
 
+    if (request.method === "GET" && pathname === "/v1/indexing/events") {
+      await handleIndexingEvents(request, response, requestId);
+      return;
+    }
+
     if (request.method === "GET" && pathname === "/v1/mail/search") {
       await handleMailSearch(request, response, requestId, requestUrl);
       return;
@@ -641,6 +735,9 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
 
 const host = getApiHost();
 const port = getApiPort();
+const stopAccountSyncNotifications = await listenForAccountSyncNotifications(
+  broadcastIndexingNotification,
+);
 const server = createServer((request, response) => {
   void routeRequest(request, response);
 });
@@ -651,7 +748,12 @@ server.listen(port, host, () => {
 
 function shutDown(signal: NodeJS.Signals) {
   console.log(`api: received ${signal}, closing`);
-  server.close((error) => {
+  for (const streams of indexingStreams.values()) {
+    for (const response of streams) response.end();
+  }
+  indexingStreams.clear();
+  server.close(async (error) => {
+    await stopAccountSyncNotifications();
     if (error) {
       console.error("api: shutdown failed", error);
       process.exitCode = 1;

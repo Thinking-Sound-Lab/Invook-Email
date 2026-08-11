@@ -57,3 +57,23 @@ export async function listenForJobNotifications(onJobAvailable: () => void) {
     await client.end();
   };
 }
+
+export async function listenForAccountSyncNotifications(
+  onAccountSyncChanged: (payload: string) => void,
+) {
+  const databaseUrl = process.env.DATABASE_URL ?? "";
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required for account sync notifications.");
+  }
+
+  const client = postgres(databaseUrl, { max: 1, prepare: false });
+  const listener = await client.listen(
+    "invook_account_sync",
+    onAccountSyncChanged,
+  );
+
+  return async () => {
+    await listener.unlisten();
+    await client.end();
+  };
+}

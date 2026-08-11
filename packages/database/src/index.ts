@@ -1,6 +1,7 @@
 export {
   createDatabase,
   getDatabase,
+  listenForAccountSyncNotifications,
   listenForJobNotifications,
   type Database,
 } from "./client";

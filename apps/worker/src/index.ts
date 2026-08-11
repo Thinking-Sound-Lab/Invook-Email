@@ -2,7 +2,7 @@ import {
   AiConfigurationError,
   buildEmbeddingInput,
   classifyThreads,
-  deleteEmbeddingBatchFiles,
+  deleteEmbeddingBatchInputFile,
   deleteMemoryBatchFiles,
   embedMailboxTexts,
   EmbeddingConfigurationError,
@@ -85,6 +85,7 @@ const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
 const workerId = `worker-${process.pid}`;
 const classificationBatchSize = 12;
 const feedbackBatchSize = 24;
+const embeddingBatchAttemptLimit = 3;
 
 function createJobSignal() {
   let pending = false;
@@ -297,6 +298,7 @@ type EmbeddingSubmissionResult = {
   manifest: EmbeddingBatchManifestEntry[];
   indexVersion: number;
   hasMore: boolean;
+  batchAttempt: number;
 };
 
 function parseEmbeddingManifest(value: unknown): EmbeddingBatchManifestEntry[] {
@@ -351,6 +353,10 @@ function parseEmbeddingSubmissionResult(value: unknown): EmbeddingSubmissionResu
     manifest,
     indexVersion: requiredInteger(result.indexVersion, "embedding index version"),
     hasMore: result.hasMore,
+    batchAttempt:
+      result.batchAttempt === undefined
+        ? 1
+        : requiredInteger(result.batchAttempt, "embedding batch attempt"),
   };
 }
 
@@ -359,6 +365,10 @@ async function runEmbeddingBackfill(job: ClaimedJob) {
     throw new Error("The embedding backfill has no connected account.");
   }
   const config = getEmbeddingConfiguration();
+  const batchAttempt =
+    job.payload.batchAttempt === undefined
+      ? 1
+      : requiredInteger(job.payload.batchAttempt, "embedding batch attempt");
   await setIndexingSyncStage(job.accountId, "running");
   const candidates = await getEmbeddingCandidates({
     accountId: job.accountId,
@@ -413,6 +423,7 @@ async function runEmbeddingBackfill(job: ClaimedJob) {
     ...submission,
     indexVersion: MAIL_INDEX_VERSION,
     hasMore: submission.requestCount < candidates.length,
+    batchAttempt,
   };
 }
 
@@ -522,13 +533,20 @@ async function runEmbeddingBatchEvent(job: ClaimedJob) {
   }
 
   let continuationJobId: string | null = null;
-  if (details.hasMore) {
+  const retryFailed =
+    failedEntries.length > 0 &&
+    details.batchAttempt < embeddingBatchAttemptLimit;
+  if (details.hasMore || retryFailed) {
     continuationJobId = await enqueueEmbeddingBackfillContinuation({
       userId: submission.userId,
       accountId: submission.accountId,
       modelId: details.modelId,
       indexVersion: details.indexVersion,
       predecessorBatchId: details.providerBatchId,
+      includeFailed: retryFailed,
+      batchAttempt: retryFailed
+        ? details.batchAttempt + 1
+        : details.batchAttempt,
     });
   }
   const incompleteCount = await countIncompleteEmbeddings({
@@ -547,26 +565,27 @@ async function runEmbeddingBatchEvent(job: ClaimedJob) {
           : "complete",
   );
 
-  const cleanupFailures = await deleteEmbeddingBatchFiles({
-    inputFileId: details.inputFileId,
-    outputFileId: batch.outputFileId,
-    errorFileId: batch.errorFileId,
-  });
-  if (cleanupFailures.length > 0) {
-    console.error("worker: embedding batch files could not be deleted", {
+  const inputFileDeleted = await deleteEmbeddingBatchInputFile(
+    details.inputFileId,
+  );
+  if (!inputFileDeleted) {
+    console.error("worker: embedding batch input file could not be deleted", {
       submissionJobId: submission.id,
-      fileCount: cleanupFailures.length,
     });
   }
   return {
-    status:
-      failedEntries.length > 0
+    status: continuationJobId
+      ? "continuing"
+      : failedEntries.length > 0
         ? "failed"
-        : continuationJobId || incompleteCount > 0
+        : incompleteCount > 0
           ? "continuing"
           : "complete",
     providerState: batch.state,
     providerError: batch.providerError,
+    outputFileId: batch.outputFileId,
+    errorFileId: batch.errorFileId,
+    batchAttempt: details.batchAttempt,
     savedCount,
     failedRequestCount: failedEntries.length,
     incompleteCount,
