@@ -155,6 +155,11 @@ export type MemoryBatchSubmission = {
   manifest: MemoryBatchManifestEntry[];
 };
 
+export type MemoryBatchScopeSelection = {
+  mode: "global" | "contact";
+  contactEmail: string | null;
+};
+
 export type MemoryBatchRequestProgress = {
   state: Batch["status"];
   completedRequestCount: number | null;
@@ -518,14 +523,24 @@ async function fitScopeToModel(
   return [...left, ...right];
 }
 
-function buildNaturalScopes(threads: MemoryAnalysisThread[]): MemoryScope[] {
+function buildNaturalScopes(
+  threads: MemoryAnalysisThread[],
+  selection?: MemoryBatchScopeSelection,
+): MemoryScope[] {
   const scopes: MemoryScope[] = [];
   const globalScope: MemoryScope = {
     mode: "global",
     contactEmail: null,
     threads,
   };
-  if (evidenceCount(globalScope) >= 3) scopes.push(globalScope);
+  if (
+    (!selection || selection.mode === "global") &&
+    evidenceCount(globalScope) >= 3
+  ) {
+    scopes.push(globalScope);
+  }
+
+  if (selection?.mode === "global") return scopes;
 
   const contacts = new Set<string>();
   for (const thread of threads) {
@@ -536,6 +551,12 @@ function buildNaturalScopes(threads: MemoryAnalysisThread[]): MemoryScope[] {
   }
 
   for (const contactEmail of Array.from(contacts).sort()) {
+    if (
+      selection?.mode === "contact" &&
+      normalizeEmail(selection.contactEmail ?? "") !== contactEmail
+    ) {
+      continue;
+    }
     const contactThreads = threads.filter((thread) =>
       thread.messages.some((message) => isContactEvidence(message, contactEmail)),
     );
@@ -665,6 +686,7 @@ async function createRequests(input: {
   threads: MemoryAnalysisThread[];
   protectedMemories: ProtectedMemory[];
   retryManifest?: MemoryBatchManifestEntry[];
+  scopeSelection?: MemoryBatchScopeSelection;
 }) {
   const keyedScopes: Array<{ key: string; scope: MemoryScope }> = [];
   if (input.retryManifest) {
@@ -684,7 +706,10 @@ async function createRequests(input: {
       });
     }
   } else {
-    for (const naturalScope of buildNaturalScopes(input.threads)) {
+    for (const naturalScope of buildNaturalScopes(
+      input.threads,
+      input.scopeSelection,
+    )) {
       const fitted = await fitScopeToModel(
         input.client,
         input.config,
@@ -785,6 +810,7 @@ export async function submitMemoryBatch(input: {
   threads: MemoryAnalysisThread[];
   protectedMemories: ProtectedMemory[];
   retryManifest?: MemoryBatchManifestEntry[];
+  scopeSelection?: MemoryBatchScopeSelection;
 }): Promise<MemoryBatchSubmission | null> {
   const config = providerConfig(input.provider ?? selectedProvider());
   const client = getClient(config);
@@ -796,6 +822,7 @@ export async function submitMemoryBatch(input: {
       threads: input.threads,
       protectedMemories: input.protectedMemories,
       retryManifest: input.retryManifest,
+      scopeSelection: input.scopeSelection,
     });
     if (requests.length === 0) return null;
     if (requests.length > config.requestLimit) {

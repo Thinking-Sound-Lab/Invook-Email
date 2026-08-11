@@ -22,7 +22,9 @@ import {
 } from "@invook/ai";
 import {
   claimNextJob,
+  clearPendingMemoryEvidence,
   completeInitialSync,
+  completeIncrementalSync,
   completeJob,
   decryptGoogleCredential,
   deferJobWithoutAttempt,
@@ -63,6 +65,7 @@ import {
   getGmailProfile,
   GmailApiError,
   isMemoryEligible,
+  listGmailHistory,
   listGmailMessages,
   parseGmailMessage,
   refreshGoogleAccessToken,
@@ -151,15 +154,16 @@ async function storeMessage(options: {
   accountId: string;
   accountEmail: string;
   message: ParsedGmailMessage;
+  ingestionMode: "initial" | "incremental";
 }) {
-  const { userId, accountId, accountEmail, message } = options;
+  const { userId, accountId, accountEmail, message, ingestionMode } = options;
   const direction =
     message.labelIds.includes("SENT") ||
     extractEmailAddress(message.from) === accountEmail.toLowerCase()
       ? "outgoing"
       : "incoming";
 
-  await upsertIndexedMessage({
+  return upsertIndexedMessage({
     userId,
     accountId,
     providerThreadId: message.providerThreadId,
@@ -174,6 +178,11 @@ async function storeMessage(options: {
     recipients: [...message.to, ...message.cc],
     bodyText: message.bodyText,
     isMemoryEligible: direction === "outgoing" && isMemoryEligible(message),
+    ingestionMode,
+    memoryContactEmails: normalizedEmails(
+      [message.from, ...message.to, ...message.cc],
+      accountEmail,
+    ),
   });
 }
 
@@ -182,8 +191,10 @@ async function syncMailbox(options: {
   userId: string;
   accountId: string;
   accountEmail: string;
+  ingestionMode: "initial" | "incremental";
 }) {
   let pageToken: string | undefined;
+  const changedThreadIds = new Set<string>();
 
   do {
     const page = await listGmailMessages(options.accessToken, {
@@ -198,17 +209,77 @@ async function syncMailbox(options: {
         batch.map((reference) => getGmailMessage(options.accessToken, reference.id)),
       );
       for (const gmailMessage of gmailMessages) {
-        await storeMessage({
+        const stored = await storeMessage({
           userId: options.userId,
           accountId: options.accountId,
           accountEmail: options.accountEmail,
           message: parseGmailMessage(gmailMessage),
+          ingestionMode: options.ingestionMode,
         });
+        if (stored.changed) changedThreadIds.add(stored.threadId);
       }
     }
 
     pageToken = page.nextPageToken;
   } while (pageToken);
+
+  return changedThreadIds;
+}
+
+async function syncMailboxHistory(options: {
+  accessToken: string;
+  userId: string;
+  accountId: string;
+  accountEmail: string;
+  startHistoryId: string;
+}) {
+  let pageToken: string | undefined;
+  let historyId = options.startHistoryId;
+  const messageIds = new Set<string>();
+
+  do {
+    const page = await listGmailHistory(options.accessToken, {
+      startHistoryId: options.startHistoryId,
+      maxResults: 500,
+      pageToken,
+    });
+    for (const history of page.history ?? []) {
+      for (const added of history.messagesAdded ?? []) {
+        messageIds.add(added.message.id);
+      }
+    }
+    if (page.historyId) historyId = page.historyId;
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  const changedThreadIds = new Set<string>();
+  const ids = Array.from(messageIds);
+  for (let start = 0; start < ids.length; start += 5) {
+    const batch = ids.slice(start, start + 5);
+    const gmailMessages = await Promise.all(
+      batch.map(async (messageId) => {
+        try {
+          return await getGmailMessage(options.accessToken, messageId);
+        } catch (error) {
+          if (error instanceof GmailApiError && error.status === 404) return null;
+          throw error;
+        }
+      }),
+    );
+    for (const gmailMessage of gmailMessages) {
+      if (!gmailMessage) continue;
+      const stored = await storeMessage({
+        userId: options.userId,
+        accountId: options.accountId,
+        accountEmail: options.accountEmail,
+        message: parseGmailMessage(gmailMessage),
+        ingestionMode: "incremental",
+      });
+      if (stored.changed) changedThreadIds.add(stored.threadId);
+    }
+  }
+
+  return { changedThreadIds, historyId };
 }
 
 async function runInitialSync(job: ClaimedJob) {
@@ -231,10 +302,82 @@ async function runInitialSync(job: ClaimedJob) {
     userId: account.userId,
     accountId: account.id,
     accountEmail: account.email,
+    ingestionMode: "initial",
   });
 
-  const gmailProfile = await getGmailProfile(credential.accessToken);
-  await completeInitialSync(job.accountId, gmailProfile.historyId);
+  const initialHistoryId =
+    typeof job.payload.historyId === "string" && job.payload.historyId
+      ? job.payload.historyId
+      : account.historyCursor;
+  if (!initialHistoryId) {
+    throw new Error("The initial Gmail history cursor is missing.");
+  }
+  await completeInitialSync(job.accountId, initialHistoryId);
+}
+
+async function runIncrementalSync(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The Gmail sync job has no connected account.");
+  const account = await getWorkerAccount(job.accountId);
+  if (!account) throw new Error("The connected Gmail account or credential was not found.");
+
+  const storedCredential = decryptGoogleCredential(account.tokenCiphertext, encryptionKey);
+  const credential = await refreshCredentialIfRequired(job.accountId, storedCredential);
+  await setAccountSyncState(job.accountId, {
+    ...account.syncState,
+    recent: "running",
+    history: "running",
+  });
+
+  const requestedHistoryId =
+    typeof job.payload.historyId === "string" && job.payload.historyId
+      ? job.payload.historyId
+      : account.historyCursor;
+  let changedThreadIds = new Set<string>();
+  let historyId = requestedHistoryId;
+  if (requestedHistoryId) {
+    try {
+      const incremental = await syncMailboxHistory({
+        accessToken: credential.accessToken,
+        userId: account.userId,
+        accountId: account.id,
+        accountEmail: account.email,
+        startHistoryId: requestedHistoryId,
+      });
+      changedThreadIds = incremental.changedThreadIds;
+      historyId = incremental.historyId;
+    } catch (error) {
+      if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+      const baseline = await getGmailProfile(credential.accessToken);
+      historyId = baseline.historyId;
+      changedThreadIds = await syncMailbox({
+        accessToken: credential.accessToken,
+        userId: account.userId,
+        accountId: account.id,
+        accountEmail: account.email,
+        ingestionMode: "incremental",
+      });
+    }
+  } else {
+    const baseline = await getGmailProfile(credential.accessToken);
+    historyId = baseline.historyId;
+    changedThreadIds = await syncMailbox({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      ingestionMode: "incremental",
+    });
+  }
+
+  await completeIncrementalSync({
+    accountId: account.id,
+    historyCursor: historyId,
+    changedThreadIds: Array.from(changedThreadIds),
+  });
+  return {
+    changedThreadCount: changedThreadIds.size,
+    historyCursor: historyId,
+  };
 }
 
 type IndexedMemoryThread = Awaited<ReturnType<typeof getMemoryAnalysisThreads>>[number];
@@ -249,6 +392,10 @@ type MemorySubmissionResult = {
   batchAttempt: number;
   rootSubmissionJobId: string;
   replaceExisting: boolean;
+  pendingScope: {
+    mode: "global" | "contact";
+    contactEmail: string | null;
+  } | null;
 };
 
 function toMemoryAnalysisThreads(
@@ -325,6 +472,29 @@ function parseSubmissionResult(value: unknown): MemorySubmissionResult | null {
   if (typeof result.replaceExisting !== "boolean") {
     throw new Error("The Memory Batch replacement state is missing.");
   }
+  let pendingScope: MemorySubmissionResult["pendingScope"] = null;
+  if (result.pendingScope !== null && result.pendingScope !== undefined) {
+    if (!result.pendingScope || typeof result.pendingScope !== "object") {
+      throw new Error("The incremental Memory scope is invalid.");
+    }
+    const mode = "mode" in result.pendingScope ? result.pendingScope.mode : undefined;
+    const contactEmail =
+      "contactEmail" in result.pendingScope
+        ? result.pendingScope.contactEmail
+        : undefined;
+    if (
+      (mode !== "global" && mode !== "contact") ||
+      (mode === "global" && contactEmail !== null) ||
+      (mode === "contact" &&
+        (typeof contactEmail !== "string" || !contactEmail.trim()))
+    ) {
+      throw new Error("The incremental Memory scope is invalid.");
+    }
+    pendingScope = {
+      mode,
+      contactEmail: mode === "contact" ? String(contactEmail) : null,
+    };
+  }
   const manifest = parseManifest(result.manifest);
   const requestCount = requiredInteger(
     result.requestCount,
@@ -357,6 +527,7 @@ function parseSubmissionResult(value: unknown): MemorySubmissionResult | null {
       "Root Memory submission job ID",
     ),
     replaceExisting: result.replaceExisting,
+    pendingScope,
   };
 }
 
@@ -434,6 +605,46 @@ function validateBatchCandidates(input: {
   return valid;
 }
 
+async function clearMemoryEvidenceUsedByCandidates(
+  accountId: string,
+  memories: MessageMemoryCandidate[],
+) {
+  const evidenceByScope = new Map<
+    string,
+    {
+      mode: "global" | "contact";
+      contactEmail: string | null;
+      messageIds: Set<string>;
+    }
+  >();
+  for (const memory of memories) {
+    const mode = memory.type === "contact" ? "contact" : "global";
+    const contactEmail = mode === "contact" ? memory.contactEmail : null;
+    if (mode === "contact" && !contactEmail) continue;
+    const key = `${mode}:${contactEmail ?? ""}`;
+    const scope = evidenceByScope.get(key) ?? {
+      mode,
+      contactEmail,
+      messageIds: new Set<string>(),
+    };
+    for (const messageId of memory.evidenceMessageIds) {
+      scope.messageIds.add(messageId);
+    }
+    evidenceByScope.set(key, scope);
+  }
+
+  await Promise.all(
+    Array.from(evidenceByScope.values()).map((scope) =>
+      clearPendingMemoryEvidence({
+        accountId,
+        mode: scope.mode,
+        contactEmail: scope.contactEmail,
+        messageIds: Array.from(scope.messageIds),
+      }),
+    ),
+  );
+}
+
 async function runMemoryExtraction(job: ClaimedJob) {
   if (!job.accountId) throw new Error("The memory job has no connected account.");
   if (job.payload.schemaVersion !== MEMORY_SCHEMA_VERSION) {
@@ -461,6 +672,7 @@ async function runMemoryExtraction(job: ClaimedJob) {
       modelId: null,
       memories: [],
     });
+    await enqueueAnalysisJobsForIndexedAccounts();
     return {
       status: "complete",
       threadCount: threads.length,
@@ -485,6 +697,7 @@ async function runMemoryExtraction(job: ClaimedJob) {
       modelId: null,
       memories: [],
     });
+    await enqueueAnalysisJobsForIndexedAccounts();
     return {
       status: "complete",
       threadCount: threads.length,
@@ -499,8 +712,84 @@ async function runMemoryExtraction(job: ClaimedJob) {
     batchAttempt: 1,
     rootSubmissionJobId: job.id,
     replaceExisting: true,
+    pendingScope: null,
     threadCount: threads.length,
     evidenceMessageCount,
+  };
+}
+
+async function runIncrementalMemoryExtraction(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The incremental Memory job has no account.");
+  if (job.payload.schemaVersion !== MEMORY_SCHEMA_VERSION) {
+    return {
+      status: "superseded",
+      requestedSchemaVersion: job.payload.schemaVersion ?? null,
+      currentSchemaVersion: MEMORY_SCHEMA_VERSION,
+    };
+  }
+  const mode = job.payload.mode;
+  const contactEmail = job.payload.contactEmail;
+  const evidenceMessageIds = job.payload.evidenceMessageIds;
+  if (
+    (mode !== "global" && mode !== "contact") ||
+    (mode === "global" && contactEmail !== null) ||
+    (mode === "contact" &&
+      (typeof contactEmail !== "string" || !contactEmail.trim())) ||
+    !Array.isArray(evidenceMessageIds) ||
+    evidenceMessageIds.some((id) => typeof id !== "string")
+  ) {
+    throw new Error("The incremental Memory evidence scope is invalid.");
+  }
+  const normalizedContactEmail =
+    mode === "contact" ? String(contactEmail).trim().toLowerCase() : null;
+
+  const account = await getWorkerAccount(job.accountId);
+  if (!account) throw new Error("The connected Gmail account was not found.");
+  const threads = toMemoryAnalysisThreads(
+    await getMemoryAnalysisThreads(account.id, evidenceMessageIds),
+    account.email,
+  );
+  const availableEvidenceIds = new Set(
+    threads.flatMap((thread) =>
+      thread.messages
+        .filter((message) => message.ownerEvidence)
+        .map((message) => message.id),
+    ),
+  );
+  const currentEvidenceMessageIds = evidenceMessageIds.filter((id) =>
+    availableEvidenceIds.has(id),
+  );
+  if (currentEvidenceMessageIds.length < 3) {
+    return {
+      status: "waiting_for_repetition",
+      evidenceMessageCount: currentEvidenceMessageIds.length,
+    };
+  }
+  if (!isMemoryBatchConfigured()) throw new MemoryBatchConfigurationError();
+
+  const submission = await submitMemoryBatch({
+    submissionId: job.id,
+    batchAttempt: 1,
+    threads,
+    protectedMemories: await getUserAuthoredMemories(account.id),
+    scopeSelection: {
+      mode,
+      contactEmail: normalizedContactEmail,
+    },
+  });
+  if (!submission) {
+    throw new Error("The incremental Memory Batch produced no requests.");
+  }
+  return {
+    status: "submitted",
+    ...submission,
+    batchAttempt: 1,
+    rootSubmissionJobId: job.id,
+    replaceExisting: false,
+    pendingScope: {
+      mode,
+      contactEmail: normalizedContactEmail,
+    },
   };
 }
 
@@ -561,6 +850,7 @@ async function runMemoryBatchRetry(job: ClaimedJob) {
     batchAttempt,
     rootSubmissionJobId,
     replaceExisting: job.payload.replaceExisting,
+    pendingScope: parentDetails.pendingScope,
   };
 }
 
@@ -641,8 +931,14 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
       modelId: batch.modelId,
       memories,
       replaceExisting: details.replaceExisting,
-      markComplete: failedManifest.length === 0,
+      markComplete:
+        details.pendingScope === null && failedManifest.length === 0,
     });
+    await clearMemoryEvidenceUsedByCandidates(submission.accountId, memories);
+
+    if (details.pendingScope === null && failedManifest.length === 0) {
+      await enqueueAnalysisJobsForIndexedAccounts();
+    }
   }
 
   let retryJobId: string | null = null;
@@ -658,7 +954,7 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
     });
   } else if (failedManifest.length > 0) {
     await setMemorySyncStage(submission.accountId, "failed");
-  } else if (!hasSuccessfulRequests) {
+  } else if (!hasSuccessfulRequests && details.pendingScope === null) {
     await setMemorySyncStage(submission.accountId, "complete");
   }
 
@@ -1175,7 +1471,10 @@ async function runMemoryFeedback(job: ClaimedJob) {
 
 async function markJobFailed(job: ClaimedJob, error: unknown) {
   const message = error instanceof Error ? error.message : "Unknown worker failure";
-  if (job.jobType !== "gmail.initial_sync") {
+  if (
+    job.jobType !== "gmail.initial_sync" &&
+    job.jobType !== "gmail.incremental_sync"
+  ) {
     await failAnalysisJob({
       job,
       message,
@@ -1191,10 +1490,14 @@ async function markJobFailed(job: ClaimedJob, error: unknown) {
 }
 
 async function processNextJob() {
-  const jobTypes = ["gmail.initial_sync"];
+  const jobTypes = ["gmail.initial_sync", "gmail.incremental_sync"];
   if (isAiConfigured()) jobTypes.push("memory.feedback");
   if (isMemoryBatchConfigured()) {
-    jobTypes.push("memory.extract", "label.backfill.submit");
+    jobTypes.push(
+      "memory.extract",
+      "memory.incremental",
+      "label.backfill.submit",
+    );
   }
   if (isAnyMemoryBatchProviderConfigured()) {
     jobTypes.push(
@@ -1213,8 +1516,14 @@ async function processNextJob() {
       case "gmail.initial_sync":
         await runInitialSync(job);
         break;
+      case "gmail.incremental_sync":
+        result = await runIncrementalSync(job);
+        break;
       case "memory.extract":
         result = await runMemoryExtraction(job);
+        break;
+      case "memory.incremental":
+        result = await runIncrementalMemoryExtraction(job);
         break;
       case "memory.batch.retry":
         result = await runMemoryBatchRetry(job);

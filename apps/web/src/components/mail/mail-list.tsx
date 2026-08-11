@@ -1,4 +1,4 @@
-import { RefreshIcon, Search02Icon, StarIcon } from "@hugeicons/core-free-icons";
+import { Search02Icon, StarIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import Link from "next/link";
 
@@ -7,6 +7,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
+import { MailboxRefreshButton } from "./mailbox-refresh-button";
 import type {
   MailAccount,
   MailboxView,
@@ -171,11 +172,7 @@ export function MailList({
               <HugeiconsIcon icon={Search02Icon} size={16} />
             </Link>
           </Button>
-          <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
-            <Link href={`/mail?view=${currentView}`} aria-label="Refresh mailbox">
-              <HugeiconsIcon icon={RefreshIcon} size={16} />
-            </Link>
-          </Button>
+          <MailboxRefreshButton />
         </div>
       </header>
 

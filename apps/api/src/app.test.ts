@@ -73,6 +73,16 @@ test("authentication runs before JSON body parsing", async () => {
   assert.equal(response.json().title, "Authentication required");
 });
 
+test("mailbox refresh requires an authenticated session", async () => {
+  const response = await api.inject({
+    method: "POST",
+    url: "/v1/mailbox/sync",
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().title, "Authentication required");
+});
+
 test("unknown routes use the API problem contract", async () => {
   const response = await api.inject({ method: "GET", url: "/not-a-route" });
   const problem = response.json();

@@ -31,4 +31,6 @@ export type IndexedMessage = {
   recipients: string[];
   bodyText: string;
   isMemoryEligible: boolean;
+  ingestionMode: "initial" | "incremental";
+  memoryContactEmails: string[];
 };

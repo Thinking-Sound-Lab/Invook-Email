@@ -8,9 +8,9 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 
 1. Direct Google OAuth authenticates the user and grants Gmail access.
 2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and creates an indexing job.
-3. The worker indexes the real mailbox by following every Gmail result page.
-4. The selected native Batch provider checks every indexed thread against Invook's Important, Travel, Pitch, and Newsletter definitions. Settings can add a new label and description, which queues the same full-mailbox analysis for that label. Every label, including a built-in label, can be deleted. A user's thread-level label changes take precedence over later model runs.
-5. The worker sends full eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
+3. The first connection performs a one-time full mailbox crawl by following every Gmail result page. After it completes, the mailbox Refresh action or an account reconnect resumes from the stored Gmail history cursor, fetches only newly added messages, and reprocesses only threads whose indexed content changed. If Gmail expires the cursor, the worker rereads the mailbox with change-aware upserts instead of treating every stored message as new.
+4. The selected native Batch provider checks every indexed thread against Invook's Important, Travel, Pitch, and Newsletter definitions. Settings can add a new label and description, which always queues a full analysis of the already-indexed mailbox for that label. Later Gmail changes queue analysis only for affected threads. Every label, including a built-in label, can be deleted. A user's thread-level label changes take precedence over later model runs.
+5. Initial Memory analysis sends all eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Later eligible owner-sent messages accumulate as targeted global and contact evidence without rescanning the original mailbox. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
    - **Preferences:** repeated behavior that applies across contacts and should shape every draft.
    - **Contacts:** repeated communication behavior for one normalized email address.
    - **Scheduling:** repeated behavior used when coordinating meetings or times.
@@ -29,7 +29,7 @@ The right panel currently communicates the agent's Find, Write, and Automate res
 ```text
 apps/
   web/                 Next.js App Router UI
-  api/                 Native Node.js HTTP API, OAuth, sessions, and product endpoints
+  api/                 Fastify API, OAuth, sessions, and product endpoints
   worker/              Gmail indexing, labeling, Memory extraction, and feedback jobs
 packages/
   ai/                  OpenAI and Azure OpenAI Batch Memory analysis plus labels, feedback, and drafts
@@ -42,7 +42,6 @@ docker/
   dev-local.sh         Local Docker startup
 docs/
   product-requirements.md
-  competitive-research.md
 ```
 
 The frontend uses shadcn/ui source components, the free Hugeicons package, Plus Jakarta Sans, and a Notion-inspired dark palette.
@@ -67,7 +66,7 @@ Put the generated value in `TOKEN_ENCRYPTION_KEY`. Invook uses the official Goog
 
 Feedback analysis and drafting use an OpenAI-compatible HTTP endpoint. Set `AI_BASE_URL` and `AI_MODEL`; `AI_API_KEY` is optional for a local model. When the worker runs in Docker and a local model runs on the host, use a host-reachable URL such as `http://host.docker.internal:11434/v1`.
 
-Mailbox label backfills and initial Preferences, Contacts, and Scheduling analysis use one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Label analysis creates one request per indexed thread and continues in another job when a provider file limit is reached. Memory analysis creates one global request and one request per qualifying contact, then splits a scope only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure. There is no embedding step.
+Mailbox label backfills and Preferences, Contacts, and Scheduling analysis use one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Label analysis creates one request per selected indexed thread and continues in another job when a provider file limit is reached. Initial Memory analysis creates one global request and one request per qualifying contact; later Memory jobs contain only accumulated post-indexing evidence for the qualifying scope. A scope is split only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure. There is no embedding step.
 
 For OpenAI, set `MEMORY_BATCH_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_WEBHOOK_SECRET`. Invook uses the pinned `gpt-5.4-nano-2026-03-17` model. Register these events in the [OpenAI project webhook settings](https://platform.openai.com/settings/project/webhooks):
 
@@ -149,6 +148,5 @@ docker compose -f docker/compose.yml config --quiet
 ## Project documents
 
 - [Product requirements](./docs/product-requirements.md)
-- [Competitive research](./docs/competitive-research.md)
 
 The project license has not been selected yet. Do not assume reuse rights until a license is added.

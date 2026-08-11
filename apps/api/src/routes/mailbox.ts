@@ -1,8 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 
-import { getMailboxWorkspace } from "@invook/database";
+import {
+  enqueueIncrementalSyncForUser,
+  getMailboxWorkspace,
+} from "@invook/database";
 
-import { requireSession } from "../access";
+import { mutationAccessHooks, requireSession } from "../access";
 import { sendJson, sendProblem } from "../responses";
 import { serializeWorkspace } from "../serializers";
 
@@ -34,6 +37,35 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
       }
 
       await sendJson(reply, 200, await serializeWorkspace(workspace));
+    },
+  );
+
+  api.post(
+    "/v1/mailbox/sync",
+    { onRequest: mutationAccessHooks },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const result = await enqueueIncrementalSyncForUser(session.userId);
+      if (result.reason === "not_found") {
+        await sendProblem(
+          request,
+          reply,
+          404,
+          "Connected Gmail account not found",
+        );
+        return;
+      }
+      if (result.reason === "initial_sync_incomplete") {
+        await sendProblem(
+          request,
+          reply,
+          409,
+          "Initial Gmail indexing is not complete",
+        );
+        return;
+      }
+      await sendJson(reply, 202, { queued: true, jobId: result.jobId });
     },
   );
 };

@@ -307,6 +307,55 @@ export const messages = pgTable(
   ],
 );
 
+export const memoryPendingEvidence = pgTable(
+  "memory_pending_evidence",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    scope: text("scope").$type<"global" | "contact">().notNull(),
+    contactEmail: text("contact_email").notNull().default(""),
+    schemaVersion: integer("schema_version").notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("memory_pending_evidence_message_scope_idx").on(
+      table.messageId,
+      table.scope,
+      table.contactEmail,
+    ),
+    index("memory_pending_evidence_account_scope_idx").on(
+      table.accountId,
+      table.schemaVersion,
+      table.scope,
+      table.contactEmail,
+      table.createdAt,
+    ),
+    check(
+      "memory_pending_evidence_scope_check",
+      sql`${table.scope} in ('global', 'contact')`,
+    ),
+    check(
+      "memory_pending_evidence_contact_check",
+      sql`(${table.scope} = 'global' and ${table.contactEmail} = '') or (${table.scope} = 'contact' and char_length(btrim(${table.contactEmail})) > 0)`,
+    ),
+    check(
+      "memory_pending_evidence_schema_version_check",
+      sql`${table.schemaVersion} > 0`,
+    ),
+  ],
+);
+
 export const memoryEntries = pgTable(
   "memory_entries",
   {

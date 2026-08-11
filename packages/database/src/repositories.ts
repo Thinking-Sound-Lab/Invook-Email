@@ -32,6 +32,7 @@ import {
   mailLabels,
   memoryDeletions,
   memoryEntries,
+  memoryPendingEvidence,
   messages,
   profiles,
   threadLabels,
@@ -51,6 +52,20 @@ export const DRAFT_FEEDBACK_VERSION = 1;
 
 export type MemoryType = "preference" | "contact" | "scheduling";
 export type MemorySource = "user" | "inferred" | "feedback";
+
+function equalStringArrays(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function equalSender(
+  left: { raw: string; email: string },
+  right: { raw: string; email: string },
+): boolean {
+  return left.raw === right.raw && left.email === right.email;
+}
 
 function normalizeMemoryStatement(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -139,7 +154,13 @@ export async function saveGmailConnection(
       });
 
     const [existingAccount] = await transaction
-      .select({ id: connectedAccounts.id, userId: connectedAccounts.userId })
+      .select({
+        id: connectedAccounts.id,
+        userId: connectedAccounts.userId,
+        historyCursor: connectedAccounts.historyCursor,
+        lastSyncedAt: connectedAccounts.lastSyncedAt,
+        syncState: connectedAccounts.syncState,
+      })
       .from(connectedAccounts)
       .where(
         and(
@@ -174,8 +195,8 @@ export async function saveGmailConnection(
           status: "connected",
           scopes: input.scopes,
           memoryAcknowledgedAt: input.acknowledgedAt,
-          historyCursor: input.historyCursor,
-          syncState: initialSyncState,
+          historyCursor: existingAccount?.historyCursor ?? input.historyCursor,
+          syncState: existingAccount?.syncState ?? initialSyncState,
           updatedAt: new Date(),
         },
       })
@@ -221,15 +242,20 @@ export async function saveGmailConnection(
         },
       });
 
-    const idempotencyKey = `gmail.initial_sync:${account.id}:${input.historyCursor}`;
+    const hasCompletedInitialSync = Boolean(existingAccount?.lastSyncedAt);
+    const syncJobType = hasCompletedInitialSync
+      ? "gmail.incremental_sync"
+      : "gmail.initial_sync";
+    const startHistoryId = existingAccount?.historyCursor ?? input.historyCursor;
+    const idempotencyKey = `${syncJobType}:${account.id}:${startHistoryId}`;
     await transaction
       .insert(jobs)
       .values({
         userId: input.userId,
         accountId: account.id,
-        jobType: "gmail.initial_sync",
+        jobType: syncJobType,
         status: "queued",
-        payload: { historyId: input.historyCursor },
+        payload: { historyId: startHistoryId },
         attempts: 0,
         idempotencyKey,
       })
@@ -237,13 +263,14 @@ export async function saveGmailConnection(
         target: jobs.idempotencyKey,
         set: {
           status: "queued",
-          payload: { historyId: input.historyCursor },
+          payload: { historyId: startHistoryId },
           attempts: 0,
           lockedAt: null,
           lockedBy: null,
           lastError: null,
           updatedAt: new Date(),
         },
+        setWhere: ne(jobs.status, "running"),
       });
 
     await transaction.insert(auditEvents).values({
@@ -256,6 +283,72 @@ export async function saveGmailConnection(
     });
 
     return account;
+  });
+}
+
+export async function enqueueIncrementalSyncForUser(
+  userId: string,
+  database: Database = getDatabase(),
+): Promise<
+  | { jobId: string; reason: null }
+  | { jobId: null; reason: "not_found" | "initial_sync_incomplete" }
+> {
+  return database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({
+        id: connectedAccounts.id,
+        historyCursor: connectedAccounts.historyCursor,
+        lastSyncedAt: connectedAccounts.lastSyncedAt,
+      })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.userId, userId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .orderBy(desc(connectedAccounts.createdAt))
+      .limit(1);
+    if (!account) return { jobId: null, reason: "not_found" };
+    if (!account.historyCursor || !account.lastSyncedAt) {
+      return { jobId: null, reason: "initial_sync_incomplete" };
+    }
+
+    const idempotencyKey = `gmail.incremental_sync:${account.id}:${account.historyCursor}`;
+    const [queued] = await transaction
+      .insert(jobs)
+      .values({
+        userId,
+        accountId: account.id,
+        jobType: "gmail.incremental_sync",
+        status: "queued",
+        payload: { historyId: account.historyCursor },
+        attempts: 0,
+        idempotencyKey,
+      })
+      .onConflictDoUpdate({
+        target: jobs.idempotencyKey,
+        set: {
+          status: "queued",
+          payload: { historyId: account.historyCursor },
+          attempts: 0,
+          lockedAt: null,
+          lockedBy: null,
+          lastError: null,
+          updatedAt: new Date(),
+        },
+        setWhere: ne(jobs.status, "running"),
+      })
+      .returning({ id: jobs.id });
+    if (queued) return { jobId: queued.id, reason: null };
+
+    const [existing] = await transaction
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(eq(jobs.idempotencyKey, idempotencyKey))
+      .limit(1);
+    if (existing) return { jobId: existing.id, reason: null };
+    throw new Error("The incremental Gmail sync job could not be queued.");
   });
 }
 
@@ -669,6 +762,8 @@ export async function getWorkerAccount(
       id: connectedAccounts.id,
       userId: connectedAccounts.userId,
       email: connectedAccounts.email,
+      historyCursor: connectedAccounts.historyCursor,
+      syncState: connectedAccounts.syncState,
       tokenCiphertext: accountSecrets.tokenCiphertext,
     })
     .from(connectedAccounts)
@@ -705,7 +800,7 @@ export async function upsertIndexedMessage(
   input: IndexedMessage,
   database: Database = getDatabase(),
 ) {
-  await database.transaction(async (transaction) => {
+  return database.transaction(async (transaction) => {
     const [existingThread] = await transaction
       .select({ id: threads.id, latestMessageAt: threads.latestMessageAt })
       .from(threads)
@@ -769,24 +864,45 @@ export async function upsertIndexedMessage(
 
     if (!threadId) throw new Error("The Gmail thread could not be stored.");
 
-    await transaction
-      .insert(messages)
-      .values({
-        userId: input.userId,
-        threadId,
-        providerMessageId: input.providerMessageId,
-        direction: input.direction,
-        sender: input.sender,
-        recipients: input.recipients,
-        labelIds: input.labelIds,
-        subject: input.subject,
-        bodyText: input.bodyText,
-        sentAt: input.sentAt,
-        isMemoryEligible: input.isMemoryEligible,
+    const [existingMessage] = await transaction
+      .select({
+        id: messages.id,
+        direction: messages.direction,
+        sender: messages.sender,
+        recipients: messages.recipients,
+        labelIds: messages.labelIds,
+        subject: messages.subject,
+        bodyText: messages.bodyText,
+        sentAt: messages.sentAt,
+        isMemoryEligible: messages.isMemoryEligible,
       })
-      .onConflictDoUpdate({
-        target: [messages.threadId, messages.providerMessageId],
-        set: {
+      .from(messages)
+      .where(
+        and(
+          eq(messages.threadId, threadId),
+          eq(messages.providerMessageId, input.providerMessageId),
+        ),
+      )
+      .limit(1);
+    const changed =
+      !existingMessage ||
+      existingMessage.direction !== input.direction ||
+      !equalSender(existingMessage.sender, input.sender) ||
+      !equalStringArrays(existingMessage.recipients, input.recipients) ||
+      !equalStringArrays(existingMessage.labelIds, input.labelIds) ||
+      existingMessage.subject !== input.subject ||
+      existingMessage.bodyText !== input.bodyText ||
+      existingMessage.sentAt.getTime() !== input.sentAt.getTime() ||
+      existingMessage.isMemoryEligible !== input.isMemoryEligible;
+
+    let messageId = existingMessage?.id;
+    if (changed) {
+      const [storedMessage] = await transaction
+        .insert(messages)
+        .values({
+          userId: input.userId,
+          threadId,
+          providerMessageId: input.providerMessageId,
           direction: input.direction,
           sender: input.sender,
           recipients: input.recipients,
@@ -795,32 +911,92 @@ export async function upsertIndexedMessage(
           bodyText: input.bodyText,
           sentAt: input.sentAt,
           isMemoryEligible: input.isMemoryEligible,
-          updatedAt: new Date(),
-        },
-      });
+        })
+        .onConflictDoUpdate({
+          target: [messages.threadId, messages.providerMessageId],
+          set: {
+            direction: input.direction,
+            sender: input.sender,
+            recipients: input.recipients,
+            labelIds: input.labelIds,
+            subject: input.subject,
+            bodyText: input.bodyText,
+            sentAt: input.sentAt,
+            isMemoryEligible: input.isMemoryEligible,
+            updatedAt: new Date(),
+          },
+        })
+        .returning({ id: messages.id });
+      messageId = storedMessage?.id;
+      if (!messageId) throw new Error("The Gmail message could not be stored.");
 
-    await transaction
-      .delete(threadLabelAnalyses)
-      .where(eq(threadLabelAnalyses.threadId, threadId));
-    await transaction
-      .delete(threadLabels)
-      .where(
-        and(eq(threadLabels.threadId, threadId), eq(threadLabels.source, "ai")),
-      );
-    await transaction
-      .update(mailLabels)
-      .set({ analysisState: "pending", updatedAt: new Date() })
-      .where(eq(mailLabels.accountId, input.accountId));
+      await transaction
+        .delete(threadLabelAnalyses)
+        .where(eq(threadLabelAnalyses.threadId, threadId));
+      await transaction
+        .delete(threadLabels)
+        .where(
+          and(eq(threadLabels.threadId, threadId), eq(threadLabels.source, "ai")),
+        );
+      await transaction
+        .update(mailLabels)
+        .set({ analysisState: "pending", updatedAt: new Date() })
+        .where(eq(mailLabels.accountId, input.accountId));
 
-    const [messageTotal] = await transaction
-      .select({ value: count(messages.id) })
-      .from(messages)
-      .where(eq(messages.threadId, threadId));
+      if (input.ingestionMode === "incremental") {
+        await transaction
+          .delete(memoryPendingEvidence)
+          .where(eq(memoryPendingEvidence.messageId, messageId));
+        if (input.direction === "outgoing" && input.isMemoryEligible) {
+          const contactEmails = Array.from(
+            new Set(input.memoryContactEmails.map(normalizeContactEmail).filter(Boolean)),
+          ) as string[];
+          await transaction
+            .insert(memoryPendingEvidence)
+            .values([
+              {
+                userId: input.userId,
+                accountId: input.accountId,
+                threadId,
+                messageId,
+                scope: "global" as const,
+                contactEmail: "",
+                schemaVersion: MEMORY_SCHEMA_VERSION,
+              },
+              ...contactEmails.map((contactEmail) => ({
+                userId: input.userId,
+                accountId: input.accountId,
+                threadId,
+                messageId,
+                scope: "contact" as const,
+                contactEmail,
+                schemaVersion: MEMORY_SCHEMA_VERSION,
+              })),
+            ])
+            .onConflictDoNothing({
+              target: [
+                memoryPendingEvidence.messageId,
+                memoryPendingEvidence.scope,
+                memoryPendingEvidence.contactEmail,
+              ],
+            });
+        }
+      }
+    }
 
-    await transaction
-      .update(threads)
-      .set({ messageCount: messageTotal?.value ?? 0, updatedAt: new Date() })
-      .where(eq(threads.id, threadId));
+    if (changed) {
+      const [messageTotal] = await transaction
+        .select({ value: count(messages.id) })
+        .from(messages)
+        .where(eq(messages.threadId, threadId));
+
+      await transaction
+        .update(threads)
+        .set({ messageCount: messageTotal?.value ?? 0, updatedAt: new Date() })
+        .where(eq(threads.id, threadId));
+    }
+
+    return { threadId, changed };
   });
 }
 
@@ -1058,12 +1234,18 @@ async function loadLabelAnalysisThreads(
     .where(lte(rankedMessages.rank, 3))
     .orderBy(desc(rankedMessages.sentAt));
 
+  const messagesByThread = new Map<string, typeof messageRows>();
+  for (const message of messageRows) {
+    const grouped = messagesByThread.get(message.threadId) ?? [];
+    grouped.push(message);
+    messagesByThread.set(message.threadId, grouped);
+  }
+
   return threadRows.map((thread) => ({
     id: thread.id,
     subject: thread.subject,
     participants: thread.participants,
-    messages: messageRows
-      .filter((message) => message.threadId === thread.id)
+    messages: (messagesByThread.get(thread.id) ?? [])
       .slice(0, 3)
       .map((message) => ({
         direction: message.direction,
@@ -1318,8 +1500,13 @@ export async function setUserThreadLabel(
 
 export async function getMemoryAnalysisThreads(
   accountId: string,
+  evidenceMessageIds?: string[],
   database: Database = getDatabase(),
 ) {
+  if (evidenceMessageIds && evidenceMessageIds.length === 0) return [];
+  const evidenceIdSet = evidenceMessageIds
+    ? new Set(evidenceMessageIds)
+    : null;
   const eligibleThreadIds = database
     .select({ id: messages.threadId })
     .from(messages)
@@ -1328,6 +1515,9 @@ export async function getMemoryAnalysisThreads(
         eq(messages.direction, "outgoing"),
         eq(messages.isMemoryEligible, true),
         eq(messages.excludedFromMemory, false),
+        ...(evidenceMessageIds
+          ? [inArray(messages.id, evidenceMessageIds)]
+          : []),
       ),
     )
     .groupBy(messages.threadId);
@@ -1356,6 +1546,9 @@ export async function getMemoryAnalysisThreads(
           and(
             eq(messages.direction, "outgoing"),
             eq(messages.isMemoryEligible, true),
+            ...(evidenceMessageIds
+              ? [inArray(messages.id, evidenceMessageIds)]
+              : []),
           ),
         ),
       ),
@@ -1392,7 +1585,10 @@ export async function getMemoryAnalysisThreads(
       recipients: row.recipients,
       bodyText: row.bodyText,
       sentAt: row.sentAt,
-      ownerEvidence: row.direction === "outgoing" && row.isMemoryEligible,
+      ownerEvidence:
+        row.direction === "outgoing" &&
+        row.isMemoryEligible &&
+        (!evidenceIdSet || evidenceIdSet.has(row.id)),
     });
     grouped.set(row.threadId, thread);
   }
@@ -2152,6 +2348,182 @@ export async function completeInitialSync(
   });
 }
 
+type PendingMemoryEvidence = {
+  messageId: string;
+  scope: "global" | "contact";
+  contactEmail: string;
+};
+
+function incrementalMemoryJobs(input: {
+  userId: string;
+  accountId: string;
+  pendingEvidence: PendingMemoryEvidence[];
+}) {
+  const evidenceByScope = new Map<string, PendingMemoryEvidence[]>();
+  for (const evidence of input.pendingEvidence) {
+    const key = `${evidence.scope}:${evidence.contactEmail}`;
+    const grouped = evidenceByScope.get(key) ?? [];
+    grouped.push(evidence);
+    evidenceByScope.set(key, grouped);
+  }
+
+  return Array.from(evidenceByScope.values()).flatMap((evidence) => {
+    if (evidence.length < 3) return [];
+    const first = evidence[0];
+    if (!first) return [];
+    const evidenceMessageIds = evidence.map((entry) => entry.messageId);
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          scope: first.scope,
+          contactEmail: first.contactEmail,
+          evidenceMessageIds,
+        }),
+      )
+      .digest("hex");
+    return [{
+      userId: input.userId,
+      accountId: input.accountId,
+      jobType: "memory.incremental",
+      status: "queued" as const,
+      payload: {
+        schemaVersion: MEMORY_SCHEMA_VERSION,
+        mode: first.scope,
+        contactEmail: first.scope === "contact" ? first.contactEmail : null,
+        evidenceMessageIds,
+      },
+      attempts: 0,
+      idempotencyKey: `memory.incremental:${input.accountId}:${digest}`,
+    }];
+  });
+}
+
+export async function completeIncrementalSync(
+  input: {
+    accountId: string;
+    historyCursor: string;
+    changedThreadIds: string[];
+  },
+  database: Database = getDatabase(),
+) {
+  await database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ userId: connectedAccounts.userId, syncState: connectedAccounts.syncState })
+      .from(connectedAccounts)
+      .where(eq(connectedAccounts.id, input.accountId))
+      .for("update")
+      .limit(1);
+    if (!account) throw new Error("The indexed Gmail account was not found.");
+
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        historyCursor: input.historyCursor,
+        lastSyncedAt: new Date(),
+        syncState: {
+          ...account.syncState,
+          recent: "complete",
+          history: "complete",
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, input.accountId));
+
+    const changedThreadIds = Array.from(new Set(input.changedThreadIds));
+    const pendingLabels = await transaction
+      .select({ id: mailLabels.id, definitionVersion: mailLabels.definitionVersion })
+      .from(mailLabels)
+      .where(
+        and(
+          eq(mailLabels.accountId, input.accountId),
+          ne(mailLabels.analysisState, "complete"),
+        ),
+      );
+    if (pendingLabels.length > 0) {
+      await transaction
+        .insert(jobs)
+        .values(
+          pendingLabels.map((label) => ({
+            userId: account.userId,
+            accountId: input.accountId,
+            jobType: "label.backfill.submit",
+            status: "queued" as const,
+            payload: {
+              labelId: label.id,
+              definitionVersion: label.definitionVersion,
+            },
+            attempts: 0,
+            idempotencyKey: `label.backfill.submit:${label.id}:${label.definitionVersion}:${input.historyCursor}`,
+          })),
+        )
+        .onConflictDoNothing({ target: jobs.idempotencyKey });
+    }
+
+    const pendingEvidence = await transaction
+      .select({
+        messageId: memoryPendingEvidence.messageId,
+        scope: memoryPendingEvidence.scope,
+        contactEmail: memoryPendingEvidence.contactEmail,
+      })
+      .from(memoryPendingEvidence)
+      .where(
+        and(
+          eq(memoryPendingEvidence.accountId, input.accountId),
+          eq(memoryPendingEvidence.schemaVersion, MEMORY_SCHEMA_VERSION),
+        ),
+      )
+      .orderBy(asc(memoryPendingEvidence.createdAt), asc(memoryPendingEvidence.id));
+    const memoryJobs =
+      account.syncState.memory === "complete"
+        ? incrementalMemoryJobs({
+            userId: account.userId,
+            accountId: input.accountId,
+            pendingEvidence,
+          })
+        : [];
+    if (memoryJobs.length > 0) {
+      await transaction
+        .insert(jobs)
+        .values(memoryJobs)
+        .onConflictDoNothing({ target: jobs.idempotencyKey });
+    }
+
+    await transaction.insert(auditEvents).values({
+      userId: account.userId,
+      accountId: input.accountId,
+      eventType: "gmail.incremental_sync_completed",
+      targetType: "connected_account",
+      targetId: input.accountId,
+      metadata: {
+        historyCursor: input.historyCursor,
+        changedThreadCount: changedThreadIds.length,
+      },
+    });
+  });
+}
+
+export async function clearPendingMemoryEvidence(
+  input: {
+    accountId: string;
+    mode: "global" | "contact";
+    contactEmail: string | null;
+    messageIds: string[];
+  },
+  database: Database = getDatabase(),
+) {
+  if (input.messageIds.length === 0) return;
+  await database
+    .delete(memoryPendingEvidence)
+    .where(
+      and(
+        eq(memoryPendingEvidence.accountId, input.accountId),
+        eq(memoryPendingEvidence.scope, input.mode),
+        eq(memoryPendingEvidence.contactEmail, input.contactEmail ?? ""),
+        inArray(memoryPendingEvidence.messageId, input.messageIds),
+      ),
+    );
+}
+
 export async function enqueueAnalysisJobsForIndexedAccounts(
   database: Database = getDatabase(),
 ): Promise<number> {
@@ -2173,16 +2545,20 @@ export async function enqueueAnalysisJobsForIndexedAccounts(
             id: mailLabels.id,
             accountId: mailLabels.accountId,
             definitionVersion: mailLabels.definitionVersion,
+            analysisState: mailLabels.analysisState,
           })
           .from(mailLabels)
           .where(inArray(mailLabels.accountId, indexedAccountIds))
       : [];
 
-  const values = indexedAccounts.flatMap((account) => {
+  const analysisJobs = indexedAccounts.flatMap((account) => {
     if (account.syncState.recent !== "complete" || !account.historyCursor) return [];
     return [
       ...accountLabels
-        .filter((label) => label.accountId === account.id)
+        .filter(
+          (label) =>
+            label.accountId === account.id && label.analysisState !== "complete",
+        )
         .map((label) => ({
           userId: account.userId,
           accountId: account.id,
@@ -2195,17 +2571,63 @@ export async function enqueueAnalysisJobsForIndexedAccounts(
           attempts: 0,
           idempotencyKey: `label.backfill.submit:${label.id}:${label.definitionVersion}:${account.historyCursor}`,
         })),
-      {
-        userId: account.userId,
-        accountId: account.id,
-        jobType: "memory.extract",
-        status: "queued" as const,
-        payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
-        attempts: 0,
-        idempotencyKey: `memory.extract:${account.id}:${MEMORY_SCHEMA_VERSION}:${account.historyCursor}`,
-      },
+      ...(account.syncState.memory === "complete"
+        ? []
+        : [{
+            userId: account.userId,
+            accountId: account.id,
+            jobType: "memory.extract",
+            status: "queued" as const,
+            payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
+            attempts: 0,
+            idempotencyKey: `memory.extract:${account.id}:${MEMORY_SCHEMA_VERSION}:${account.historyCursor}`,
+          }]),
     ];
   });
+  const memoryReadyAccountIds = indexedAccounts
+    .filter((account) => account.syncState.memory === "complete")
+    .map((account) => account.id);
+  const pendingEvidence =
+    memoryReadyAccountIds.length > 0
+      ? await database
+          .select({
+            accountId: memoryPendingEvidence.accountId,
+            messageId: memoryPendingEvidence.messageId,
+            scope: memoryPendingEvidence.scope,
+            contactEmail: memoryPendingEvidence.contactEmail,
+          })
+          .from(memoryPendingEvidence)
+          .where(
+            and(
+              inArray(memoryPendingEvidence.accountId, memoryReadyAccountIds),
+              eq(memoryPendingEvidence.schemaVersion, MEMORY_SCHEMA_VERSION),
+            ),
+          )
+          .orderBy(
+            asc(memoryPendingEvidence.accountId),
+            asc(memoryPendingEvidence.createdAt),
+            asc(memoryPendingEvidence.id),
+          )
+      : [];
+  const pendingEvidenceByAccount = new Map<
+    string,
+    PendingMemoryEvidence[]
+  >();
+  for (const evidence of pendingEvidence) {
+    const grouped = pendingEvidenceByAccount.get(evidence.accountId) ?? [];
+    grouped.push(evidence);
+    pendingEvidenceByAccount.set(evidence.accountId, grouped);
+  }
+  const incrementalJobs = indexedAccounts.flatMap((account) =>
+    account.syncState.memory === "complete"
+      ? incrementalMemoryJobs({
+          userId: account.userId,
+          accountId: account.id,
+          pendingEvidence: pendingEvidenceByAccount.get(account.id) ?? [],
+        })
+      : [],
+  );
+  const values = [...analysisJobs, ...incrementalJobs];
   if (values.length === 0) return 0;
 
   const inserted = await database
@@ -2256,6 +2678,7 @@ export async function enqueueBatchEvent(
           eq(jobs.status, "complete"),
           inArray(jobs.jobType, [
             "memory.extract",
+            "memory.incremental",
             "memory.batch.retry",
             "label.backfill.submit",
             "label.batch.retry",
@@ -2311,7 +2734,11 @@ export async function getMemoryBatchSubmission(
       and(
         eq(jobs.id, jobId),
         eq(jobs.status, "complete"),
-        inArray(jobs.jobType, ["memory.extract", "memory.batch.retry"]),
+        inArray(jobs.jobType, [
+          "memory.extract",
+          "memory.incremental",
+          "memory.batch.retry",
+        ]),
       ),
     )
     .limit(1);
@@ -2611,11 +3038,19 @@ export async function failJobAndAccount(input: {
       .where(eq(jobs.id, input.job.id));
 
     if (accountId) {
+      const [account] = await transaction
+        .select({ syncState: connectedAccounts.syncState })
+        .from(connectedAccounts)
+        .where(eq(connectedAccounts.id, accountId))
+        .limit(1);
       await transaction
         .update(connectedAccounts)
         .set({
           status: input.reconnectRequired ? "reconnect_required" : "connected",
-          syncState: { recent: "failed", memory: "pending", history: "pending" },
+          syncState:
+            input.job.jobType === "gmail.incremental_sync" && account
+              ? { ...account.syncState, recent: "failed", history: "failed" }
+              : { recent: "failed", memory: "pending", history: "pending" },
           updatedAt: new Date(),
         })
         .where(eq(connectedAccounts.id, accountId));

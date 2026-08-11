@@ -39,6 +39,15 @@ export type GmailMessagePage = {
   resultSizeEstimate?: number;
 };
 
+export type GmailHistoryPage = {
+  history?: Array<{
+    id: string;
+    messagesAdded?: Array<{ message: GmailMessageReference }>;
+  }>;
+  nextPageToken?: string;
+  historyId?: string;
+};
+
 export class GmailApiError extends Error {
   constructor(
     message: string,
@@ -115,6 +124,27 @@ export function listGmailMessages(
   return gmailRequest<GmailMessagePage>(
     accessToken,
     `/users/me/messages?${search.toString()}`,
+  );
+}
+
+export function listGmailHistory(
+  accessToken: string,
+  options: {
+    startHistoryId: string;
+    maxResults: number;
+    pageToken?: string;
+  },
+): Promise<GmailHistoryPage> {
+  const search = new URLSearchParams({
+    startHistoryId: options.startHistoryId,
+    historyTypes: "messageAdded",
+    maxResults: String(options.maxResults),
+  });
+  if (options.pageToken) search.set("pageToken", options.pageToken);
+
+  return gmailRequest<GmailHistoryPage>(
+    accessToken,
+    `/users/me/history?${search.toString()}`,
   );
 }
 
