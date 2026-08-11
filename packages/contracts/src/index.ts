@@ -10,6 +10,24 @@ export type IndexingStatusEvent = {
   state: AccountSyncStage;
 };
 
+export const mailboxViews = [
+  "all",
+  "travel",
+  "important",
+  "pitch",
+  "newsletter",
+  "starred",
+  "shared",
+  "reminders",
+  "scheduled",
+  "drafts",
+  "done",
+  "sent",
+  "trash",
+] as const;
+
+export type MailboxView = (typeof mailboxViews)[number];
+
 export type MemoryGenerationProgress = {
   stage:
     | "waiting_for_mail"
@@ -137,11 +155,18 @@ export type MailboxSelectedThread = Omit<MailboxThreadSummary, "snippet"> & {
   draft: ReplyDraft | null;
 };
 
+export type MailboxPagination = {
+  newerCursor: string | null;
+  olderCursor: string | null;
+  totalThreadCount: number;
+};
+
 export type MailboxWorkspace = {
   aiConfigured: boolean;
   account: MailboxAccount;
   memoryProgress: MemoryGenerationProgress;
   memories: MemoryEntry[];
+  pagination: MailboxPagination;
   threads: MailboxThreadSummary[];
   selectedThread: MailboxSelectedThread | null;
 };

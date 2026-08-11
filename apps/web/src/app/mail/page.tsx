@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
+import { mailboxViews } from "@invook/contracts";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
 import { MailList } from "@/components/mail/mail-list";
@@ -26,24 +27,11 @@ type MailPageProps = {
     surface?: string | string[];
     thread?: string | string[];
     q?: string | string[];
+    cursor?: string | string[];
   }>;
 };
 
-const mailboxViews = new Set<MailboxView>([
-  "all",
-  "travel",
-  "important",
-  "pitch",
-  "newsletter",
-  "starred",
-  "shared",
-  "reminders",
-  "scheduled",
-  "drafts",
-  "done",
-  "sent",
-  "trash",
-]);
+const mailboxViewSet = new Set<string>(mailboxViews);
 
 const mailSurfaces = new Set<MailSurface>([
   "mail",
@@ -58,15 +46,11 @@ function firstValue(value: string | string[] | undefined): string | undefined {
 }
 
 function normalizeView(value: string | undefined): MailboxView {
-  return value && mailboxViews.has(value as MailboxView) ? (value as MailboxView) : "all";
+  return value && mailboxViewSet.has(value) ? (value as MailboxView) : "all";
 }
 
 function normalizeSurface(value: string | undefined): MailSurface {
   return value && mailSurfaces.has(value as MailSurface) ? (value as MailSurface) : "mail";
-}
-
-function hasLabel(thread: MailThreadSummary, ...labels: string[]): boolean {
-  return labels.some((label) => thread.labelIds.includes(label));
 }
 
 function hasInvookLabel(
@@ -74,37 +58,6 @@ function hasInvookLabel(
   label: "important" | "travel" | "pitch" | "newsletter",
 ): boolean {
   return thread.invookLabels.some((threadLabel) => threadLabel.key === label);
-}
-
-function filterByView(threads: MailThreadSummary[], view: MailboxView): MailThreadSummary[] {
-  switch (view) {
-    case "all":
-      return threads;
-    case "travel":
-      return threads.filter((thread) => hasInvookLabel(thread, "travel"));
-    case "important":
-      return threads.filter((thread) => hasInvookLabel(thread, "important"));
-    case "pitch":
-      return threads.filter((thread) => hasInvookLabel(thread, "pitch"));
-    case "newsletter":
-      return threads.filter((thread) => hasInvookLabel(thread, "newsletter"));
-    case "starred":
-      return threads.filter((thread) => hasLabel(thread, "STARRED"));
-    case "shared":
-      return threads.filter((thread) => hasLabel(thread, "SHARED"));
-    case "reminders":
-      return threads.filter((thread) => hasLabel(thread, "REMINDER"));
-    case "scheduled":
-      return threads.filter((thread) => hasLabel(thread, "SCHEDULED"));
-    case "drafts":
-      return threads.filter((thread) => hasLabel(thread, "DRAFT"));
-    case "done":
-      return threads.filter((thread) => hasLabel(thread, "DONE"));
-    case "sent":
-      return threads.filter((thread) => hasLabel(thread, "SENT"));
-    case "trash":
-      return threads.filter((thread) => hasLabel(thread, "TRASH"));
-  }
 }
 
 export default async function MailPage({ searchParams }: MailPageProps) {
@@ -116,15 +69,20 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   const requestedSurface = normalizeSurface(firstValue(params.surface));
   const currentSurface = requestedThreadId ? "mail" : requestedSurface;
   const query = firstValue(params.q)?.trim();
+  const mailboxCursor = firstValue(params.cursor)?.trim() || undefined;
 
-  const workspace = await getMailboxWorkspace(requestedThreadId);
+  const workspace = await getMailboxWorkspace({
+    cursor: mailboxCursor,
+    selectedThreadId: requestedThreadId,
+    view: currentView,
+  });
   if (!workspace) redirect("/");
 
   const mailboxThreads = workspace.threads as MailThreadSummary[];
   const selectedThread = workspace.selectedThread as SelectedThread | null;
   const searchResults =
     currentSurface === "search" && query ? await searchMailbox(query) : [];
-  const filteredThreads = filterByView(mailboxThreads, currentView);
+  const filteredThreads = mailboxThreads;
   const importantThreads =
     currentView === "all" && !query
       ? filteredThreads.filter((thread) => hasInvookLabel(thread, "important"))
@@ -140,6 +98,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
       <ThreadReader
         thread={selectedThread}
         currentView={currentView}
+        mailboxCursor={mailboxCursor}
         aiConfigured={workspace.aiConfigured}
       />
     );
@@ -165,6 +124,8 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         account={workspace.account}
         currentView={currentView}
         importantThreads={importantThreads}
+        mailboxCursor={mailboxCursor}
+        pagination={workspace.pagination}
         remainingThreads={remainingThreads}
         query={currentSurface === "search" ? query : undefined}
       />

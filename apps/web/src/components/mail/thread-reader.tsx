@@ -24,17 +24,22 @@ import type { MailboxView, SelectedThread } from "./types";
 export function ThreadReader({
   thread,
   currentView,
+  mailboxCursor,
   aiConfigured,
 }: {
   thread: SelectedThread;
   currentView: MailboxView;
+  mailboxCursor?: string;
   aiConfigured: boolean;
 }) {
+  const mailboxQuery = new URLSearchParams({ view: currentView });
+  if (mailboxCursor) mailboxQuery.set("cursor", mailboxCursor);
+
   return (
     <section className="flex min-h-0 flex-col bg-background" aria-label="Open email thread">
       <header className="flex h-15 shrink-0 items-center justify-between border-b border-border/45 px-4">
         <Button asChild variant="ghost" size="sm" className="text-sm text-muted-foreground">
-          <Link href={`/mail?view=${currentView}`} scroll={false}>
+          <Link href={`/mail?${mailboxQuery.toString()}`} scroll={false}>
             <HugeiconsIcon icon={ArrowLeft02Icon} size={16} />
             Back
           </Link>

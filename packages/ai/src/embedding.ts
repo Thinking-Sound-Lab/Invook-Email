@@ -1,15 +1,22 @@
-import OpenAI, { APIError, toFile } from "openai";
+import { scheduler } from "node:timers/promises";
+
 import { getEncoding } from "js-tiktoken";
+import OpenAI, { APIError, toFile } from "openai";
+import type { Batch } from "openai/resources/batches";
 
 const OPENAI_BATCH_REQUEST_LIMIT = 50_000;
 const BATCH_FILE_LIMIT_BYTES = 200_000_000;
 const OPENAI_EMBEDDING_INPUT_TOKEN_LIMIT = 8_192;
+const EMBEDDING_TOKENIZER_CHARACTER_LIMIT = 65_536;
+const EVENT_LOOP_YIELD_INTERVAL = 25;
 const embeddingEncoding = getEncoding("cl100k_base");
 
 export type EmbeddingConfiguration = {
   modelId: string;
   dimensions: number;
 };
+
+export type EmbeddingBatchState = Batch["status"];
 
 export type EmbeddingBatchManifestEntry = {
   key: string;
@@ -117,9 +124,10 @@ export function buildEmbeddingInput(input: {
   bodyText: string;
 }): string {
   const text = `Subject: ${input.subject.trim()}\n\n${input.bodyText.trim()}`;
-  const tokens = embeddingEncoding.encode(text);
+  const tokenizerInput = text.slice(0, EMBEDDING_TOKENIZER_CHARACTER_LIMIT);
+  const tokens = embeddingEncoding.encode(tokenizerInput);
   return tokens.length <= OPENAI_EMBEDDING_INPUT_TOKEN_LIMIT
-    ? text
+    ? tokenizerInput
     : embeddingEncoding.decode(
         tokens.slice(0, OPENAI_EMBEDDING_INPUT_TOKEN_LIMIT),
       );
@@ -185,18 +193,21 @@ export async function submitEmbeddingBatch(input: {
     line: string;
   }> = [];
   let fileSize = 0;
-  for (const message of input.messages) {
+  for (const [index, message] of input.messages.entries()) {
+    if (index > 0 && index % EVENT_LOOP_YIELD_INTERVAL === 0) {
+      await scheduler.yield();
+    }
     const line = JSON.stringify({
-        custom_id: message.messageId,
-        method: "POST",
-        url: "/v1/embeddings",
-        body: {
-          model: config.modelId,
-          dimensions: config.dimensions,
-          encoding_format: "float",
-          input: buildEmbeddingInput(message),
-        },
-      });
+      custom_id: message.messageId,
+      method: "POST",
+      url: "/v1/embeddings",
+      body: {
+        model: config.modelId,
+        dimensions: config.dimensions,
+        encoding_format: "float",
+        input: buildEmbeddingInput(message),
+      },
+    });
     const lineSize = Buffer.byteLength(`${line}\n`, "utf8");
     if (fileSize + lineSize > BATCH_FILE_LIMIT_BYTES) break;
     accepted.push({ message, line });
@@ -321,15 +332,7 @@ export async function readEmbeddingBatch(input: {
   expectedKeys: string[];
   expectedDimensions: number;
 }): Promise<{
-  state:
-    | "validating"
-    | "failed"
-    | "in_progress"
-    | "finalizing"
-    | "completed"
-    | "expired"
-    | "cancelling"
-    | "cancelled";
+  state: EmbeddingBatchState;
   outputFileId: string | null;
   errorFileId: string | null;
   embeddingsByKey: Map<string, number[]>;
@@ -386,6 +389,16 @@ export async function readEmbeddingBatch(input: {
     providerError:
       providerMessages.size > 0 ? [...providerMessages].join("; ") : null,
   };
+}
+
+export async function getEmbeddingBatchState(
+  providerBatchId: string,
+): Promise<EmbeddingBatchState> {
+  configuration();
+  const batch = await providerCall(() =>
+    client().batches.retrieve(providerBatchId),
+  );
+  return batch.status;
 }
 
 export async function deleteEmbeddingBatchInputFile(

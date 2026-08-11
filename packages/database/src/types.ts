@@ -6,15 +6,26 @@ export type AccountSyncState = {
   memory: AccountSyncStage;
 };
 
-export type ClaimedJob = {
+export type WorkflowStepJob = {
   id: string;
   userId: string | null;
   accountId: string | null;
-  jobType: string;
+  runId: string | null;
+  stepType: string;
   payload: Record<string, unknown>;
   attempts: number;
   maxAttempts: number;
 };
+
+export type QueueName =
+  | "gmail-pages"
+  | "gmail-messages"
+  | "mail-classification"
+  | "mail-indexing-batch"
+  | "mail-indexing-live"
+  | "mail-memory-submit"
+  | "mail-memory-events"
+  | "mail-memory-feedback";
 
 export type MailboxMessage = {
   userId: string;

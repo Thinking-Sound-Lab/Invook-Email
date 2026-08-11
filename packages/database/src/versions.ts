@@ -1,0 +1,4 @@
+export const MEMORY_SCHEMA_VERSION = 3;
+export const DRAFT_FEEDBACK_VERSION = 1;
+export const MAIL_INDEX_VERSION = 1;
+export const MAIL_CLASSIFICATION_VERSION = 1;

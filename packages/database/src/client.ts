@@ -43,14 +43,14 @@ export function getDatabase(): Database {
   return database;
 }
 
-export async function listenForJobNotifications(onJobAvailable: () => void) {
+export async function listenForOutboxNotifications(onEntryAvailable: () => void) {
   const databaseUrl = process.env.DATABASE_URL ?? "";
   if (!databaseUrl) {
-    throw new Error("DATABASE_URL is required for worker notifications.");
+    throw new Error("DATABASE_URL is required for queue outbox notifications.");
   }
 
   const client = postgres(databaseUrl, { max: 1, prepare: false });
-  const listener = await client.listen("invook_jobs", onJobAvailable);
+  const listener = await client.listen("invook_queue_outbox", onEntryAvailable);
 
   return async () => {
     await listener.unlisten();

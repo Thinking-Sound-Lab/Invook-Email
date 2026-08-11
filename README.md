@@ -7,8 +7,8 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 ## What works today
 
 1. Direct Google OAuth authenticates the user and grants Gmail access.
-2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and creates a Gmail synchronization job.
-3. The worker synchronizes the real mailbox by following every Gmail result page. Mail synchronization, search indexing, and writing-memory extraction have independent state.
+2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and transactionally records a Gmail synchronization run plus its first BullMQ step.
+3. A sequential page worker follows Gmail's opaque page tokens while parallel message workers store the discovered messages. PostgreSQL retains the run, page, message, and outbox checkpoints; Redis coordinates BullMQ execution and retries. Mail synchronization, search indexing, and writing-memory extraction have independent state.
 4. A configured model applies Invook's predefined Important, Travel, Pitch, and Newsletter labels. A user's label changes take precedence over later model runs.
 5. The worker sends full eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
    - **Preferences:** repeated behavior that applies across contacts and should shape every draft.
@@ -94,7 +94,7 @@ pnpm install --frozen-lockfile
 make dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). The stack starts PostgreSQL, applies the Drizzle migrations, and runs the web, API, and worker services.
+Open [http://localhost:3000](http://localhost:3000). The stack starts PostgreSQL and persistent Redis, applies the Drizzle migrations, and runs the web, API, and BullMQ worker services.
 
 Stop it with:
 
@@ -110,15 +110,16 @@ Use the same root `.env.local`:
 pnpm dev
 ```
 
-Start the worker in a second terminal:
+The worker requires `REDIS_URL`. Start the Docker Redis service if Redis is not already running, then start the worker in a second terminal:
 
 ```bash
+docker compose -f docker/compose.yml up -d redis
 pnpm worker
 ```
 
 ## Database and migrations
 
-Drizzle ORM accesses PostgreSQL through the server-only `DATABASE_URL`. The same application code can use the local pgvector Docker image or a compatible hosted PostgreSQL database where the `vector` extension can be enabled.
+Drizzle ORM accesses PostgreSQL through the server-only `DATABASE_URL`. PostgreSQL owns product data, workflow traces, Gmail checkpoints, and the transactional queue outbox. BullMQ uses `REDIS_URL` for execution state, retries, and stalled-job recovery. The same application code can use the local pgvector Docker image or a compatible hosted PostgreSQL database where the `vector` extension can be enabled.
 
 After changing `packages/database/src/schema.ts`:
 
@@ -143,7 +144,7 @@ docker compose -f docker/compose.yml config --quiet
 - Google identities are validated server-side and mapped to stable Invook user IDs.
 - Session cookies are signed, HTTP-only, and contain no provider token.
 - Next.js contains UI only. It reaches the native Node API through `/v1`; only the API and worker import database and Gmail packages.
-- Product reads are scoped by user ID. Worker operations use explicit account and job IDs.
+- Product reads are scoped by user ID. Worker operations use explicit account, synchronization-run, and workflow-step IDs.
 - Email content is treated as untrusted input in every model prompt.
 - Inferred Memory requires evidence from at least three messages; global preferences additionally require evidence across at least three contacts.
 - User-written memory wins over inferred memory.

@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 
+import type { MailboxView } from "@invook/contracts";
 import {
   and,
   asc,
   count,
   desc,
   eq,
+  gt,
   inArray,
   isNotNull,
+  isNull,
   lt,
   ne,
   not,
@@ -21,7 +24,6 @@ import {
   auditEvents,
   connectedAccounts,
   drafts,
-  jobs,
   memoryDeletions,
   memoryEntries,
   messageAttachments,
@@ -30,8 +32,21 @@ import {
   profiles,
   threadLabels,
   threads,
+  workflowSteps,
 } from "./schema";
-import type { AccountSyncState, ClaimedJob, MailboxMessage } from "./types";
+import type { AccountSyncState, MailboxMessage } from "./types";
+import {
+  createInitialMailSyncRun,
+  enqueueWorkflowStep,
+  getLatestMemoryBatchSubmission,
+  getWorkflowStepSubmission,
+} from "./workflows";
+import {
+  DRAFT_FEEDBACK_VERSION,
+  MAIL_CLASSIFICATION_VERSION,
+  MAIL_INDEX_VERSION,
+  MEMORY_SCHEMA_VERSION,
+} from "./versions";
 
 const initialSyncState: AccountSyncState = {
   mailSync: "pending",
@@ -39,9 +54,90 @@ const initialSyncState: AccountSyncState = {
   memory: "pending",
 };
 
-export const MEMORY_SCHEMA_VERSION = 3;
-export const DRAFT_FEEDBACK_VERSION = 1;
-export const MAIL_INDEX_VERSION = 1;
+const mailboxPageSize = 100;
+
+export type MailboxCursor = {
+  direction: "newer" | "older";
+  latestMessageAt: Date;
+  threadId: string;
+};
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function parseMailboxCursor(value: string): MailboxCursor | null {
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+      direction?: unknown;
+      latestMessageAt?: unknown;
+      threadId?: unknown;
+    };
+    if (
+      (decoded.direction !== "newer" && decoded.direction !== "older") ||
+      typeof decoded.latestMessageAt !== "string" ||
+      typeof decoded.threadId !== "string" ||
+      !uuidPattern.test(decoded.threadId)
+    ) {
+      return null;
+    }
+    const latestMessageAt = new Date(decoded.latestMessageAt);
+    if (!Number.isFinite(latestMessageAt.getTime())) return null;
+    return {
+      direction: decoded.direction,
+      latestMessageAt,
+      threadId: decoded.threadId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function createMailboxCursor(
+  direction: MailboxCursor["direction"],
+  thread: { id: string; latestMessageAt: Date | null },
+): string {
+  return Buffer.from(
+    JSON.stringify({
+      direction,
+      latestMessageAt: (thread.latestMessageAt ?? new Date(0)).toISOString(),
+      threadId: thread.id,
+    }),
+  ).toString("base64url");
+}
+
+function mailboxViewCondition(view: MailboxView) {
+  switch (view) {
+    case "all":
+      return undefined;
+    case "travel":
+    case "important":
+    case "pitch":
+    case "newsletter":
+      return sql<boolean>`exists (
+        select 1
+        from ${threadLabels}
+        where ${threadLabels.threadId} = ${threads.id}
+          and ${threadLabels.labelKey} = ${view}
+          and ${threadLabels.state} = 'applied'
+      )`;
+    case "starred":
+      return sql<boolean>`'STARRED' = any(${threads.labelIds})`;
+    case "shared":
+      return sql<boolean>`'SHARED' = any(${threads.labelIds})`;
+    case "reminders":
+      return sql<boolean>`'REMINDER' = any(${threads.labelIds})`;
+    case "scheduled":
+      return sql<boolean>`'SCHEDULED' = any(${threads.labelIds})`;
+    case "drafts":
+      return sql<boolean>`'DRAFT' = any(${threads.labelIds})`;
+    case "done":
+      return sql<boolean>`'DONE' = any(${threads.labelIds})`;
+    case "sent":
+      return sql<boolean>`'SENT' = any(${threads.labelIds})`;
+    case "trash":
+      return sql<boolean>`'TRASH' = any(${threads.labelIds})`;
+  }
+}
 
 export type MemoryType = "preference" | "contact" | "scheduling";
 export type MemorySource = "user" | "inferred" | "feedback";
@@ -195,30 +291,15 @@ export async function saveGmailConnection(
         },
       });
 
-    const idempotencyKey = `gmail.initial_sync:${account.id}:${input.historyCursor}`;
-    await transaction
-      .insert(jobs)
-      .values({
+    await createInitialMailSyncRun(
+      {
         userId: input.userId,
         accountId: account.id,
-        jobType: "gmail.initial_sync",
-        status: "queued",
-        payload: { historyId: input.historyCursor },
-        attempts: 0,
-        idempotencyKey,
-      })
-      .onConflictDoUpdate({
-        target: jobs.idempotencyKey,
-        set: {
-          status: "queued",
-          payload: { historyId: input.historyCursor },
-          attempts: 0,
-          lockedAt: null,
-          lockedBy: null,
-          lastError: null,
-          updatedAt: new Date(),
-        },
-      });
+        startingHistoryCursor: input.historyCursor,
+        connectionEventId: input.acknowledgedAt.toISOString(),
+      },
+      transaction as unknown as Database,
+    );
 
     await transaction.insert(auditEvents).values({
       userId: input.userId,
@@ -593,9 +674,14 @@ export async function listMailboxThreadAttachments(
 
 export async function getMailboxWorkspace(
   userId: string,
-  selectedThreadId?: string,
+  input: {
+    cursor?: MailboxCursor | null;
+    selectedThreadId?: string;
+    view?: MailboxView;
+  } = {},
   database: Database = getDatabase(),
 ) {
+  const { cursor = null, selectedThreadId, view = "all" } = input;
   const [account] = await database
     .select({
       id: connectedAccounts.id,
@@ -616,7 +702,31 @@ export async function getMailboxWorkspace(
 
   if (!account) return null;
 
-  const mailboxThreads = await database
+  const mailboxSortTime = sql<Date>`coalesce(${threads.latestMessageAt}, to_timestamp(0))`;
+  const viewCondition = mailboxViewCondition(view);
+  const mailboxScope = and(
+    eq(threads.userId, userId),
+    eq(threads.accountId, account.id),
+    viewCondition,
+  );
+  const cursorSortTime = cursor
+    ? sql<Date>`${cursor.latestMessageAt.toISOString()}::timestamptz`
+    : undefined;
+  const cursorCondition = cursor && cursorSortTime
+    ? or(
+        cursor.direction === "newer"
+          ? gt(mailboxSortTime, cursorSortTime)
+          : lt(mailboxSortTime, cursorSortTime),
+        and(
+          eq(mailboxSortTime, cursorSortTime),
+          cursor.direction === "newer"
+            ? gt(threads.id, cursor.threadId)
+            : lt(threads.id, cursor.threadId),
+        ),
+      )
+    : undefined;
+
+  const rawMailboxThreads = await database
     .select({
       id: threads.id,
       subject: threads.subject,
@@ -627,9 +737,36 @@ export async function getMailboxWorkspace(
       messageCount: threads.messageCount,
     })
     .from(threads)
-    .where(and(eq(threads.userId, userId), eq(threads.accountId, account.id)))
-    .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt))
-    .limit(150);
+    .where(and(mailboxScope, cursorCondition))
+    .orderBy(
+      cursor?.direction === "newer" ? asc(mailboxSortTime) : desc(mailboxSortTime),
+      cursor?.direction === "newer" ? asc(threads.id) : desc(threads.id),
+    )
+    .limit(mailboxPageSize + 1);
+  const hasExtraPage = rawMailboxThreads.length > mailboxPageSize;
+  const currentPage = rawMailboxThreads.slice(0, mailboxPageSize);
+  const mailboxThreads =
+    cursor?.direction === "newer" ? currentPage.reverse() : currentPage;
+  const hasNewerPage = Boolean(cursor) &&
+    (cursor?.direction === "older" || hasExtraPage);
+  const hasOlderPage = cursor?.direction === "newer" ? true : hasExtraPage;
+  const [threadCount] = await database
+    .select({ value: count(threads.id) })
+    .from(threads)
+    .where(mailboxScope);
+  const firstMailboxThread = mailboxThreads[0];
+  const lastMailboxThread = mailboxThreads.at(-1);
+  const pagination = {
+    newerCursor:
+      hasNewerPage && firstMailboxThread
+        ? createMailboxCursor("newer", firstMailboxThread)
+        : null,
+    olderCursor:
+      hasOlderPage && lastMailboxThread
+        ? createMailboxCursor("older", lastMailboxThread)
+        : null,
+    totalThreadCount: threadCount?.value ?? 0,
+  };
 
   const memoryRows = await database
     .select({
@@ -720,25 +857,17 @@ export async function getMailboxWorkspace(
     updatedAt: memory.updatedAt.toISOString(),
   }));
 
-  const [memoryBatchSubmission] = await database
-    .select({ result: jobs.result })
-    .from(jobs)
-    .where(
-      and(
-        eq(jobs.accountId, account.id),
-        eq(jobs.status, "complete"),
-        inArray(jobs.jobType, ["memory.extract", "memory.batch.retry"]),
-        sql`${jobs.result}->>'status' = 'submitted'`,
-      ),
-    )
-    .orderBy(desc(jobs.updatedAt))
-    .limit(1);
+  const memoryBatchSubmission = await getLatestMemoryBatchSubmission(
+    account.id,
+    database,
+  );
 
   if (!selectedThread) {
     return {
       account,
-      memoryBatchSubmission: memoryBatchSubmission?.result ?? null,
+      memoryBatchSubmission,
       memories: serializedMemories,
+      pagination,
       threads: mailboxThreadsWithLabels,
       selectedThread: null,
     };
@@ -806,8 +935,9 @@ export async function getMailboxWorkspace(
 
   return {
     account,
-    memoryBatchSubmission: memoryBatchSubmission?.result ?? null,
+    memoryBatchSubmission,
     memories: serializedMemories,
+    pagination,
     threads: mailboxThreadsWithLabels,
     selectedThread: {
       ...attachLabels(selectedThread),
@@ -849,53 +979,6 @@ export async function getIndexingSyncStateForUser(
   return account
     ? { accountId: account.accountId, state: account.syncState.indexing }
     : null;
-}
-
-export async function claimNextJob(
-  workerId: string,
-  jobTypes: string[],
-  database: Database = getDatabase(),
-): Promise<ClaimedJob | null> {
-  if (jobTypes.length === 0) return null;
-  return database.transaction(async (transaction) => {
-    const [candidate] = await transaction
-      .select({ id: jobs.id })
-      .from(jobs)
-      .where(
-        and(
-          inArray(jobs.status, ["queued", "retry"]),
-          lt(jobs.attempts, jobs.maxAttempts),
-          inArray(jobs.jobType, jobTypes),
-        ),
-      )
-      .orderBy(asc(jobs.createdAt))
-      .limit(1)
-      .for("update", { skipLocked: true });
-
-    if (!candidate) return null;
-
-    const [job] = await transaction
-      .update(jobs)
-      .set({
-        status: "running",
-        lockedAt: new Date(),
-        lockedBy: workerId,
-        attempts: sql`${jobs.attempts} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(eq(jobs.id, candidate.id))
-      .returning({
-        id: jobs.id,
-        userId: jobs.userId,
-        accountId: jobs.accountId,
-        jobType: jobs.jobType,
-        payload: jobs.payload,
-        attempts: jobs.attempts,
-        maxAttempts: jobs.maxAttempts,
-      });
-
-    return job ?? null;
-  });
 }
 
 export async function getWorkerAccount(
@@ -1088,18 +1171,16 @@ export async function upsertMailboxMessage(
       .limit(1);
     if (account?.syncState.mailSync === "complete") {
       const contentHash = createMessageContentHash(input);
-      await transaction
-        .insert(jobs)
-        .values({
+      await enqueueWorkflowStep(
+        {
           userId: input.userId,
           accountId: input.accountId,
-          jobType: "embedding.incremental",
-          status: "queued",
+          stepType: "embedding.incremental",
           payload: { messageId: storedMessage.id },
-          attempts: 0,
           idempotencyKey: `embedding.incremental:${storedMessage.id}:${contentHash}`,
-        })
-        .onConflictDoNothing({ target: jobs.idempotencyKey });
+        },
+        transaction as unknown as Database,
+      );
     }
 
     return { messageId: storedMessage.id, threadId };
@@ -1133,8 +1214,6 @@ export async function countMemoryEligibleMessages(
 
   return total?.value ?? 0;
 }
-
-export const MAIL_CLASSIFICATION_VERSION = 1;
 
 type InvookLabelKey = "important" | "travel" | "pitch" | "newsletter";
 
@@ -1917,6 +1996,18 @@ export async function getEmbeddingCandidates(
       and(
         eq(threads.accountId, input.accountId),
         input.messageIds ? inArray(messages.id, input.messageIds) : undefined,
+        or(
+          isNull(messageEmbeddings.id),
+          input.includeFailed === false
+            ? not(
+                inArray(messageEmbeddings.status, [
+                  "complete",
+                  "submitted",
+                  "failed",
+                ]),
+              )
+            : not(inArray(messageEmbeddings.status, ["complete", "submitted"])),
+        ),
       ),
     )
     .orderBy(asc(messages.sentAt))
@@ -1979,6 +2070,43 @@ export async function markEmbeddingBatchSubmitted(
         updatedAt: new Date(),
       },
     });
+}
+
+export async function listSubmittedEmbeddingBatchIds(
+  database: Database = getDatabase(),
+): Promise<string[]> {
+  const rows = await database
+    .select({ providerBatchId: messageEmbeddings.providerBatchId })
+    .from(messageEmbeddings)
+    .where(
+      and(
+        eq(messageEmbeddings.status, "submitted"),
+        isNotNull(messageEmbeddings.providerBatchId),
+      ),
+    )
+    .groupBy(messageEmbeddings.providerBatchId);
+
+  return rows.flatMap(({ providerBatchId }) =>
+    providerBatchId ? [providerBatchId] : [],
+  );
+}
+
+export async function countFailedEmbeddings(
+  input: { accountId: string; modelId: string; indexVersion: number },
+  database: Database = getDatabase(),
+): Promise<number> {
+  const [result] = await database
+    .select({ value: count(messageEmbeddings.id) })
+    .from(messageEmbeddings)
+    .where(
+      and(
+        eq(messageEmbeddings.accountId, input.accountId),
+        eq(messageEmbeddings.modelId, input.modelId),
+        eq(messageEmbeddings.indexVersion, input.indexVersion),
+        eq(messageEmbeddings.status, "failed"),
+      ),
+    );
+  return result?.value ?? 0;
 }
 
 export async function saveMessageEmbeddings(
@@ -2123,28 +2251,41 @@ export async function enqueueEmbeddingBackfillContinuation(
     predecessorBatchId: string;
     includeFailed: boolean;
     batchAttempt: number;
+    reason: "next" | "retry";
   },
   database: Database = getDatabase(),
 ): Promise<string | null> {
-  const [inserted] = await database
-    .insert(jobs)
-    .values({
+  if (input.reason === "retry") {
+    const [activeRetry] = await database
+      .select({ id: workflowSteps.id })
+      .from(workflowSteps)
+      .where(
+        and(
+          eq(workflowSteps.accountId, input.accountId),
+          eq(workflowSteps.stepType, "embedding.backfill"),
+          inArray(workflowSteps.status, ["queued", "running"]),
+          sql`${workflowSteps.input}->>'includeFailed' = 'true'`,
+        ),
+      )
+      .orderBy(asc(workflowSteps.createdAt))
+      .limit(1);
+    if (activeRetry) return activeRetry.id;
+  }
+  return enqueueWorkflowStep(
+    {
       userId: input.userId,
       accountId: input.accountId,
-      jobType: "embedding.backfill",
-      status: "queued",
+      stepType: "embedding.backfill",
       payload: {
         modelId: input.modelId,
         indexVersion: input.indexVersion,
         includeFailed: input.includeFailed,
         batchAttempt: input.batchAttempt,
       },
-      attempts: 0,
-      idempotencyKey: `embedding.backfill.continue:${input.predecessorBatchId}`,
-    })
-    .onConflictDoNothing({ target: jobs.idempotencyKey })
-    .returning({ id: jobs.id });
-  return inserted?.id ?? null;
+      idempotencyKey: `embedding.backfill.continue:${input.reason}:${input.predecessorBatchId}`,
+    },
+    database,
+  );
 }
 
 export async function getReplyDraftContext(
@@ -2296,18 +2437,16 @@ export async function saveDraftEdit(
 
     if (normalizeMemoryStatement(existing.generatedText) !== normalizeMemoryStatement(input.currentText)) {
       const contentHash = createHash("sha256").update(input.currentText).digest("hex");
-      await transaction
-        .insert(jobs)
-        .values({
+      await enqueueWorkflowStep(
+        {
           userId: input.userId,
           accountId: existing.accountId,
-          jobType: "memory.feedback",
-          status: "queued",
+          stepType: "memory.feedback",
           payload: { draftId: existing.id, feedbackVersion: DRAFT_FEEDBACK_VERSION },
-          attempts: 0,
           idempotencyKey: `memory.feedback:${existing.accountId}:${existing.id}:${contentHash}`,
-        })
-        .onConflictDoNothing({ target: jobs.idempotencyKey });
+        },
+        transaction as unknown as Database,
+      );
     }
 
     await transaction.insert(auditEvents).values({
@@ -2375,148 +2514,6 @@ export async function markDraftFeedbackAnalyzed(
   });
 }
 
-export async function completeInitialSync(
-  accountId: string,
-  historyCursor: string,
-  database: Database = getDatabase(),
-) {
-  await database.transaction(async (transaction) => {
-    const [account] = await transaction
-      .update(connectedAccounts)
-      .set({
-        historyCursor,
-        lastSyncedAt: new Date(),
-        syncState: { mailSync: "complete", indexing: "pending", memory: "pending" },
-        updatedAt: new Date(),
-      })
-      .where(eq(connectedAccounts.id, accountId))
-      .returning({ userId: connectedAccounts.userId });
-    if (!account) throw new Error("The synchronized Gmail account was not found.");
-    await transaction.execute(
-      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId, state: "pending" })})`,
-    );
-
-    const postSyncJobs = [
-      {
-        jobType: "embedding.backfill",
-        idempotencyKey: `embedding.backfill:${accountId}:${MAIL_INDEX_VERSION}:${historyCursor}`,
-        payload: { indexVersion: MAIL_INDEX_VERSION },
-      },
-      {
-        jobType: "mail.classify",
-        idempotencyKey: `mail.classify:${accountId}:${MAIL_CLASSIFICATION_VERSION}:${historyCursor}`,
-        payload: { analysisVersion: MAIL_CLASSIFICATION_VERSION },
-      },
-      {
-        jobType: "memory.extract",
-        idempotencyKey: `memory.extract:${accountId}:${MEMORY_SCHEMA_VERSION}:${historyCursor}`,
-        payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
-      },
-    ];
-    await transaction
-      .insert(jobs)
-      .values(
-        postSyncJobs.map((job) => ({
-          userId: account.userId,
-          accountId,
-          jobType: job.jobType,
-          status: "queued" as const,
-          payload: job.payload,
-          attempts: 0,
-          idempotencyKey: job.idempotencyKey,
-        })),
-      )
-      .onConflictDoNothing({ target: jobs.idempotencyKey });
-  });
-}
-
-export async function enqueuePostSyncJobsForAccounts(
-  embedding: { modelId: string; indexVersion: number } | null = null,
-  database: Database = getDatabase(),
-): Promise<number> {
-  const synchronizedAccounts = await database
-    .select({
-      id: connectedAccounts.id,
-      userId: connectedAccounts.userId,
-      historyCursor: connectedAccounts.historyCursor,
-      syncState: connectedAccounts.syncState,
-    })
-    .from(connectedAccounts)
-    .where(eq(connectedAccounts.status, "connected"));
-
-  const values = synchronizedAccounts.flatMap((account) => {
-    if (account.syncState.mailSync !== "complete" || !account.historyCursor) return [];
-    const accountJobs: Array<{
-      userId: string;
-      accountId: string;
-      jobType: string;
-      status: "queued";
-      payload: Record<string, unknown>;
-      attempts: number;
-      idempotencyKey: string;
-    }> = [
-      {
-        userId: account.userId,
-        accountId: account.id,
-        jobType: "mail.classify",
-        status: "queued" as const,
-        payload: { analysisVersion: MAIL_CLASSIFICATION_VERSION },
-        attempts: 0,
-        idempotencyKey: `mail.classify:${account.id}:${MAIL_CLASSIFICATION_VERSION}:${account.historyCursor}`,
-      },
-      {
-        userId: account.userId,
-        accountId: account.id,
-        jobType: "memory.extract",
-        status: "queued" as const,
-        payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
-        attempts: 0,
-        idempotencyKey: `memory.extract:${account.id}:${MEMORY_SCHEMA_VERSION}:${account.historyCursor}`,
-      },
-    ];
-    if (embedding) {
-      accountJobs.push({
-        userId: account.userId,
-        accountId: account.id,
-        jobType: "embedding.backfill",
-        status: "queued" as const,
-        payload: {
-          modelId: embedding.modelId,
-          indexVersion: embedding.indexVersion,
-        },
-        attempts: 0,
-        idempotencyKey: `embedding.backfill:${account.id}:${embedding.modelId}:${embedding.indexVersion}:${account.historyCursor}`,
-      });
-    }
-    return accountJobs;
-  });
-  if (values.length === 0) return 0;
-
-  const inserted = await database
-    .insert(jobs)
-    .values(values)
-    .onConflictDoNothing({ target: jobs.idempotencyKey })
-    .returning({ id: jobs.id });
-  return inserted.length;
-}
-
-export async function completeJob(
-  jobId: string,
-  result: Record<string, unknown> = {},
-  database: Database = getDatabase(),
-) {
-  await database
-    .update(jobs)
-    .set({
-      status: "complete",
-      result: { ...result, completedAt: new Date().toISOString() },
-      lockedAt: null,
-      lockedBy: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(jobs.id, jobId));
-}
-
 export async function enqueueBatchEvent(
   input: {
     provider: "openai" | "azure-openai";
@@ -2529,39 +2526,37 @@ export async function enqueueBatchEvent(
   return database.transaction(async (transaction) => {
     const [submission] = await transaction
       .select({
-        id: jobs.id,
-        userId: jobs.userId,
-        accountId: jobs.accountId,
-        jobType: jobs.jobType,
+        id: workflowSteps.id,
+        userId: workflowSteps.userId,
+        accountId: workflowSteps.accountId,
+        stepType: workflowSteps.stepType,
       })
-      .from(jobs)
+      .from(workflowSteps)
       .where(
         and(
-          eq(jobs.status, "complete"),
-          inArray(jobs.jobType, [
+          eq(workflowSteps.status, "complete"),
+          inArray(workflowSteps.stepType, [
             "memory.extract",
             "memory.batch.retry",
             "embedding.backfill",
           ]),
-          sql`${jobs.result}->>'provider' = ${input.provider}`,
-          sql`${jobs.result}->>'providerBatchId' = ${input.providerBatchId}`,
+          sql`${workflowSteps.result}->>'provider' = ${input.provider}`,
+          sql`${workflowSteps.result}->>'providerBatchId' = ${input.providerBatchId}`,
         ),
       )
-      .orderBy(desc(jobs.updatedAt))
+      .orderBy(desc(workflowSteps.updatedAt))
       .limit(1);
     if (!submission) return null;
 
-    const eventJobType = submission.jobType.startsWith("embedding.")
+    const eventJobType = submission.stepType.startsWith("embedding.")
       ? "embedding.batch.event"
       : "memory.batch.event";
 
-    await transaction
-      .insert(jobs)
-      .values({
+    await enqueueWorkflowStep(
+      {
         userId: submission.userId,
         accountId: submission.accountId,
-        jobType: eventJobType,
-        status: "queued",
+        stepType: eventJobType,
         payload: {
           submissionJobId: submission.id,
           webhookId: input.webhookId,
@@ -2569,10 +2564,10 @@ export async function enqueueBatchEvent(
           provider: input.provider,
           providerBatchId: input.providerBatchId,
         },
-        attempts: 0,
-        idempotencyKey: `${input.provider}.webhook:${input.webhookId}`,
-      })
-      .onConflictDoNothing({ target: jobs.idempotencyKey });
+        idempotencyKey: `${input.provider}.batch-event:${input.eventType}:${input.providerBatchId}`,
+      },
+      transaction as unknown as Database,
+    );
 
     return { submissionJobId: submission.id };
   });
@@ -2582,30 +2577,7 @@ export async function getBatchSubmission(
   jobId: string,
   database: Database = getDatabase(),
 ) {
-  const [submission] = await database
-    .select({
-      id: jobs.id,
-      userId: jobs.userId,
-      accountId: jobs.accountId,
-      jobType: jobs.jobType,
-      result: jobs.result,
-      maxAttempts: jobs.maxAttempts,
-    })
-    .from(jobs)
-    .where(
-      and(
-        eq(jobs.id, jobId),
-        eq(jobs.status, "complete"),
-        inArray(jobs.jobType, [
-          "memory.extract",
-          "memory.batch.retry",
-          "embedding.backfill",
-        ]),
-      ),
-    )
-    .limit(1);
-
-  return submission ?? null;
+  return getWorkflowStepSubmission(jobId, database);
 }
 
 export async function enqueueMemoryBatchRetry(
@@ -2637,13 +2609,11 @@ export async function enqueueMemoryBatchRetry(
     .digest("hex");
 
   const idempotencyKey = `memory.batch.retry:${input.parentSubmissionJobId}:${manifestHash}`;
-  const inserted = await database
-    .insert(jobs)
-    .values({
+  return enqueueWorkflowStep(
+    {
       userId: input.userId,
       accountId: input.accountId,
-      jobType: "memory.batch.retry",
-      status: "queued",
+      stepType: "memory.batch.retry",
       payload: {
         parentSubmissionJobId: input.parentSubmissionJobId,
         rootSubmissionJobId: input.rootSubmissionJobId,
@@ -2651,120 +2621,8 @@ export async function enqueueMemoryBatchRetry(
         replaceExisting: input.replaceExisting,
         manifest: input.manifest,
       },
-      attempts: 0,
       idempotencyKey,
-    })
-    .onConflictDoNothing({ target: jobs.idempotencyKey })
-    .returning({ id: jobs.id });
-
-  if (inserted[0]) return inserted[0].id;
-  const [existing] = await database
-    .select({ id: jobs.id })
-    .from(jobs)
-    .where(eq(jobs.idempotencyKey, idempotencyKey))
-    .limit(1);
-  return existing?.id ?? null;
-}
-
-export async function deferJobWithoutAttempt(
-  input: { jobId: string; message: string },
-  database: Database = getDatabase(),
-) {
-  await database
-    .update(jobs)
-    .set({
-      status: "queued",
-      attempts: sql`greatest(${jobs.attempts} - 1, 0)`,
-      lastError: input.message,
-      lockedAt: null,
-      lockedBy: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(jobs.id, input.jobId));
-}
-
-export async function failAnalysisJob(
-  input: { job: ClaimedJob; message: string },
-  database: Database = getDatabase(),
-) {
-  const terminal = input.job.attempts >= input.job.maxAttempts;
-  await database.transaction(async (transaction) => {
-    await transaction
-      .update(jobs)
-      .set({
-        status: terminal ? "failed" : "retry",
-        lastError: input.message,
-        lockedAt: null,
-        lockedBy: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(jobs.id, input.job.id));
-
-    if (
-      terminal &&
-      ["memory.extract", "memory.batch.retry", "memory.batch.event"].includes(input.job.jobType) &&
-      input.job.accountId
-    ) {
-      await transaction
-        .update(connectedAccounts)
-        .set({
-          syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{memory}', to_jsonb(${"failed"}::text), true)`,
-          updatedAt: new Date(),
-        })
-        .where(eq(connectedAccounts.id, input.job.accountId));
-    }
-
-    if (
-      terminal &&
-      [
-        "embedding.backfill",
-        "embedding.incremental",
-        "embedding.batch.event",
-      ].includes(input.job.jobType) &&
-      input.job.accountId
-    ) {
-      await transaction
-        .update(connectedAccounts)
-        .set({
-          syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{indexing}', to_jsonb(${"failed"}::text), true)`,
-          updatedAt: new Date(),
-        })
-        .where(eq(connectedAccounts.id, input.job.accountId));
-      await transaction.execute(
-        sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.job.accountId, state: "failed" })})`,
-      );
-    }
-  });
-}
-
-export async function failJobAndAccount(input: {
-  job: ClaimedJob;
-  message: string;
-  reconnectRequired: boolean;
-}, database: Database = getDatabase()) {
-  const accountId = input.job.accountId;
-
-  await database.transaction(async (transaction) => {
-    await transaction
-      .update(jobs)
-      .set({
-        status: input.job.attempts < input.job.maxAttempts ? "retry" : "failed",
-        lastError: input.message,
-        lockedAt: null,
-        lockedBy: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(jobs.id, input.job.id));
-
-    if (accountId) {
-      await transaction
-        .update(connectedAccounts)
-        .set({
-          status: input.reconnectRequired ? "reconnect_required" : "connected",
-          syncState: { mailSync: "failed", indexing: "pending", memory: "pending" },
-          updatedAt: new Date(),
-        })
-        .where(eq(connectedAccounts.id, accountId));
-    }
-  });
+    },
+    database,
+  );
 }

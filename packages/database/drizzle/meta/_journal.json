@@ -50,6 +50,13 @@
       "when": 1786387561257,
       "tag": "0006_reconcile_mail_sync_state",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786445243818,
+      "tag": "0007_glamorous_winter_soldier",
+      "breakpoints": true
     }
   ]
 }

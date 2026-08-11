@@ -17,6 +17,19 @@ services:
       retries: 20
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "${REDIS_PORT:-63790}:6379"
+    volumes:
+      - invook-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+    restart: unless-stopped
+
   migrate:
     build:
       context: ..
@@ -86,6 +99,7 @@ services:
       target: worker
     environment:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
+      REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
@@ -107,7 +121,10 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   invook-postgres:
+  invook-redis:

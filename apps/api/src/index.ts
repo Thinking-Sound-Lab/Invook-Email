@@ -3,10 +3,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import {
   invookLabelKeys,
+  mailboxViews,
   type AccountSyncStage,
   type IndexingStatusEvent,
   type MemoryGenerationProgress,
   type InvookLabelKey,
+  type MailboxView,
   type MailboxWorkspace,
   type SessionState,
 } from "@invook/contracts";
@@ -25,6 +27,7 @@ import {
   getMailboxWorkspace,
   hasConnectedGmailAccount,
   listenForAccountSyncNotifications,
+  parseMailboxCursor,
   saveGmailConnection,
   setUserThreadLabel,
 } from "@invook/database";
@@ -77,6 +80,8 @@ type ConnectionErrorReason =
   | "gmail_access"
   | "offline_access"
   | "unknown";
+
+const mailboxViewSet = new Set<string>(mailboxViews);
 
 const indexingStages = new Set<AccountSyncStage>([
   "pending",
@@ -246,6 +251,7 @@ async function serializeWorkspace(
     },
     memoryProgress: await serializeMemoryProgress(workspace),
     memories: workspace.memories,
+    pagination: workspace.pagination,
     threads: workspace.threads.map((thread) => ({
       ...thread,
       latestMessageAt: thread.latestMessageAt?.toISOString() ?? null,
@@ -432,7 +438,23 @@ async function handleMailbox(
   }
 
   const threadId = requestUrl.searchParams.get("thread")?.trim() || undefined;
-  const workspace = await getMailboxWorkspace(session.userId, threadId);
+  const requestedView = requestUrl.searchParams.get("view")?.trim();
+  if (requestedView && !mailboxViewSet.has(requestedView)) {
+    sendProblem(response, requestId, 400, "Invalid mailbox view");
+    return;
+  }
+  const view = (requestedView || "all") as MailboxView;
+  const requestedCursor = requestUrl.searchParams.get("cursor")?.trim();
+  const cursor = requestedCursor ? parseMailboxCursor(requestedCursor) : null;
+  if (requestedCursor && !cursor) {
+    sendProblem(response, requestId, 400, "Invalid mailbox cursor");
+    return;
+  }
+  const workspace = await getMailboxWorkspace(session.userId, {
+    cursor,
+    selectedThreadId: threadId,
+    view,
+  });
   if (!workspace) {
     sendProblem(response, requestId, 404, "Connected Gmail account not found");
     return;

@@ -1,5 +1,12 @@
-import { RefreshIcon, Search02Icon, StarIcon } from "@hugeicons/core-free-icons";
+import {
+  ArrowLeft01Icon,
+  ArrowRight01Icon,
+  RefreshIcon,
+  Search02Icon,
+  StarIcon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import type { MailboxPagination } from "@invook/contracts";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
@@ -32,15 +39,28 @@ const labelStyles = {
   newsletter: "bg-emerald-400/14 text-emerald-200",
 } as const;
 
+function mailboxHref(
+  currentView: MailboxView,
+  cursor?: string | null,
+  threadId?: string,
+): string {
+  const query = new URLSearchParams({ view: currentView });
+  if (cursor) query.set("cursor", cursor);
+  if (threadId) query.set("thread", threadId);
+  return `/mail?${query.toString()}`;
+}
+
 function MailRow({
   thread,
   accountEmail,
   currentView,
+  mailboxCursor,
   important,
 }: {
   thread: MailThreadSummary;
   accountEmail: string;
   currentView: MailboxView;
+  mailboxCursor?: string;
   important: boolean;
 }) {
   const people = threadPeople(thread.participants, accountEmail);
@@ -50,7 +70,7 @@ function MailRow({
 
   return (
     <Link
-      href={`/mail?view=${currentView}&thread=${thread.id}`}
+      href={mailboxHref(currentView, mailboxCursor, thread.id)}
       scroll={false}
       className={cn(
         "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_auto] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors",
@@ -103,11 +123,13 @@ function MailRows({
   threads,
   accountEmail,
   currentView,
+  mailboxCursor,
   important = false,
 }: {
   threads: MailThreadSummary[];
   accountEmail: string;
   currentView: MailboxView;
+  mailboxCursor?: string;
   important?: boolean;
 }) {
   return threads.map((thread) => (
@@ -116,6 +138,7 @@ function MailRows({
       thread={thread}
       accountEmail={accountEmail}
       currentView={currentView}
+      mailboxCursor={mailboxCursor}
       important={important}
     />
   ));
@@ -135,12 +158,16 @@ export function MailList({
   account,
   currentView,
   importantThreads,
+  mailboxCursor,
+  pagination,
   remainingThreads,
   query,
 }: {
   account: MailAccount;
   currentView: MailboxView;
   importantThreads: MailThreadSummary[];
+  mailboxCursor?: string;
+  pagination: MailboxPagination;
   remainingThreads: MailThreadSummary[];
   query?: string;
 }) {
@@ -155,13 +182,46 @@ export function MailList({
           {query ? `Search: ${query}` : viewTitles[currentView]}
         </h1>
         <div className="flex items-center gap-1">
+          <span className="mr-1 hidden text-xs tabular-nums text-muted-foreground sm:inline">
+            {pagination.totalThreadCount.toLocaleString()} threads
+          </span>
+          {pagination.newerCursor ? (
+            <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
+              <Link
+                href={mailboxHref(currentView, pagination.newerCursor)}
+                aria-label="Show newer mail"
+                scroll={false}
+              >
+                <HugeiconsIcon icon={ArrowLeft01Icon} size={16} />
+              </Link>
+            </Button>
+          ) : (
+            <Button variant="ghost" size="icon-sm" disabled aria-label="No newer mail">
+              <HugeiconsIcon icon={ArrowLeft01Icon} size={16} />
+            </Button>
+          )}
+          {pagination.olderCursor ? (
+            <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
+              <Link
+                href={mailboxHref(currentView, pagination.olderCursor)}
+                aria-label="Show older mail"
+                scroll={false}
+              >
+                <HugeiconsIcon icon={ArrowRight01Icon} size={16} />
+              </Link>
+            </Button>
+          ) : (
+            <Button variant="ghost" size="icon-sm" disabled aria-label="No older mail">
+              <HugeiconsIcon icon={ArrowRight01Icon} size={16} />
+            </Button>
+          )}
           <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
             <Link href="/mail?surface=search" aria-label="Search mail">
               <HugeiconsIcon icon={Search02Icon} size={16} />
             </Link>
           </Button>
           <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
-            <Link href={`/mail?view=${currentView}`} aria-label="Refresh mailbox">
+            <Link href={mailboxHref(currentView, mailboxCursor)} aria-label="Refresh mailbox">
               <HugeiconsIcon icon={RefreshIcon} size={16} />
             </Link>
           </Button>
@@ -176,6 +236,7 @@ export function MailList({
                 threads={importantThreads}
                 accountEmail={account.email}
                 currentView={currentView}
+                mailboxCursor={mailboxCursor}
                 important
               />
             ) : null}
@@ -186,6 +247,7 @@ export function MailList({
               threads={remainingThreads}
               accountEmail={account.email}
               currentView={currentView}
+              mailboxCursor={mailboxCursor}
             />
           </>
         ) : (
@@ -193,6 +255,7 @@ export function MailList({
             threads={remainingThreads}
             accountEmail={account.email}
             currentView={currentView}
+            mailboxCursor={mailboxCursor}
             important={currentView === "important"}
           />
         )}

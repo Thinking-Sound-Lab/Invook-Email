@@ -1,4 +1,5 @@
 import type {
+  MailboxView,
   MailboxWorkspace,
   MailSearchResult,
   SessionState,
@@ -28,10 +29,16 @@ export async function getSessionState(): Promise<SessionState> {
 }
 
 export async function getMailboxWorkspace(
-  selectedThreadId?: string,
+  input: {
+    cursor?: string;
+    selectedThreadId?: string;
+    view: MailboxView;
+  },
 ): Promise<MailboxWorkspace | null> {
   const query = new URLSearchParams();
-  if (selectedThreadId) query.set("thread", selectedThreadId);
+  query.set("view", input.view);
+  if (input.cursor) query.set("cursor", input.cursor);
+  if (input.selectedThreadId) query.set("thread", input.selectedThreadId);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   const response = await apiRequest(`/v1/mailbox${suffix}`);
 

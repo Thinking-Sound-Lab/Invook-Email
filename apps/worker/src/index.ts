@@ -5,8 +5,8 @@ import {
   deleteEmbeddingBatchInputFile,
   deleteMemoryBatchFiles,
   embedMailboxTexts,
-  EmbeddingConfigurationError,
   extractFeedbackMemories,
+  getEmbeddingBatchState,
   getEmbeddingConfiguration,
   isAnyMemoryBatchProviderConfigured,
   isAiConfigured,
@@ -28,18 +28,22 @@ import {
   type MessageMemoryCandidate,
 } from "@invook/ai";
 import {
-  claimNextJob,
-  completeInitialSync,
-  completeJob,
+  completeMailSyncItem,
+  completeMailSyncRun,
+  completeWorkflowStep,
+  countFailedEmbeddings,
   decryptGoogleCredential,
-  deferJobWithoutAttempt,
   DRAFT_FEEDBACK_VERSION,
   encryptGoogleCredential,
+  enqueueBatchEvent,
   enqueueEmbeddingBackfillContinuation,
-  enqueuePostSyncJobsForAccounts,
   enqueueMemoryBatchRetry,
-  failAnalysisJob,
-  failJobAndAccount,
+  enqueueMissingMailSyncRuns,
+  enqueuePostSyncWorkflowSteps,
+  enqueueReadyMailSyncFinalizers,
+  failMailSyncItem,
+  failMailSyncRun,
+  failWorkflowStep,
   getEmbeddingCandidates,
   getDraftFeedbackSamples,
   getMemoryAnalysisThreads,
@@ -47,9 +51,13 @@ import {
   getThreadsForClassification,
   getUserAuthoredMemories,
   getWorkerAccount,
-  listenForJobNotifications,
+  hasCompletedMailSyncPage,
+  listenForOutboxNotifications,
   MAIL_INDEX_VERSION,
   MAIL_CLASSIFICATION_VERSION,
+  listSubmittedEmbeddingBatchIds,
+  markMailSyncItemRunning,
+  markWorkflowStepRunning,
   MEMORY_SCHEMA_VERSION,
   markDraftFeedbackAnalyzed,
   markEmbeddingBatchSubmitted,
@@ -58,14 +66,16 @@ import {
   saveMessageEmbeddings,
   saveExtractedMemories,
   saveThreadClassifications,
-  setAccountSyncState,
   setIndexingSyncStage,
   setMemorySyncStage,
+  publishOutboxBatch,
+  recordMailSyncPage,
+  startMailSyncRun,
   updateStoredCredential,
   upsertMailboxMessage,
-  type ClaimedJob,
   type GoogleCredential,
   type MemoryType,
+  type WorkflowStepJob,
 } from "@invook/database";
 import {
   extractEmailAddress,
@@ -79,13 +89,22 @@ import {
   type ParsedGmailMessage,
 } from "@invook/gmail";
 
+import { BullQueueRuntime, type WorkflowJob } from "./queue";
+
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
-const workerId = `worker-${process.pid}`;
 const classificationBatchSize = 12;
 const feedbackBatchSize = 24;
+const embeddingBatchRequestLimit = 2_000;
 const embeddingBatchAttemptLimit = 3;
+const batchWorkerLockDuration = 5 * 60 * 1_000;
+const terminalEmbeddingBatchStates = new Set([
+  "completed",
+  "failed",
+  "expired",
+  "cancelled",
+]);
 
 function createJobSignal() {
   let pending = false;
@@ -190,67 +209,94 @@ async function storeMessage(options: {
   });
 }
 
-async function syncMailbox(options: {
-  accessToken: string;
-  userId: string;
-  accountId: string;
-  accountEmail: string;
-}) {
-  let pageToken: string | undefined;
-
-  do {
-    const page = await listGmailMessages(options.accessToken, {
-      maxResults: 100,
-      pageToken,
-    });
-    const references = page.messages ?? [];
-
-    for (let start = 0; start < references.length; start += 5) {
-      const batch = references.slice(start, start + 5);
-      const gmailMessages = await Promise.all(
-        batch.map((reference) => getGmailMessage(options.accessToken, reference.id)),
-      );
-      for (const gmailMessage of gmailMessages) {
-        await storeMessage({
-          userId: options.userId,
-          accountId: options.accountId,
-          accountEmail: options.accountEmail,
-          message: parseGmailMessage(gmailMessage),
-        });
-      }
-    }
-
-    pageToken = page.nextPageToken;
-  } while (pageToken);
+async function getMailSyncContext(accountId: string) {
+  const account = await getWorkerAccount(accountId);
+  if (!account) throw new Error("The connected Gmail account or credential was not found.");
+  const storedCredential = decryptGoogleCredential(account.tokenCiphertext, encryptionKey);
+  const credential = await refreshCredentialIfRequired(accountId, storedCredential);
+  return { account, credential };
 }
 
-async function runInitialSync(job: ClaimedJob) {
-  if (!job.accountId) throw new Error("The Gmail sync job has no connected account.");
+async function runGmailPage(job: WorkflowStepJob) {
+  if (!job.accountId || !job.userId || !job.runId) {
+    throw new Error("The Gmail page job is missing its synchronization run.");
+  }
+  const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
+  const pageNumber = requiredInteger(job.payload.pageNumber, "Gmail page number");
+  const rawPageToken = job.payload.pageToken;
+  if (rawPageToken !== null && rawPageToken !== undefined && typeof rawPageToken !== "string") {
+    throw new Error("The Gmail page token is invalid.");
+  }
+  if (await hasCompletedMailSyncPage(runId, pageNumber)) {
+    return { status: "current", runId, pageNumber };
+  }
 
-  const account = await getWorkerAccount(job.accountId);
-  if (!account) throw new Error("The connected Gmail account or credential was not found.");
-
-  const storedCredential = decryptGoogleCredential(account.tokenCiphertext, encryptionKey);
-  const credential = await refreshCredentialIfRequired(job.accountId, storedCredential);
-
-  await setAccountSyncState(job.accountId, {
-    mailSync: "running",
-    indexing: "pending",
-    memory: "pending",
+  await startMailSyncRun(runId);
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  const page = await listGmailMessages(credential.accessToken, {
+    maxResults: 100,
+    pageToken: rawPageToken ?? undefined,
   });
+  const providerMessageIds = (page.messages ?? []).map((message) => message.id);
+  await recordMailSyncPage({
+    runId,
+    userId: account.userId,
+    accountId: account.id,
+    pageNumber,
+    pageToken: rawPageToken ?? null,
+    nextPageToken: page.nextPageToken ?? null,
+    providerMessageIds,
+  });
+  return {
+    status: "complete",
+    runId,
+    pageNumber,
+    discoveredMessageCount: providerMessageIds.length,
+    hasNextPage: Boolean(page.nextPageToken),
+  };
+}
 
-  await syncMailbox({
-    accessToken: credential.accessToken,
+async function runGmailMessage(job: WorkflowStepJob) {
+  if (!job.accountId || !job.runId) {
+    throw new Error("The Gmail message job is missing its synchronization run.");
+  }
+  const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
+  const providerMessageId = requiredString(
+    job.payload.providerMessageId,
+    "Gmail message ID",
+  );
+  const shouldProcess = await markMailSyncItemRunning(
+    runId,
+    providerMessageId,
+    job.attempts,
+  );
+  if (!shouldProcess) {
+    return { status: "current", runId, providerMessageId };
+  }
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  const gmailMessage = await getGmailMessage(credential.accessToken, providerMessageId);
+  await storeMessage({
     userId: account.userId,
     accountId: account.id,
     accountEmail: account.email,
+    message: parseGmailMessage(gmailMessage),
   });
-
-  const gmailProfile = await getGmailProfile(credential.accessToken);
-  await completeInitialSync(job.accountId, gmailProfile.historyId);
+  await completeMailSyncItem(runId, providerMessageId);
+  return { status: "complete", runId, providerMessageId };
 }
 
-async function runMailClassification(job: ClaimedJob) {
+async function runGmailFinalize(job: WorkflowStepJob) {
+  if (!job.accountId || !job.runId) {
+    throw new Error("The Gmail finalization job is missing its synchronization run.");
+  }
+  const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
+  const { credential } = await getMailSyncContext(job.accountId);
+  const gmailProfile = await getGmailProfile(credential.accessToken);
+  await completeMailSyncRun({ runId, finalHistoryCursor: gmailProfile.historyId });
+  return { status: "complete", runId, historyCursor: gmailProfile.historyId };
+}
+
+async function runMailClassification(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The classification job has no connected account.");
   if (!isAiConfigured()) throw new AiConfigurationError();
 
@@ -360,7 +406,7 @@ function parseEmbeddingSubmissionResult(value: unknown): EmbeddingSubmissionResu
   };
 }
 
-async function runEmbeddingBackfill(job: ClaimedJob) {
+async function runEmbeddingBackfill(job: WorkflowStepJob) {
   if (!job.accountId || !job.userId) {
     throw new Error("The embedding backfill has no connected account.");
   }
@@ -374,7 +420,7 @@ async function runEmbeddingBackfill(job: ClaimedJob) {
     accountId: job.accountId,
     modelId: config.modelId,
     indexVersion: MAIL_INDEX_VERSION,
-    limit: 50_000,
+    limit: embeddingBatchRequestLimit + 1,
     includeFailed: job.payload.includeFailed !== false,
   });
   if (candidates.length === 0) {
@@ -390,16 +436,17 @@ async function runEmbeddingBackfill(job: ClaimedJob) {
     return { status: incompleteCount === 0 ? "complete" : "failed", incompleteCount };
   }
 
+  const batchCandidates = candidates.slice(0, embeddingBatchRequestLimit);
   const submission = await submitEmbeddingBatch({
     submissionId: job.id,
-    messages: candidates,
+    messages: batchCandidates,
   });
   if (!submission) {
     await setIndexingSyncStage(job.accountId, "complete");
     return { status: "complete", requestCount: 0 };
   }
   const candidatesById = new Map(
-    candidates.map((candidate) => [candidate.messageId, candidate]),
+    batchCandidates.map((candidate) => [candidate.messageId, candidate]),
   );
   await markEmbeddingBatchSubmitted({
     accountId: job.accountId,
@@ -417,17 +464,20 @@ async function runEmbeddingBackfill(job: ClaimedJob) {
       };
     }),
   });
+  const hasMore =
+    candidates.length > embeddingBatchRequestLimit ||
+    submission.requestCount < batchCandidates.length;
   return {
     status: "submitted",
     batchPurpose: "embedding",
     ...submission,
     indexVersion: MAIL_INDEX_VERSION,
-    hasMore: submission.requestCount < candidates.length,
+    hasMore,
     batchAttempt,
   };
 }
 
-async function runIncrementalEmbedding(job: ClaimedJob) {
+async function runIncrementalEmbedding(job: WorkflowStepJob) {
   if (!job.accountId) {
     throw new Error("The incremental embedding job has no connected account.");
   }
@@ -465,7 +515,7 @@ async function runIncrementalEmbedding(job: ClaimedJob) {
   return { status: "complete", messageId, savedCount, incompleteCount };
 }
 
-async function runEmbeddingBatchEvent(job: ClaimedJob) {
+async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The embedding batch event has no account.");
   const submissionJobId = requiredString(
     job.payload.submissionJobId,
@@ -532,38 +582,59 @@ async function runEmbeddingBatchEvent(job: ClaimedJob) {
     });
   }
 
-  let continuationJobId: string | null = null;
-  const retryFailed =
-    failedEntries.length > 0 &&
-    details.batchAttempt < embeddingBatchAttemptLimit;
-  if (details.hasMore || retryFailed) {
-    continuationJobId = await enqueueEmbeddingBackfillContinuation({
+  const [incompleteCount, failedCount, submittedBatchIds] = await Promise.all([
+    countIncompleteEmbeddings({
+      accountId: submission.accountId,
+      modelId: details.modelId,
+      indexVersion: details.indexVersion,
+    }),
+    countFailedEmbeddings({
+      accountId: submission.accountId,
+      modelId: details.modelId,
+      indexVersion: details.indexVersion,
+    }),
+    listSubmittedEmbeddingBatchIds(),
+  ]);
+  const continuationJobIds: string[] = [];
+  const providerCapacityAvailable = submittedBatchIds.length === 0;
+  const continueFailedEmbeddings =
+    providerCapacityAvailable &&
+    failedCount > 0 &&
+    (failedEntries.length === 0 ||
+      details.batchAttempt < embeddingBatchAttemptLimit);
+  if (continueFailedEmbeddings) {
+    const retryJobId = await enqueueEmbeddingBackfillContinuation({
       userId: submission.userId,
       accountId: submission.accountId,
       modelId: details.modelId,
       indexVersion: details.indexVersion,
       predecessorBatchId: details.providerBatchId,
-      includeFailed: retryFailed,
-      batchAttempt: retryFailed
-        ? details.batchAttempt + 1
-        : details.batchAttempt,
+      includeFailed: true,
+      batchAttempt:
+        failedEntries.length > 0 ? details.batchAttempt + 1 : 1,
+      reason: "retry",
     });
+    if (retryJobId) continuationJobIds.push(retryJobId);
+  } else if (providerCapacityAvailable && failedCount === 0 && incompleteCount > 0) {
+    const nextJobId = await enqueueEmbeddingBackfillContinuation({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      modelId: details.modelId,
+      indexVersion: details.indexVersion,
+      predecessorBatchId: details.providerBatchId,
+      includeFailed: false,
+      batchAttempt: 1,
+      reason: "next",
+    });
+    if (nextJobId) continuationJobIds.push(nextJobId);
   }
-  const incompleteCount = await countIncompleteEmbeddings({
-    accountId: submission.accountId,
-    modelId: details.modelId,
-    indexVersion: details.indexVersion,
-  });
-  await setIndexingSyncStage(
-    submission.accountId,
-    continuationJobId
-      ? "running"
-      : failedEntries.length > 0
-        ? "failed"
-        : incompleteCount > 0
-          ? "running"
-          : "complete",
-  );
+  const indexingStage =
+    incompleteCount === 0
+      ? "complete"
+      : submittedBatchIds.length > 0 || continuationJobIds.length > 0
+        ? "running"
+        : "failed";
+  await setIndexingSyncStage(submission.accountId, indexingStage);
 
   const inputFileDeleted = await deleteEmbeddingBatchInputFile(
     details.inputFileId,
@@ -574,13 +645,12 @@ async function runEmbeddingBatchEvent(job: ClaimedJob) {
     });
   }
   return {
-    status: continuationJobId
-      ? "continuing"
-      : failedEntries.length > 0
-        ? "failed"
-        : incompleteCount > 0
-          ? "continuing"
-          : "complete",
+    status:
+      indexingStage === "complete"
+        ? "complete"
+        : indexingStage === "failed"
+          ? "failed"
+          : "continuing",
     providerState: batch.state,
     providerError: batch.providerError,
     outputFileId: batch.outputFileId,
@@ -589,7 +659,7 @@ async function runEmbeddingBatchEvent(job: ClaimedJob) {
     savedCount,
     failedRequestCount: failedEntries.length,
     incompleteCount,
-    continuationJobId,
+    continuationJobIds,
   };
 }
 
@@ -790,7 +860,7 @@ function validateBatchCandidates(input: {
   return valid;
 }
 
-async function runMemoryExtraction(job: ClaimedJob) {
+async function runMemoryExtraction(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The memory job has no connected account.");
   if (job.payload.schemaVersion !== MEMORY_SCHEMA_VERSION) {
     return {
@@ -860,7 +930,7 @@ async function runMemoryExtraction(job: ClaimedJob) {
   };
 }
 
-async function runMemoryBatchRetry(job: ClaimedJob) {
+async function runMemoryBatchRetry(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Memory retry has no connected account.");
   const parentSubmissionJobId = requiredString(
     job.payload.parentSubmissionJobId,
@@ -920,7 +990,7 @@ async function runMemoryBatchRetry(job: ClaimedJob) {
   };
 }
 
-async function runMemoryBatchEvent(job: ClaimedJob) {
+async function runMemoryBatchEvent(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Memory batch event has no account.");
   const submissionJobId = requiredString(
     job.payload.submissionJobId,
@@ -1049,7 +1119,7 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
   };
 }
 
-async function runMemoryFeedback(job: ClaimedJob) {
+async function runMemoryFeedback(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The feedback job has no connected account.");
   const account = await getWorkerAccount(job.accountId);
   if (!account) throw new Error("The connected Gmail account was not found.");
@@ -1150,127 +1220,248 @@ async function runMemoryFeedback(job: ClaimedJob) {
   };
 }
 
-async function markJobFailed(job: ClaimedJob, error: unknown) {
-  const message = error instanceof Error ? error.message : "Unknown worker failure";
-  if (job.jobType !== "gmail.initial_sync") {
-    await failAnalysisJob({
-      job,
+async function persistWorkflowFailure(
+  job: WorkflowStepJob,
+  message: string,
+  terminal: boolean,
+  reconnectRequired: boolean,
+) {
+  const stepUpdated = await failWorkflowStep({ step: job, message, terminal });
+  if (!stepUpdated) return;
+  if (job.stepType === "gmail.sync.message" && job.runId) {
+    await failMailSyncItem({
+      runId: job.runId,
+      providerMessageId: requiredString(job.payload.providerMessageId, "Gmail message ID"),
+      attempt: job.attempts,
       message,
+      terminal,
+      reconnectRequired,
     });
-    return;
+  } else if (
+    terminal &&
+    job.runId &&
+    ["gmail.sync.page", "gmail.sync.finalize"].includes(job.stepType)
+  ) {
+    await failMailSyncRun({ runId: job.runId, message, reconnectRequired });
   }
+}
 
-  await failJobAndAccount({
+function workflowStepFromBullJob(bullJob: WorkflowJob): WorkflowStepJob {
+  return {
+    ...bullJob.data,
+    stepType: bullJob.name,
+    attempts:
+      bullJob.data.attempts + Math.max(bullJob.attemptsMade, 1),
+    maxAttempts: bullJob.data.maxAttempts,
+  };
+}
+
+async function reconcileTerminalQueueFailure(bullJob: WorkflowJob, error: Error) {
+  const job = workflowStepFromBullJob(bullJob);
+  await persistWorkflowFailure(
     job,
-    message,
-    reconnectRequired: error instanceof GmailApiError && error.status === 401,
+    error.message || "BullMQ reported a terminal workflow failure.",
+    true,
+    error instanceof GmailApiError && error.status === 401,
+  );
+}
+
+async function executeWorkflowJob(
+  bullJob: WorkflowJob,
+  handler: (job: WorkflowStepJob) => Promise<Record<string, unknown>>,
+) {
+  const job: WorkflowStepJob = {
+    ...bullJob.data,
+    stepType: bullJob.name,
+    attempts: bullJob.data.attempts + bullJob.attemptsMade + 1,
+    maxAttempts: bullJob.data.maxAttempts,
+  };
+  const started = await markWorkflowStepRunning(job.id, job.attempts);
+  if (started.alreadyComplete) return started.result;
+  try {
+    const result = await handler(job);
+    await completeWorkflowStep(job.id, result);
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown worker failure";
+    const terminal = job.attempts >= job.maxAttempts;
+    const reconnectRequired = error instanceof GmailApiError && error.status === 401;
+    await persistWorkflowFailure(job, message, terminal, reconnectRequired);
+    throw error;
+  }
+}
+
+function processGmailPages(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "gmail.sync.page") return runGmailPage(job);
+    if (job.stepType === "gmail.sync.finalize") return runGmailFinalize(job);
+    throw new Error(`Unsupported Gmail page step: ${job.stepType}`);
   });
 }
 
-async function processNextJob() {
-  const jobTypes = ["gmail.initial_sync"];
-  if (isAiConfigured()) jobTypes.push("mail.classify", "memory.feedback");
-  if (isEmbeddingConfigured()) jobTypes.push("embedding.incremental");
+function processGmailMessage(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runGmailMessage);
+}
+
+function processClassification(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runMailClassification);
+}
+
+function processIndexingBatch(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "embedding.backfill") return runEmbeddingBackfill(job);
+    if (job.stepType === "embedding.batch.event") return runEmbeddingBatchEvent(job);
+    throw new Error(`Unsupported indexing Batch step: ${job.stepType}`);
+  });
+}
+
+function processIncrementalIndexing(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runIncrementalEmbedding);
+}
+
+function processMemorySubmission(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runMemoryExtraction);
+}
+
+function processMemoryEvent(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "memory.batch.retry") return runMemoryBatchRetry(job);
+    if (job.stepType === "memory.batch.event") return runMemoryBatchEvent(job);
+    throw new Error(`Unsupported Memory Batch step: ${job.stepType}`);
+  });
+}
+
+function processMemoryFeedback(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runMemoryFeedback);
+}
+
+function startBullWorkers(runtime: BullQueueRuntime) {
+  const withFailureReconciliation = {
+    onTerminalFailure: reconcileTerminalQueueFailure,
+  };
+  runtime.createWorker("gmail-pages", processGmailPages, withFailureReconciliation);
+  runtime.createWorker("gmail-messages", processGmailMessage, {
+    ...withFailureReconciliation,
+    concurrency: 5,
+  });
+  if (isAiConfigured()) {
+    runtime.createWorker(
+      "mail-classification",
+      processClassification,
+      withFailureReconciliation,
+    );
+    runtime.createWorker(
+      "mail-memory-feedback",
+      processMemoryFeedback,
+      withFailureReconciliation,
+    );
+  }
   if (isEmbeddingBatchConfigured()) {
-    jobTypes.push("embedding.backfill", "embedding.batch.event");
+    runtime.createWorker(
+      "mail-indexing-batch",
+      processIndexingBatch,
+      {
+        ...withFailureReconciliation,
+        lockDuration: batchWorkerLockDuration,
+      },
+    );
   }
-  if (isMemoryBatchConfigured()) jobTypes.push("memory.extract");
+  if (isEmbeddingConfigured()) {
+    runtime.createWorker("mail-indexing-live", processIncrementalIndexing, {
+      ...withFailureReconciliation,
+      concurrency: 5,
+    });
+  }
+  if (isMemoryBatchConfigured()) {
+    runtime.createWorker(
+      "mail-memory-submit",
+      processMemorySubmission,
+      {
+        ...withFailureReconciliation,
+        lockDuration: batchWorkerLockDuration,
+      },
+    );
+  }
   if (isAnyMemoryBatchProviderConfigured()) {
-    jobTypes.push("memory.batch.retry", "memory.batch.event");
+    runtime.createWorker(
+      "mail-memory-events",
+      processMemoryEvent,
+      withFailureReconciliation,
+    );
   }
-  const job = await claimNextJob(workerId, jobTypes);
-  if (!job) return false;
+}
 
-  try {
-    let result: Record<string, unknown> = {};
-    switch (job.jobType) {
-      case "gmail.initial_sync":
-        await runInitialSync(job);
-        break;
-      case "mail.classify":
-        result = await runMailClassification(job);
-        break;
-      case "embedding.backfill":
-        result = await runEmbeddingBackfill(job);
-        break;
-      case "embedding.incremental":
-        result = await runIncrementalEmbedding(job);
-        break;
-      case "embedding.batch.event":
-        result = await runEmbeddingBatchEvent(job);
-        break;
-      case "memory.extract":
-        result = await runMemoryExtraction(job);
-        break;
-      case "memory.batch.retry":
-        result = await runMemoryBatchRetry(job);
-        break;
-      case "memory.batch.event":
-        result = await runMemoryBatchEvent(job);
-        break;
-      case "memory.feedback":
-        result = await runMemoryFeedback(job);
-        break;
-      default:
-        throw new Error(`Unsupported job type: ${job.jobType}`);
-    }
-    await completeJob(job.id, result);
-  } catch (error) {
-    if (
-      error instanceof AiConfigurationError ||
-      error instanceof EmbeddingConfigurationError ||
-      error instanceof MemoryBatchConfigurationError
-    ) {
-      if (job.jobType === "memory.extract" && job.accountId) {
-        await setMemorySyncStage(job.accountId, "pending");
-      }
-      if (job.jobType.startsWith("embedding.") && job.accountId) {
-        await setIndexingSyncStage(job.accountId, "pending");
-      }
-      await deferJobWithoutAttempt({
-        jobId: job.id,
-        message: error.message,
+async function reconcileSubmittedEmbeddingBatches() {
+  if (!isEmbeddingBatchConfigured()) return;
+
+  const providerBatchIds = await listSubmittedEmbeddingBatchIds();
+  let enqueued = 0;
+  for (const providerBatchId of providerBatchIds) {
+    try {
+      const state = await getEmbeddingBatchState(providerBatchId);
+      if (!terminalEmbeddingBatchStates.has(state)) continue;
+      const event = await enqueueBatchEvent({
+        provider: "openai",
+        webhookId: `worker-startup:${providerBatchId}:${state}`,
+        eventType: `batch.${state}`,
+        providerBatchId,
       });
-      return false;
+      if (event) enqueued += 1;
+    } catch (error) {
+      console.error("worker: submitted embedding Batch reconciliation failed", {
+        providerBatchId,
+        message: error instanceof Error ? error.message : "Unknown provider failure",
+      });
     }
-    await markJobFailed(job, error);
-    throw error;
   }
 
-  return true;
+  if (providerBatchIds.length > 0) {
+    console.info("worker: submitted embedding Batches reconciled", {
+      checked: providerBatchIds.length,
+      enqueued,
+    });
+  }
 }
 
 async function run() {
+  const runtime = new BullQueueRuntime(process.env.REDIS_URL ?? "");
+  await runtime.waitUntilReady();
+  await runtime.configureGlobalConcurrency();
+  startBullWorkers(runtime);
+
   const signal = createJobSignal();
   let stopRequested = false;
   const requestStop = () => {
     stopRequested = true;
     signal.notify();
   };
-  const stopListening = await listenForJobNotifications(signal.notify);
+  const stopListening = await listenForOutboxNotifications(signal.notify);
+  const stopRedisReadyListener = runtime.onReady(signal.notify);
 
   process.once("SIGINT", requestStop);
   process.once("SIGTERM", requestStop);
 
   try {
-    await enqueuePostSyncJobsForAccounts(
-      isEmbeddingConfigured()
-        ? { ...getEmbeddingConfiguration(), indexVersion: MAIL_INDEX_VERSION }
-        : null,
-    );
+    await enqueueMissingMailSyncRuns();
+    await enqueueReadyMailSyncFinalizers();
+    await enqueuePostSyncWorkflowSteps();
+    await reconcileSubmittedEmbeddingBatches();
     signal.notify();
 
     while (!stopRequested) {
       await signal.wait();
       if (stopRequested) break;
-      while (await processNextJob()) {
-        // Drain every currently eligible job before waiting for another notification.
+      while (!stopRequested) {
+        const result = await publishOutboxBatch((jobs) => runtime.publish(jobs));
+        if (result.failed || result.published === 0) break;
       }
     }
   } finally {
     process.removeListener("SIGINT", requestStop);
     process.removeListener("SIGTERM", requestStop);
+    stopRedisReadyListener();
     await stopListening();
+    await runtime.close();
   }
 }
 
