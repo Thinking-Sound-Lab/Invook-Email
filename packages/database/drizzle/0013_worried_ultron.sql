@@ -3,7 +3,7 @@ CREATE TABLE "gmail_drafts" (
 	"user_id" uuid NOT NULL,
 	"account_id" uuid NOT NULL,
 	"provider_draft_id" text NOT NULL,
-	"provider_message_id" text NOT NULL,
+	"provider_message_id" text,
 	"provider_thread_id" text NOT NULL,
 	"message_id" uuid,
 	"provider_history_id" text,
@@ -208,13 +208,40 @@ SET "sync_state" = jsonb_build_object(
 	'memory', 'pending'
 )
 WHERE "status" = 'connected' AND "history_cursor" IS NOT NULL;--> statement-breakpoint
-DO $$
-BEGIN
-	IF EXISTS (SELECT 1 FROM "drafts" WHERE "provider_draft_id" IS NOT NULL) THEN
-		RAISE EXCEPTION 'Cannot split legacy provider drafts without Gmail message identity; reconnect and synchronize Gmail drafts first.';
-	END IF;
-END
-$$;--> statement-breakpoint
+INSERT INTO "gmail_drafts" (
+	"user_id",
+	"account_id",
+	"provider_draft_id",
+	"provider_message_id",
+	"provider_thread_id",
+	"created_at",
+	"updated_at"
+)
+SELECT
+	"legacy_draft"."user_id",
+	"legacy_draft"."account_id",
+	"legacy_draft"."provider_draft_id",
+	NULL::text,
+	"legacy_draft"."provider_thread_id",
+	"legacy_draft"."created_at",
+	"legacy_draft"."updated_at"
+FROM (
+	SELECT DISTINCT ON ("draft"."account_id", "draft"."provider_draft_id")
+		"draft"."user_id",
+		"draft"."account_id",
+		"draft"."provider_draft_id",
+		"thread"."provider_thread_id",
+		"draft"."created_at",
+		"draft"."updated_at"
+	FROM "drafts" AS "draft"
+	INNER JOIN "threads" AS "thread" ON "thread"."id" = "draft"."thread_id"
+	WHERE "draft"."provider_draft_id" IS NOT NULL
+	ORDER BY
+		"draft"."account_id",
+		"draft"."provider_draft_id",
+		"draft"."updated_at" DESC,
+		"draft"."id" DESC
+) AS "legacy_draft";--> statement-breakpoint
 ALTER TABLE "messages" ALTER COLUMN "account_id" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "messages" ALTER COLUMN "internal_date" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "gmail_drafts" ADD CONSTRAINT "gmail_drafts_user_id_profiles_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint

@@ -1369,6 +1369,7 @@ export async function getMailboxWorkspace(
       and(
         eq(gmailDrafts.accountId, account.id),
         eq(gmailDrafts.providerThreadId, selectedThread.providerThreadId),
+        isNotNull(gmailDrafts.providerMessageId),
       ),
     )
     .orderBy(desc(gmailDrafts.updatedAt));
@@ -1418,10 +1419,17 @@ export async function getMailboxWorkspace(
               updatedAt: threadDraft.updatedAt.toISOString(),
             }
           : null,
-      gmailDrafts: providerDrafts.map((draft) => ({
-        ...draft,
-        updatedAt: draft.updatedAt.toISOString(),
-      })),
+      gmailDrafts: providerDrafts.flatMap((draft) =>
+        draft.providerMessageId === null
+          ? []
+          : [
+              {
+                ...draft,
+                providerMessageId: draft.providerMessageId,
+                updatedAt: draft.updatedAt.toISOString(),
+              },
+            ],
+      ),
     },
   };
 }

@@ -858,7 +858,7 @@
           "name": "provider_message_id",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "provider_thread_id": {
           "name": "provider_thread_id",

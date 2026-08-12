@@ -814,7 +814,7 @@ export const gmailDrafts = pgTable(
       .notNull()
       .references(() => connectedAccounts.id, { onDelete: "cascade" }),
     providerDraftId: text("provider_draft_id").notNull(),
-    providerMessageId: text("provider_message_id").notNull(),
+    providerMessageId: text("provider_message_id"),
     providerThreadId: text("provider_thread_id").notNull(),
     messageId: uuid("message_id").references(() => messages.id, {
       onDelete: "set null",
