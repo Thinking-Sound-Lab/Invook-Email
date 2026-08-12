@@ -30,6 +30,7 @@ export type ClaimedJob = {
 export type QueueName =
   | "gmail-pages"
   | "gmail-messages"
+  | "gmail-control"
   | "mail-indexing-batch"
   | "mail-indexing-live"
   | "mail-memory-submit"
@@ -44,20 +45,38 @@ export type MailboxMessage = {
   subject: string;
   snippet: string;
   participants: string[];
-  labelIds: string[];
+  gmailLabelIds: string[];
+  providerHistoryId: string | null;
+  internalDate: Date;
+  sizeEstimate: number | null;
+  headerLines: Array<{ key: string; line: string }>;
   sentAt: Date;
   direction: "incoming" | "outgoing";
   sender: { raw: string; email: string };
   recipients: string[];
   bodyText: string;
+  bodyHtml: string | null;
+  rawObject: {
+    key: string;
+    checksumSha256: string;
+    contentLength: number;
+    etag: string | null;
+  } | null;
   isMemoryEligible: boolean;
   ingestionMode: "initial" | "incremental";
   memoryContactEmails: string[];
   attachments: Array<{
     providerAttachmentId: string | null;
+    mimePartPath: string | null;
     filename: string;
     mimeType: string | null;
+    contentId: string | null;
+    contentDisposition: string | null;
     size: number | null;
+    objectKey: string | null;
+    checksumSha256: string | null;
+    contentLength: number | null;
+    etag: string | null;
   }>;
 };
 

@@ -10,7 +10,8 @@ type AuthenticationErrorPageProps = {
 
 const messages: Record<string, string> = {
   authorization: "Google sign-in could not be verified.",
-  configuration: "Google sign-in is not configured for this installation.",
+  configuration:
+    "Google OAuth and Gmail synchronization are not fully configured for this installation.",
   gmail_access: "Google sign-in succeeded, but Gmail access was rejected.",
   offline_access: "Google did not grant the background access Invook needs.",
   unknown: "Invook could not finish connecting Gmail.",

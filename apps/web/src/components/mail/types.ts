@@ -6,16 +6,10 @@ import type {
   MailboxView as ContractMailboxView,
 } from "@invook/contracts";
 
-export type StaticMailboxView =
-  | "all"
-  | "starred"
-  | "shared"
-  | "reminders"
-  | "scheduled"
-  | "drafts"
-  | "done"
-  | "sent"
-  | "trash";
+export type StaticMailboxView = Exclude<
+  ContractMailboxView,
+  `label:${string}`
+>;
 
 export type MailboxView = ContractMailboxView | `label:${string}`;
 

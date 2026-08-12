@@ -19,11 +19,7 @@ export const mailboxViews = [
   "pitch",
   "newsletter",
   "starred",
-  "shared",
-  "reminders",
-  "scheduled",
   "drafts",
-  "done",
   "sent",
   "trash",
 ] as const;
@@ -125,7 +121,7 @@ export type MemoryEntry = {
   updatedAt: string;
 };
 
-export type ReplyDraft = {
+export type AiReplyDraft = {
   id: string;
   threadId: string;
   status: "editing" | "sent" | "discarded" | "failed";
@@ -145,6 +141,35 @@ export type MailboxAccount = {
   status: "connected" | "reconnect_required" | "disconnected";
   syncState: AccountSyncState;
   lastSyncedAt: string | null;
+  replica: {
+    state:
+      | "pending"
+      | "snapshotting"
+      | "replaying"
+      | "auditing"
+      | "ready"
+      | "repairing"
+      | "failed"
+      | "deleting";
+    readyAt: string | null;
+    lastAuditAt: string | null;
+  };
+};
+
+export type GmailLabel = {
+  id: string;
+  providerLabelId: string;
+  name: string;
+  type: "system" | "user";
+  color: { textColor?: string; backgroundColor?: string } | null;
+};
+
+export type GmailDraftResource = {
+  id: string;
+  providerDraftId: string;
+  providerMessageId: string;
+  providerThreadId: string;
+  updatedAt: string;
 };
 
 export type MailboxThreadSummary = {
@@ -152,7 +177,7 @@ export type MailboxThreadSummary = {
   subject: string;
   snippet: string;
   participants: string[];
-  labelIds: string[];
+  gmailLabels: GmailLabel[];
   invookLabels: InvookThreadLabel[];
   latestMessageAt: string | null;
   messageCount: number;
@@ -163,9 +188,19 @@ export type MailboxThreadMessage = {
   direction: "incoming" | "outgoing";
   sender: { raw: string; email: string };
   recipients: string[];
-  labelIds: string[];
+  providerMessageId: string;
+  providerHistoryId: string | null;
+  internalDate: string;
+  sizeEstimate: number | null;
+  headers: Array<{ name: string; value: string }>;
+  gmailLabels: GmailLabel[];
   subject: string;
   bodyText: string;
+  bodyHtml: string | null;
+  rawMime: {
+    checksumSha256: string;
+    contentLength: number;
+  } | null;
   sentAt: string;
   attachments: MailboxAttachment[];
 };
@@ -177,6 +212,10 @@ export type MailboxAttachment = {
   filename: string;
   mimeType: string | null;
   size: number | null;
+  contentId: string | null;
+  contentDisposition: string | null;
+  checksumSha256: string | null;
+  contentLength: number | null;
 };
 
 export type MailSearchMatch =
@@ -200,7 +239,8 @@ export type MailSearchResult = {
 
 export type MailboxSelectedThread = Omit<MailboxThreadSummary, "snippet"> & {
   messages: MailboxThreadMessage[];
-  draft: ReplyDraft | null;
+  aiReplyDraft: AiReplyDraft | null;
+  gmailDrafts: GmailDraftResource[];
 };
 
 export type MailboxPagination = {
@@ -226,4 +266,16 @@ export type ApiProblem = {
   title: string;
   status: number;
   requestId: string;
+};
+
+export type MailboxChangeEvent = {
+  id: string;
+  accountId: string;
+  changeType:
+    | "replica_ready"
+    | "history_applied"
+    | "repair_complete"
+    | "drafts_changed"
+    | "labels_changed";
+  createdAt: string;
 };

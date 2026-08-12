@@ -11,6 +11,7 @@ import {
   exchangeGoogleAuthorizationCode,
   getGmailProfile,
   GmailApiError,
+  startGmailWatch,
 } from "@invook/gmail";
 
 import {
@@ -23,7 +24,7 @@ import {
 } from "../auth/oauth-state";
 import { clearSessionCookie, createSessionCookie } from "../auth/session";
 import {
-  getMissingApiConfiguration,
+  getMissingGmailConnectionConfiguration,
   getPublicAppOrigin,
 } from "../config";
 import { sendRedirect } from "../responses";
@@ -48,7 +49,7 @@ function connectionErrorUrl(reason: ConnectionErrorReason): string {
 }
 
 async function handleGoogleStart(reply: FastifyReply) {
-  if (getMissingApiConfiguration().length > 0) {
+  if (getMissingGmailConnectionConfiguration().length > 0) {
     await sendRedirect(reply, connectionErrorUrl("configuration"), 302);
     return;
   }
@@ -95,6 +96,17 @@ async function handleGoogleCallback(
       codeVerifier: oauthRequest.codeVerifier,
     });
     const gmailProfile = await getGmailProfile(authorization.accessToken);
+    const topicName = process.env.GMAIL_PUBSUB_TOPIC;
+    if (!topicName) {
+      throw new Error("GMAIL_PUBSUB_TOPIC is required to connect Gmail.");
+    }
+    const watch = await startGmailWatch(authorization.accessToken, {
+      topicName,
+    });
+    const watchExpiration = Number(watch.expiration);
+    if (!Number.isFinite(watchExpiration)) {
+      throw new Error("Gmail returned an invalid watch expiration.");
+    }
     const providerAccountId = authorization.identity.subject;
     const userId = getInvookUserId(providerAccountId);
     const existingAccount = await getGmailConnectionForOAuth(providerAccountId);
@@ -131,7 +143,12 @@ async function handleGoogleCallback(
       providerAccountId,
       email: gmailProfile.emailAddress,
       scopes: authorization.scopes,
-      historyCursor: gmailProfile.historyId,
+      initialHistoryId: gmailProfile.historyId,
+      watch: {
+        topicName,
+        historyId: watch.historyId,
+        expirationAt: new Date(watchExpiration),
+      },
       tokenCiphertext,
       acknowledgedAt,
     });

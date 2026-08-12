@@ -2,9 +2,9 @@ export {
   createDatabase,
   getDatabase,
   listenForJobNotifications,
-  listenForJobStatusNotifications,
   listenForAccountSyncNotifications,
   listenForOutboxNotifications,
+  listenForMailboxChangeNotifications,
   type Database,
 } from "./client";
 export {
@@ -13,7 +13,9 @@ export {
   type GoogleCredential,
 } from "./credentials";
 export * from "./repositories";
+export * from "./replica";
 export * from "./schema";
+export * from "./text";
 export * from "./versions";
 export * from "./workflows";
 export type {

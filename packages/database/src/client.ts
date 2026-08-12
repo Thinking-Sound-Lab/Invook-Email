@@ -46,9 +46,9 @@ export function getDatabase(): Database {
 async function listenForDatabaseNotifications(
   channel:
     | "invook_jobs"
-    | "invook_job_status"
     | "invook_queue_outbox"
-    | "invook_account_sync",
+    | "invook_account_sync"
+    | "invook_mailbox_changes",
   onNotification: (payload: string) => void,
 ) {
   const databaseUrl = process.env.DATABASE_URL ?? "";
@@ -79,8 +79,11 @@ export function listenForJobNotifications(onJobAvailable: () => void) {
   return listenForDatabaseNotifications("invook_jobs", onJobAvailable);
 }
 
-export function listenForJobStatusNotifications(
-  onStatusChanged: (jobId: string) => void,
+export function listenForMailboxChangeNotifications(
+  onMailboxChange: (eventId: string) => void,
 ) {
-  return listenForDatabaseNotifications("invook_job_status", onStatusChanged);
+  return listenForDatabaseNotifications(
+    "invook_mailbox_changes",
+    onMailboxChange,
+  );
 }

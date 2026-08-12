@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   AiConfigurationError,
   deleteBatchFiles,
@@ -36,7 +38,10 @@ import {
 import {
   claimNextJob,
   clearPendingMemoryEvidence,
-  completeIncrementalSync,
+  applyGmailHistoryBatch,
+  beginGmailReplicaAudit,
+  completeGmailReplicaAudit,
+  failGmailReplicaAudit,
   completeJob,
   deleteIndexedMessage,
   completeMailSyncItem,
@@ -58,7 +63,6 @@ import {
   enqueueReadyMailSyncFinalizers,
   deferJobWithoutAttempt,
   failAnalysisJob,
-  failJobAndAccount,
   failMailSyncItem,
   failMailSyncRun,
   failWorkflowStep,
@@ -74,15 +78,20 @@ import {
   getThreadsForLabelRetry,
   getUserAuthoredMemories,
   getWorkerAccount,
+  getGmailReplicaContext,
+  getGmailReplicaInventory,
+  getGmailWatchContext,
   listenForJobNotifications,
   saveLabelBatchResults,
-  setAccountSyncState,
   setLabelAnalysisState,
   getBatchSubmission,
   hasCompletedMailSyncPage,
   listenForOutboxNotifications,
   MAIL_INDEX_VERSION,
+  listGmailObjectKeysForAccount,
+  markGmailAccountCleanupRunning,
   listSubmittedEmbeddingBatchIds,
+  markGmailReplicaReady,
   markMailSyncItemRunning,
   markWorkflowStepRunning,
   MEMORY_SCHEMA_VERSION,
@@ -92,9 +101,14 @@ import {
   countIncompleteEmbeddings,
   saveMessageEmbeddings,
   saveExtractedMemories,
+  saveGmailWatchState,
+  setGmailReplicaState,
   setIndexingSyncStage,
   setMemorySyncStage,
+  toPostgresTextProjection,
   publishOutboxBatch,
+  replaceGmailDraftResources,
+  replaceGmailLabelCatalog,
   prepareEmbeddingBatchSubmission,
   recordEmbeddingBatchInputFile,
   recordEmbeddingProviderBatch,
@@ -105,22 +119,29 @@ import {
   upsertMailboxMessage,
   type ClaimedJob,
   type GoogleCredential,
+  type IndexedMessage,
   type MemoryType,
   type WorkflowStepJob,
 } from "@invook/database";
 import {
   extractEmailAddress,
   gmailHistoryChanges,
+  getGmailDraft,
   getGmailMessage,
   getGmailProfile,
   GmailApiError,
   isMemoryEligible,
+  listGmailDrafts,
   listGmailHistory,
+  listGmailLabels,
   listGmailMessages,
   parseGmailMessage,
   refreshGoogleAccessToken,
+  startGmailWatch,
+  stopGmailWatch,
   type ParsedGmailMessage,
 } from "@invook/gmail";
+import { createObjectStorage } from "@invook/object-storage";
 
 import { BullQueueRuntime, type WorkflowJob } from "./queue";
 
@@ -132,6 +153,8 @@ const feedbackBatchSize = 24;
 const embeddingBatchRequestLimit = 2_000;
 const embeddingBatchAttemptLimit = 3;
 const batchWorkerLockDuration = 5 * 60 * 1_000;
+const credentialRenewalWindowMs = 5 * 60 * 1_000;
+const objectStorage = createObjectStorage();
 const terminalEmbeddingBatchStates = new Set([
   "completed",
   "failed",
@@ -181,7 +204,8 @@ async function refreshCredentialIfRequired(
   accountId: string,
   credential: GoogleCredential,
 ): Promise<GoogleCredential> {
-  const expiresSoon = Date.parse(credential.expiresAt) <= Date.now() + 60_000;
+  const expiresSoon =
+    Date.parse(credential.expiresAt) <= Date.now() + credentialRenewalWindowMs;
   if (!expiresSoon) return credential;
 
   if (!googleClientId || !googleClientSecret) {
@@ -210,42 +234,209 @@ async function refreshCredentialIfRequired(
   return nextCredential;
 }
 
-async function storeMessage(options: {
+async function prepareMessage(options: {
   userId: string;
   accountId: string;
   accountEmail: string;
   message: ParsedGmailMessage;
   ingestionMode: "initial" | "incremental";
-}) {
+}): Promise<IndexedMessage> {
   const { userId, accountId, accountEmail, message, ingestionMode } = options;
   const direction =
     message.labelIds.includes("SENT") ||
     extractEmailAddress(message.from) === accountEmail.toLowerCase()
       ? "outgoing"
       : "incoming";
+  const internalDateValue = options.message.internalDate
+    ? Number(options.message.internalDate)
+    : Number.NaN;
+  const internalDate = Number.isFinite(internalDateValue)
+    ? new Date(internalDateValue)
+    : options.message.sentAt
+      ? new Date(options.message.sentAt)
+      : null;
+  const sentAt = options.message.sentAt
+    ? new Date(options.message.sentAt)
+    : internalDate;
+  if (
+    !internalDate ||
+    !sentAt ||
+    !Number.isFinite(internalDate.getTime()) ||
+    !Number.isFinite(sentAt.getTime())
+  ) {
+    throw new Error(
+      `Gmail message ${message.providerMessageId} has no usable internal or sent date.`,
+    );
+  }
 
-  return upsertMailboxMessage({
+  const rawObject = await objectStorage.putObject({
+    key: `${accountId}/messages/${message.providerMessageId}/raw.eml`,
+    body: message.raw,
+    contentType: "message/rfc822",
+  });
+  const attachments = await Promise.all(
+    message.attachments.map(async (attachment) => {
+      const attachmentObject = await objectStorage.putObject({
+        key: `${accountId}/messages/${message.providerMessageId}/attachments/${attachment.index}-${attachment.checksumSha256}`,
+        body: attachment.content,
+        contentType: attachment.mimeType,
+      });
+      return {
+        providerAttachmentId: null,
+        mimePartPath: attachment.mimePartPath
+          ? toPostgresTextProjection(attachment.mimePartPath)
+          : null,
+        filename: toPostgresTextProjection(attachment.filename ?? ""),
+        mimeType: attachment.mimeType
+          ? toPostgresTextProjection(attachment.mimeType)
+          : null,
+        contentId: attachment.contentId
+          ? toPostgresTextProjection(attachment.contentId)
+          : null,
+        contentDisposition: attachment.contentDisposition
+          ? toPostgresTextProjection(attachment.contentDisposition)
+          : null,
+        size: attachment.size,
+        objectKey: attachmentObject.key,
+        checksumSha256: attachmentObject.checksumSha256,
+        contentLength: attachmentObject.contentLength,
+        etag: attachmentObject.etag,
+      };
+    }),
+  );
+
+  return {
     userId,
     accountId,
     providerThreadId: message.providerThreadId,
     providerMessageId: message.providerMessageId,
-    subject: message.subject,
-    snippet: message.snippet,
-    participants: [message.from, ...message.to, ...message.cc].filter(Boolean),
-    labelIds: message.labelIds,
-    sentAt: new Date(message.sentAt),
+    subject: toPostgresTextProjection(message.subject),
+    snippet: toPostgresTextProjection(message.snippet),
+    participants: [message.from, ...message.to, ...message.cc]
+      .filter(Boolean)
+      .map(toPostgresTextProjection),
+    gmailLabelIds: message.labelIds,
+    providerHistoryId: message.historyId,
+    internalDate,
+    sizeEstimate: message.sizeEstimate,
+    headerLines: message.headers.map((header) => ({
+      key: toPostgresTextProjection(header.name),
+      line: toPostgresTextProjection(header.raw),
+    })),
+    sentAt,
     direction,
-    sender: { raw: message.from, email: extractEmailAddress(message.from) },
-    recipients: [...message.to, ...message.cc],
-    bodyText: message.bodyText,
+    sender: {
+      raw: toPostgresTextProjection(message.from),
+      email: toPostgresTextProjection(extractEmailAddress(message.from)),
+    },
+    recipients: [...message.to, ...message.cc].map(toPostgresTextProjection),
+    bodyText: toPostgresTextProjection(message.bodyText ?? ""),
+    bodyHtml: message.bodyHtml
+      ? toPostgresTextProjection(message.bodyHtml)
+      : null,
+    rawObject,
     isMemoryEligible: direction === "outgoing" && isMemoryEligible(message),
     ingestionMode,
     memoryContactEmails: normalizedEmails(
       [message.from, ...message.to, ...message.cc],
       accountEmail,
-    ),
-    attachments: message.attachments,
+    ).map(toPostgresTextProjection),
+    attachments,
+  };
+}
+
+async function storeMessage(options: Parameters<typeof prepareMessage>[0]) {
+  return upsertMailboxMessage(await prepareMessage(options));
+}
+
+async function syncGmailLabelCatalog(options: {
+  accessToken: string;
+  userId: string;
+  accountId: string;
+  notify?: boolean;
+}) {
+  const labels = await listGmailLabels(options.accessToken);
+  for (const label of labels) {
+    if (label.type !== "system" && label.type !== "user") {
+      throw new Error(`Gmail label ${label.id} did not include a supported type.`);
+    }
+  }
+  await replaceGmailLabelCatalog({
+    userId: options.userId,
+    accountId: options.accountId,
+    notify: options.notify,
+    labels: labels.map((label) => ({
+      providerLabelId: label.id,
+      name: label.name,
+      type: label.type as "system" | "user",
+      messageListVisibility: label.messageListVisibility ?? null,
+      labelListVisibility: label.labelListVisibility ?? null,
+      color: label.color ?? null,
+      providerMetadata: {
+        messagesTotal: label.messagesTotal ?? null,
+        messagesUnread: label.messagesUnread ?? null,
+        threadsTotal: label.threadsTotal ?? null,
+        threadsUnread: label.threadsUnread ?? null,
+      },
+    })),
   });
+  return labels;
+}
+
+async function syncGmailDraftResources(options: {
+  accessToken: string;
+  userId: string;
+  accountId: string;
+  accountEmail: string;
+  ingestionMode: "initial" | "incremental";
+  notify?: boolean;
+}) {
+  let pageToken: string | undefined;
+  const drafts: Array<{
+    providerDraftId: string;
+    providerMessageId: string;
+    providerThreadId: string;
+    providerHistoryId: string | null;
+    providerMetadata: Record<string, unknown>;
+  }> = [];
+  do {
+    const page = await listGmailDrafts(options.accessToken, {
+      maxResults: 100,
+      pageToken,
+    });
+    for (const reference of page.drafts ?? []) {
+      const draft = await getGmailDraft(options.accessToken, reference.id);
+      const parsed = await parseGmailMessage(draft.message);
+      await storeMessage({
+        userId: options.userId,
+        accountId: options.accountId,
+        accountEmail: options.accountEmail,
+        message: parsed,
+        ingestionMode: options.ingestionMode,
+      });
+      drafts.push({
+        providerDraftId: draft.id,
+        providerMessageId: draft.message.id,
+        providerThreadId: draft.message.threadId,
+        providerHistoryId: draft.message.historyId ?? null,
+        providerMetadata: {
+          labelIds: draft.message.labelIds ?? [],
+          snippet: draft.message.snippet ?? null,
+          internalDate: draft.message.internalDate ?? null,
+          sizeEstimate: draft.message.sizeEstimate ?? null,
+        },
+      });
+    }
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  await replaceGmailDraftResources({
+    userId: options.userId,
+    accountId: options.accountId,
+    drafts,
+    notify: options.notify,
+  });
+  return drafts;
 }
 
 async function syncMailbox(options: {
@@ -285,7 +476,7 @@ async function syncMailbox(options: {
           userId: options.userId,
           accountId: options.accountId,
           accountEmail: options.accountEmail,
-          message: parseGmailMessage(gmailMessage),
+          message: await parseGmailMessage(gmailMessage),
           ingestionMode: options.ingestionMode,
         });
         if (stored.changed) changedThreadIds.add(stored.threadId);
@@ -310,16 +501,110 @@ async function syncMailbox(options: {
   return changedThreadIds;
 }
 
-async function syncMailboxHistory(options: {
+async function listProviderMessageIds(accessToken: string): Promise<string[]> {
+  let pageToken: string | undefined;
+  const messageIds: string[] = [];
+  do {
+    const page = await listGmailMessages(accessToken, {
+      maxResults: 100,
+      pageToken,
+    });
+    messageIds.push(...(page.messages ?? []).map((message) => message.id));
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return messageIds;
+}
+
+async function findObjectFailures(
+  objects: Array<{
+    providerMessageId: string;
+    key: string | null;
+    checksumSha256: string | null;
+    contentLength: number | null;
+  }>,
+) {
+  const failures: Array<{
+    providerMessageId: string;
+    key: string | null;
+    reason: string;
+  }> = [];
+  for (let start = 0; start < objects.length; start += 10) {
+    const batch = objects.slice(start, start + 10);
+    const results = await Promise.all(
+      batch.map(async (object) => {
+        if (!object.key) {
+          return {
+            providerMessageId: object.providerMessageId,
+            key: null,
+            reason: "missing_object_key",
+          };
+        }
+        try {
+          const content = await objectStorage.getObject(object.key);
+          if (
+            object.contentLength !== null &&
+            content.byteLength !== object.contentLength
+          ) {
+            return {
+              providerMessageId: object.providerMessageId,
+              key: object.key,
+              reason: "content_length_mismatch",
+            };
+          }
+          if (
+            object.checksumSha256 !== null &&
+            createHash("sha256").update(content).digest("hex") !==
+              object.checksumSha256
+          ) {
+            return {
+              providerMessageId: object.providerMessageId,
+              key: object.key,
+              reason: "checksum_mismatch",
+            };
+          }
+          return null;
+        } catch {
+          return {
+            providerMessageId: object.providerMessageId,
+            key: object.key,
+            reason: "object_unavailable",
+          };
+        }
+      }),
+    );
+    failures.push(
+      ...results.filter(
+        (
+          result,
+        ): result is {
+          providerMessageId: string;
+          key: string | null;
+          reason: string;
+        } => result !== null,
+      ),
+    );
+  }
+  return failures;
+}
+
+async function applyHistoryRange(options: {
   accessToken: string;
   userId: string;
   accountId: string;
   accountEmail: string;
   startHistoryId: string;
+  expectedCursor: string;
+  pushEventId?: string | null;
+  stateAfterApply?: "ready" | "replaying" | "repairing";
+  markStoredPushEventsProcessed?: boolean;
+  ingestionMode: "initial" | "incremental";
 }) {
   let pageToken: string | undefined;
   let historyId = options.startHistoryId;
-  const messageActions = new Map<string, "upsert" | "delete">();
+  const messageActions = new Map<
+    string,
+    { action: "upsert" | "delete"; providerHistoryId: string | null }
+  >();
 
   do {
     const page = await listGmailHistory(options.accessToken, {
@@ -329,28 +614,26 @@ async function syncMailboxHistory(options: {
     });
     for (const history of page.history ?? []) {
       for (const change of gmailHistoryChanges(history)) {
-        messageActions.set(change.messageId, change.action);
+        messageActions.set(change.messageId, {
+          action: change.action,
+          providerHistoryId: history.id ?? null,
+        });
       }
     }
     if (page.historyId) historyId = page.historyId;
     pageToken = page.nextPageToken;
   } while (pageToken);
 
-  const changedThreadIds = new Set<string>();
-  for (const [messageId, action] of messageActions) {
-    if (action !== "delete") continue;
-    const deleted = await deleteIndexedMessage({
-      accountId: options.accountId,
-      providerMessageId: messageId,
-    });
-    if (deleted.changed && deleted.threadId) {
-      changedThreadIds.add(deleted.threadId);
-    }
-  }
-
+  const deletedMessageIds = Array.from(messageActions)
+    .filter(([, change]) => change.action === "delete")
+    .map(([providerMessageId, change]) => ({
+      providerMessageId,
+      providerHistoryId: change.providerHistoryId,
+    }));
   const ids = Array.from(messageActions)
-    .filter(([, action]) => action === "upsert")
+    .filter(([, change]) => change.action === "upsert")
     .map(([messageId]) => messageId);
+  const messages: IndexedMessage[] = [];
   for (let start = 0; start < ids.length; start += 5) {
     const batch = ids.slice(start, start + 5);
     const gmailMessages = await Promise.all(
@@ -370,32 +653,44 @@ async function syncMailboxHistory(options: {
     );
     for (const gmailMessage of gmailMessages) {
       if (!gmailMessage.message) {
-        const deleted = await deleteIndexedMessage({
-          accountId: options.accountId,
+        deletedMessageIds.push({
           providerMessageId: gmailMessage.messageId,
+          providerHistoryId:
+            messageActions.get(gmailMessage.messageId)?.providerHistoryId ?? null,
         });
-        if (deleted.changed && deleted.threadId) {
-          changedThreadIds.add(deleted.threadId);
-        }
         continue;
       }
-      const stored = await storeMessage({
-        userId: options.userId,
-        accountId: options.accountId,
-        accountEmail: options.accountEmail,
-        message: parseGmailMessage(gmailMessage.message),
-        ingestionMode: "incremental",
-      });
-      if (stored.changed) changedThreadIds.add(stored.threadId);
+      messages.push(
+        await prepareMessage({
+          userId: options.userId,
+          accountId: options.accountId,
+          accountEmail: options.accountEmail,
+          message: await parseGmailMessage(gmailMessage.message),
+          ingestionMode: options.ingestionMode,
+        }),
+      );
     }
   }
 
-  return { changedThreadIds, historyId };
+  const applied = await applyGmailHistoryBatch({
+    userId: options.userId,
+    accountId: options.accountId,
+    expectedCursor: options.expectedCursor,
+    nextCursor: historyId,
+    messages,
+    deletedMessageIds,
+    pushEventId: options.pushEventId,
+    stateAfterApply: options.stateAfterApply,
+    markStoredPushEventsProcessed: options.markStoredPushEventsProcessed,
+  });
+  return { ...applied, historyId };
 }
 
 async function getMailSyncContext(accountId: string) {
   const account = await getWorkerAccount(accountId);
-  if (!account) throw new Error("The connected Gmail account or credential was not found.");
+  if (!account) {
+    throw new Error("The connected Gmail account or credential was not found.");
+  }
   const storedCredential = decryptGoogleCredential(account.tokenCiphertext, encryptionKey);
   const credential = await refreshCredentialIfRequired(accountId, storedCredential);
   return { account, credential };
@@ -408,7 +703,11 @@ async function runGmailPage(job: WorkflowStepJob) {
   const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
   const pageNumber = requiredInteger(job.payload.pageNumber, "Gmail page number");
   const rawPageToken = job.payload.pageToken;
-  if (rawPageToken !== null && rawPageToken !== undefined && typeof rawPageToken !== "string") {
+  if (
+    rawPageToken !== null &&
+    rawPageToken !== undefined &&
+    typeof rawPageToken !== "string"
+  ) {
     throw new Error("The Gmail page token is invalid.");
   }
   if (await hasCompletedMailSyncPage(runId, pageNumber)) {
@@ -417,6 +716,15 @@ async function runGmailPage(job: WorkflowStepJob) {
 
   await startMailSyncRun(runId);
   const { account, credential } = await getMailSyncContext(job.accountId);
+  if (pageNumber === 1) {
+    await ensureGmailWatch(account.id, credential.accessToken);
+    await setGmailReplicaState({ accountId: account.id, state: "snapshotting" });
+    await syncGmailLabelCatalog({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+    });
+  }
   const page = await listGmailMessages(credential.accessToken, {
     maxResults: 100,
     pageToken: rawPageToken ?? undefined,
@@ -458,80 +766,345 @@ async function runGmailMessage(job: WorkflowStepJob) {
     return { status: "current", runId, providerMessageId };
   }
   const { account, credential } = await getMailSyncContext(job.accountId);
-  const gmailMessage = await getGmailMessage(credential.accessToken, providerMessageId);
+  let gmailMessage;
+  try {
+    gmailMessage = await getGmailMessage(credential.accessToken, providerMessageId);
+  } catch (error) {
+    if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+    await completeMailSyncItem(runId, providerMessageId);
+    return { status: "gone", runId, providerMessageId };
+  }
   await storeMessage({
     userId: account.userId,
     accountId: account.id,
     accountEmail: account.email,
     ingestionMode: "initial",
-    message: parseGmailMessage(gmailMessage),
+    message: await parseGmailMessage(gmailMessage),
   });
   await completeMailSyncItem(runId, providerMessageId);
   return { status: "complete", runId, providerMessageId };
 }
 
-async function runIncrementalSync(job: ClaimedJob) {
-  if (!job.accountId) throw new Error("The Gmail sync job has no connected account.");
-  const account = await getWorkerAccount(job.accountId);
-  if (!account) throw new Error("The connected Gmail account or credential was not found.");
+function gmailPubSubTopic(): string {
+  const topicName = process.env.GMAIL_PUBSUB_TOPIC?.trim();
+  if (!topicName) {
+    throw new Error("GMAIL_PUBSUB_TOPIC is required for Gmail watch state.");
+  }
+  return topicName;
+}
 
-  const storedCredential = decryptGoogleCredential(account.tokenCiphertext, encryptionKey);
-  const credential = await refreshCredentialIfRequired(job.accountId, storedCredential);
-  await setAccountSyncState(job.accountId, {
-    ...account.syncState,
-    mailSync: "running",
+async function renewGmailWatch(accountId: string, accessToken: string) {
+  const topicName = gmailPubSubTopic();
+  const watch = await startGmailWatch(accessToken, { topicName });
+  const expiration = Number(watch.expiration);
+  if (!Number.isFinite(expiration)) {
+    throw new Error("Gmail returned an invalid watch expiration.");
+  }
+  await saveGmailWatchState({
+    accountId,
+    watch: {
+      topicName,
+      historyId: watch.historyId,
+      expirationAt: new Date(expiration),
+    },
+    scheduleRenewal: true,
   });
+  return watch;
+}
 
-  const requestedHistoryId =
-    typeof job.payload.historyId === "string" && job.payload.historyId
-      ? job.payload.historyId
-      : account.historyCursor;
-  let changedThreadIds = new Set<string>();
-  let historyId = requestedHistoryId;
-  if (requestedHistoryId) {
+async function ensureGmailWatch(accountId: string, accessToken: string) {
+  const watch = await getGmailWatchContext(accountId);
+  if (watch?.status === "active" && watch.expirationAt.getTime() > Date.now()) {
+    return;
+  }
+  await renewGmailWatch(accountId, accessToken);
+}
+
+async function runReplicaAudit(options: {
+  accessToken: string;
+  userId: string;
+  accountId: string;
+  accountEmail: string;
+  trigger: "initial" | "history_expired" | "watch_renewal" | "manual";
+}) {
+  const ingestionMode =
+    options.trigger === "initial" || options.trigger === "history_expired"
+      ? "initial"
+      : "incremental";
+  await setGmailReplicaState({ accountId: options.accountId, state: "auditing" });
+  const auditId = await beginGmailReplicaAudit({
+    userId: options.userId,
+    accountId: options.accountId,
+    trigger: options.trigger,
+  });
+  try {
+    await syncGmailLabelCatalog({
+      accessToken: options.accessToken,
+      userId: options.userId,
+      accountId: options.accountId,
+    });
+    await syncGmailDraftResources({
+      accessToken: options.accessToken,
+      userId: options.userId,
+      accountId: options.accountId,
+      accountEmail: options.accountEmail,
+      ingestionMode,
+    });
+    const providerMessageIds = await listProviderMessageIds(options.accessToken);
+    const storedMessageIds = await getIndexedMessageIds(options.accountId);
+    const providerIds = new Set(providerMessageIds);
+    const storedIds = new Set(storedMessageIds);
+    const missingMessageIds = providerMessageIds.filter((id) => !storedIds.has(id));
+    const extraMessageIds = storedMessageIds.filter((id) => !providerIds.has(id));
+
+    for (let start = 0; start < missingMessageIds.length; start += 5) {
+      const batch = missingMessageIds.slice(start, start + 5);
+      const gmailMessages = await Promise.all(
+        batch.map(async (messageId) => {
+          try {
+            return await getGmailMessage(options.accessToken, messageId);
+          } catch (error) {
+            if (error instanceof GmailApiError && error.status === 404) return null;
+            throw error;
+          }
+        }),
+      );
+      for (const gmailMessage of gmailMessages) {
+        if (!gmailMessage) continue;
+        await storeMessage({
+          userId: options.userId,
+          accountId: options.accountId,
+          accountEmail: options.accountEmail,
+          message: await parseGmailMessage(gmailMessage),
+          ingestionMode,
+        });
+      }
+    }
+    for (const providerMessageId of extraMessageIds) {
+      await deleteIndexedMessage({ accountId: options.accountId, providerMessageId });
+    }
+
+    const providerLabels = await syncGmailLabelCatalog({
+      accessToken: options.accessToken,
+      userId: options.userId,
+      accountId: options.accountId,
+    });
+    const providerDrafts = await syncGmailDraftResources({
+      accessToken: options.accessToken,
+      userId: options.userId,
+      accountId: options.accountId,
+      accountEmail: options.accountEmail,
+      ingestionMode,
+    });
+    const repairedProviderMessageIds = await listProviderMessageIds(
+      options.accessToken,
+    );
+    let inventory = await getGmailReplicaInventory(options.accountId);
+    let objectFailures = await findObjectFailures(inventory.objects);
+    const repairableObjectMessageIds = Array.from(
+      new Set(
+        objectFailures
+          .map((failure) => failure.providerMessageId)
+          .filter((id) => repairedProviderMessageIds.includes(id)),
+      ),
+    );
+    for (let start = 0; start < repairableObjectMessageIds.length; start += 5) {
+      const batch = repairableObjectMessageIds.slice(start, start + 5);
+      const gmailMessages = await Promise.all(
+        batch.map((messageId) => getGmailMessage(options.accessToken, messageId)),
+      );
+      for (const gmailMessage of gmailMessages) {
+        await storeMessage({
+          userId: options.userId,
+          accountId: options.accountId,
+          accountEmail: options.accountEmail,
+          message: await parseGmailMessage(gmailMessage),
+          ingestionMode,
+        });
+      }
+    }
+    if (repairableObjectMessageIds.length > 0) {
+      inventory = await getGmailReplicaInventory(options.accountId);
+      objectFailures = await findObjectFailures(inventory.objects);
+    }
+
+    const labelIds = new Set(inventory.providerLabelIds);
+    const providerLabelIds = new Set(providerLabels.map((label) => label.id));
+    const missingLabelIds = [...providerLabelIds].filter((id) => !labelIds.has(id));
+    const extraLabelIds = [...labelIds].filter((id) => !providerLabelIds.has(id));
+    const draftIds = new Set(inventory.providerDraftIds);
+    const providerDraftIds = new Set(
+      providerDrafts.map((draft) => draft.providerDraftId),
+    );
+    const missingDraftIds = [...providerDraftIds].filter((id) => !draftIds.has(id));
+    const extraDraftIds = [...draftIds].filter((id) => !providerDraftIds.has(id));
+    const additionalFailureCount =
+      missingLabelIds.length +
+      extraLabelIds.length +
+      missingDraftIds.length +
+      extraDraftIds.length +
+      objectFailures.length;
+    const repaired = await completeGmailReplicaAudit({
+      auditId,
+      providerMessageIds: repairedProviderMessageIds,
+      storedMessageIds: inventory.providerMessageIds,
+      additionalFailureCount,
+      details: {
+        repairedMissingMessageCount: missingMessageIds.length,
+        repairedExtraMessageCount: extraMessageIds.length,
+        missingLabelIds,
+        extraLabelIds,
+        missingDraftIds,
+        extraDraftIds,
+        objectFailures,
+      },
+    });
+    if (
+      repaired.missing.length > 0 ||
+      repaired.extra.length > 0 ||
+      additionalFailureCount > 0
+    ) {
+      throw new Error("The Gmail replica completeness repair did not converge.");
+    }
+    return auditId;
+  } catch (error) {
+    await failGmailReplicaAudit({
+      auditId,
+      message: error instanceof Error ? error.message : "Unknown Gmail audit failure",
+    });
+    throw error;
+  }
+}
+
+async function repairExpiredHistory(options: {
+  accessToken: string;
+  userId: string;
+  accountId: string;
+  accountEmail: string;
+  expectedCursor: string;
+  pushEventId?: string | null;
+  markStoredPushEventsProcessed?: boolean;
+}) {
+  await setGmailReplicaState({ accountId: options.accountId, state: "repairing" });
+  const baseline = await getGmailProfile(options.accessToken);
+  await renewGmailWatch(options.accountId, options.accessToken);
+  await syncGmailLabelCatalog({
+    accessToken: options.accessToken,
+    userId: options.userId,
+    accountId: options.accountId,
+  });
+  await syncMailbox({
+    accessToken: options.accessToken,
+    userId: options.userId,
+    accountId: options.accountId,
+    accountEmail: options.accountEmail,
+    ingestionMode: "initial",
+  });
+  const replay = await applyHistoryRange({
+    ...options,
+    startHistoryId: baseline.historyId,
+    stateAfterApply: "repairing",
+    ingestionMode: "initial",
+  });
+  if (!replay.applied) {
+    throw new Error("The Gmail history cursor changed during completeness repair.");
+  }
+  await syncGmailDraftResources({
+    accessToken: options.accessToken,
+    userId: options.userId,
+    accountId: options.accountId,
+    accountEmail: options.accountEmail,
+    ingestionMode: "initial",
+  });
+  const auditId = await runReplicaAudit({ ...options, trigger: "history_expired" });
+  await markGmailReplicaReady({
+    accountId: options.accountId,
+    historyCursor: replay.historyId,
+    auditId,
+  });
+  return { historyCursor: replay.historyId, auditId };
+}
+
+async function catchUpGmailHistory(options: {
+  accountId: string;
+  pushEventId?: string | null;
+  resumeNonReady?: boolean;
+  markStoredPushEventsProcessed?: boolean;
+}) {
+  for (let conflictAttempt = 0; conflictAttempt < 3; conflictAttempt += 1) {
+    const replica = await getGmailReplicaContext(options.accountId);
+    if (!replica) throw new Error("The Gmail replica state was not found.");
+    if (replica.state !== "ready") {
+      if (options.resumeNonReady) {
+        const { account, credential } = await getMailSyncContext(options.accountId);
+        const expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
+        const repaired = await repairExpiredHistory({
+          accessToken: credential.accessToken,
+          userId: account.userId,
+          accountId: account.id,
+          accountEmail: account.email,
+          expectedCursor,
+          pushEventId: options.pushEventId,
+          markStoredPushEventsProcessed: options.markStoredPushEventsProcessed,
+        });
+        return { status: "repaired", ...repaired, changedThreadCount: 0 };
+      }
+      return {
+        status: "deferred",
+        state: replica.state,
+        historyCursor: replica.historyCursor,
+      };
+    }
+    const { account, credential } = await getMailSyncContext(options.accountId);
+    const expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
+    await syncGmailLabelCatalog({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      notify: true,
+    });
     try {
-      const incremental = await syncMailboxHistory({
+      const replay = await applyHistoryRange({
         accessToken: credential.accessToken,
         userId: account.userId,
         accountId: account.id,
         accountEmail: account.email,
-        startHistoryId: requestedHistoryId,
+        startHistoryId: expectedCursor,
+        expectedCursor,
+        pushEventId: options.pushEventId,
+        stateAfterApply: "ready",
+        markStoredPushEventsProcessed: options.markStoredPushEventsProcessed,
+        ingestionMode: "incremental",
       });
-      changedThreadIds = incremental.changedThreadIds;
-      historyId = incremental.historyId;
-    } catch (error) {
-      if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
-      const baseline = await getGmailProfile(credential.accessToken);
-      historyId = baseline.historyId;
-      changedThreadIds = await syncMailbox({
+      if (!replay.applied) continue;
+      await syncGmailDraftResources({
         accessToken: credential.accessToken,
         userId: account.userId,
         accountId: account.id,
         accountEmail: account.email,
         ingestionMode: "incremental",
+        notify: true,
       });
+      return {
+        status: "complete",
+        historyCursor: replay.historyId,
+        changedThreadCount: replay.changedThreadIds.length,
+      };
+    } catch (error) {
+      if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+      const repaired = await repairExpiredHistory({
+        accessToken: credential.accessToken,
+        userId: account.userId,
+        accountId: account.id,
+        accountEmail: account.email,
+        expectedCursor,
+        pushEventId: options.pushEventId,
+        markStoredPushEventsProcessed: options.markStoredPushEventsProcessed,
+      });
+      return { status: "repaired", ...repaired, changedThreadCount: 0 };
     }
-  } else {
-    const baseline = await getGmailProfile(credential.accessToken);
-    historyId = baseline.historyId;
-    changedThreadIds = await syncMailbox({
-      accessToken: credential.accessToken,
-      userId: account.userId,
-      accountId: account.id,
-      accountEmail: account.email,
-      ingestionMode: "incremental",
-    });
   }
-
-  await completeIncrementalSync({
-    accountId: account.id,
-    historyCursor: historyId,
-    changedThreadIds: Array.from(changedThreadIds),
-  });
-  return {
-    changedThreadCount: changedThreadIds.size,
-    historyCursor: historyId,
-  };
+  throw new Error("The Gmail history cursor changed repeatedly during catch-up.");
 }
 
 async function runGmailFinalize(job: WorkflowStepJob) {
@@ -539,11 +1112,148 @@ async function runGmailFinalize(job: WorkflowStepJob) {
     throw new Error("The Gmail finalization job is missing its synchronization run.");
   }
   const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
-  const { credential } = await getMailSyncContext(job.accountId);
-  const gmailProfile = await getGmailProfile(credential.accessToken);
-  await completeMailSyncRun({ runId, finalHistoryCursor: gmailProfile.historyId });
+  const replica = await getGmailReplicaContext(job.accountId);
+  if (!replica) throw new Error("The Gmail replica state was not found.");
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  const expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
+  await ensureGmailWatch(account.id, credential.accessToken);
+  await setGmailReplicaState({ accountId: account.id, state: "replaying" });
+  await syncGmailLabelCatalog({
+    accessToken: credential.accessToken,
+    userId: account.userId,
+    accountId: account.id,
+  });
+
+  let historyCursor: string;
+  let auditId: string;
+  try {
+    const replay = await applyHistoryRange({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      startHistoryId: replica.initialHistoryId,
+      expectedCursor,
+      stateAfterApply: "replaying",
+      ingestionMode: "initial",
+    });
+    if (!replay.applied) {
+      throw new Error("The Gmail history cursor changed during initial replay.");
+    }
+    historyCursor = replay.historyId;
+    await syncGmailDraftResources({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      ingestionMode: "initial",
+    });
+    auditId = await runReplicaAudit({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      trigger: "initial",
+    });
+    await markGmailReplicaReady({ accountId: account.id, historyCursor, auditId });
+  } catch (error) {
+    if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+    const repaired = await repairExpiredHistory({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      expectedCursor,
+    });
+    historyCursor = repaired.historyCursor;
+    auditId = repaired.auditId;
+  }
+
+  await completeMailSyncRun({ runId, finalHistoryCursor: historyCursor });
   await enqueueAnalysisJobsForIndexedAccounts();
-  return { status: "complete", runId, historyCursor: gmailProfile.historyId };
+  return { status: "complete", runId, historyCursor, auditId };
+}
+
+async function runGmailHistoryCatchup(job: WorkflowStepJob) {
+  if (!job.accountId) throw new Error("The Gmail history job has no account.");
+  const pushEventId =
+    typeof job.payload.pushEventId === "string" ? job.payload.pushEventId : null;
+  const markStoredPushEventsProcessed =
+    job.payload.reason === "post_initial_reconciliation";
+  return catchUpGmailHistory({
+    accountId: job.accountId,
+    pushEventId,
+    resumeNonReady: job.attempts > 1,
+    markStoredPushEventsProcessed,
+  });
+}
+
+async function runGmailWatchRenewal(job: WorkflowStepJob) {
+  if (!job.accountId) throw new Error("The Gmail watch renewal has no account.");
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  await renewGmailWatch(account.id, credential.accessToken);
+  const catchup = await catchUpGmailHistory({
+    accountId: account.id,
+    resumeNonReady: job.attempts > 1,
+  });
+  if (catchup.status === "deferred") return catchup;
+  const auditId = await runReplicaAudit({
+    accessToken: credential.accessToken,
+    userId: account.userId,
+    accountId: account.id,
+    accountEmail: account.email,
+    trigger: "watch_renewal",
+  });
+  const replica = await getGmailReplicaContext(account.id);
+  const historyCursor = replica?.historyCursor ?? replica?.initialHistoryId;
+  if (!historyCursor) throw new Error("The Gmail replica cursor was not found.");
+  await markGmailReplicaReady({ accountId: account.id, historyCursor, auditId });
+  return { status: "complete", historyCursor, auditId };
+}
+
+async function runGmailReplicaAudit(job: WorkflowStepJob) {
+  if (!job.accountId) throw new Error("The Gmail replica audit has no account.");
+  const catchup = await catchUpGmailHistory({
+    accountId: job.accountId,
+    resumeNonReady: true,
+  });
+  if (catchup.status === "deferred") return catchup;
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  const auditId = await runReplicaAudit({
+    accessToken: credential.accessToken,
+    userId: account.userId,
+    accountId: account.id,
+    accountEmail: account.email,
+    trigger: "manual",
+  });
+  const replica = await getGmailReplicaContext(account.id);
+  const historyCursor = replica?.historyCursor ?? replica?.initialHistoryId;
+  if (!historyCursor) throw new Error("The Gmail replica cursor was not found.");
+  await markGmailReplicaReady({ accountId: account.id, historyCursor, auditId });
+  return { status: "complete", historyCursor, auditId };
+}
+
+async function runGmailAccountCleanup(job: WorkflowStepJob) {
+  if (!job.accountId) throw new Error("The Gmail cleanup has no account.");
+  const cleanupId = requiredString(job.payload.cleanupId, "Gmail cleanup audit ID");
+  await markGmailAccountCleanupRunning(cleanupId);
+  const account = await getWorkerAccount(job.accountId);
+  if (account) {
+    const credential = decryptGoogleCredential(account.tokenCiphertext, encryptionKey);
+    try {
+      await stopGmailWatch(credential.accessToken);
+    } catch (error) {
+      if (
+        !(error instanceof GmailApiError) ||
+        ![400, 401, 403, 404].includes(error.status)
+      ) {
+        throw error;
+      }
+    }
+  }
+  const objectKeys = await listGmailObjectKeysForAccount(job.accountId);
+  await objectStorage.deleteObjects(objectKeys);
+  return { objectCount: objectKeys.length };
 }
 
 async function runEmbeddingBackfill(job: WorkflowStepJob) {
@@ -2037,19 +2747,11 @@ async function runMemoryFeedback(job: WorkflowStepJob) {
 }
 async function markPostgresJobFailed(job: ClaimedJob, error: unknown) {
   const message = error instanceof Error ? error.message : "Unknown worker failure";
-  if (job.jobType !== "gmail.incremental_sync") {
-    await failAnalysisJob({ job, message });
-    return;
-  }
-  await failJobAndAccount({
-    job,
-    message,
-    reconnectRequired: error instanceof GmailApiError && error.status === 401,
-  });
+  await failAnalysisJob({ job, message });
 }
 
 async function processNextPostgresJob() {
-  const jobTypes = ["gmail.incremental_sync"];
+  const jobTypes: string[] = [];
   if (isMemoryBatchConfigured()) {
     jobTypes.push("memory.incremental", "label.backfill.submit");
   }
@@ -2061,15 +2763,13 @@ async function processNextPostgresJob() {
       "label.batch.event",
     );
   }
+  if (jobTypes.length === 0) return false;
   const job = await claimNextJob(workerId, jobTypes);
   if (!job) return false;
 
   try {
     let result: Record<string, unknown>;
     switch (job.jobType) {
-      case "gmail.incremental_sync":
-        result = await runIncrementalSync(job);
-        break;
       case "memory.incremental":
         result = await runIncrementalMemoryExtraction(job);
         break;
@@ -2206,6 +2906,20 @@ function processGmailMessage(bullJob: WorkflowJob) {
   return executeWorkflowJob(bullJob, runGmailMessage);
 }
 
+function processGmailControl(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "gmail.history.catchup") {
+      return runGmailHistoryCatchup(job);
+    }
+    if (job.stepType === "gmail.watch.renew") return runGmailWatchRenewal(job);
+    if (job.stepType === "gmail.replica.audit") return runGmailReplicaAudit(job);
+    if (job.stepType === "gmail.account.cleanup") {
+      return runGmailAccountCleanup(job);
+    }
+    throw new Error(`Unsupported Gmail control step: ${job.stepType}`);
+  });
+}
+
 function processIndexingBatch(bullJob: WorkflowJob) {
   return executeWorkflowJob(bullJob, async (job) => {
     if (job.stepType === "embedding.backfill") return runEmbeddingBackfill(job);
@@ -2243,6 +2957,11 @@ function startBullWorkers(runtime: BullQueueRuntime) {
     ...withFailureReconciliation,
     concurrency: 5,
   });
+  runtime.createWorker(
+    "gmail-control",
+    processGmailControl,
+    withFailureReconciliation,
+  );
   if (isAiConfigured()) {
     runtime.createWorker(
       "mail-memory-feedback",

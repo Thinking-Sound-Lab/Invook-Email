@@ -2,11 +2,12 @@
 
 import {
   CheckmarkCircle02Icon,
+  MailAdd01Icon,
   RefreshIcon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { ReplyDraft } from "@invook/contracts";
+import type { AiReplyDraft } from "@invook/contracts";
 import axios from "axios";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -22,14 +23,15 @@ export function DraftComposer({
   aiConfigured,
 }: {
   threadId: string;
-  initialDraft: ReplyDraft | null;
+  initialDraft: AiReplyDraft | null;
   aiConfigured: boolean;
 }) {
   const router = useRouter();
   const [draft, setDraft] = useState(initialDraft);
   const [text, setText] = useState(initialDraft?.currentText ?? "");
   const [instruction, setInstruction] = useState("");
-  const [pending, setPending] = useState<"generate" | "save" | null>(null);
+  const [pending, setPending] = useState<"generate" | "save" | "gmail" | null>(null);
+  const [savedToGmail, setSavedToGmail] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const changed = Boolean(draft && text !== draft.currentText);
@@ -39,13 +41,14 @@ export function DraftComposer({
     setError(null);
     setNotice(null);
     try {
-      const response = await axios.post<{ draft: ReplyDraft }>(
+      const response = await axios.post<{ draft: AiReplyDraft }>(
         `/v1/threads/${threadId}/drafts`,
         { instruction },
       );
       const body = response.data;
       setDraft(body.draft);
       setText(body.draft.currentText);
+      setSavedToGmail(false);
       setNotice(
         body.draft.usedMemoryIds.length > 0
           ? `Drafted with ${body.draft.usedMemoryIds.length} relevant ${body.draft.usedMemoryIds.length === 1 ? "memory" : "memories"}.`
@@ -65,13 +68,14 @@ export function DraftComposer({
     setError(null);
     setNotice(null);
     try {
-      const response = await axios.patch<{ draft: ReplyDraft }>(
+      const response = await axios.patch<{ draft: AiReplyDraft }>(
         `/v1/drafts/${draft.id}`,
         { currentText: text },
       );
       const body = response.data;
       setDraft(body.draft);
       setText(body.draft.currentText);
+      setSavedToGmail(false);
       setNotice(
         body.draft.currentText === body.draft.generatedText
           ? "Draft saved."
@@ -80,6 +84,23 @@ export function DraftComposer({
       router.refresh();
     } catch (cause) {
       setError(apiErrorMessage(cause, "Invook could not save this draft."));
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function saveToGmailDrafts() {
+    if (!draft || changed) return;
+    setPending("gmail");
+    setError(null);
+    setNotice(null);
+    try {
+      await axios.post(`/v1/drafts/${draft.id}/save-to-gmail`);
+      setSavedToGmail(true);
+      setNotice("Saved to Gmail drafts. Invook kept the AI draft and its evidence unchanged.");
+      router.refresh();
+    } catch (cause) {
+      setError(apiErrorMessage(cause, "Invook could not save this draft to Gmail."));
     } finally {
       setPending(null);
     }
@@ -132,7 +153,25 @@ export function DraftComposer({
             When you edit and save, Invook compares your version with its draft. A new memory
             requires the same edit across at least three drafts.
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {draft ? (
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => void saveToGmailDrafts()}
+                disabled={pending !== null || changed || savedToGmail}
+              >
+                <HugeiconsIcon
+                  icon={savedToGmail ? CheckmarkCircle02Icon : MailAdd01Icon}
+                  size={13}
+                />
+                {pending === "gmail"
+                  ? "Saving to Gmail…"
+                  : savedToGmail
+                    ? "Saved to Gmail drafts"
+                    : "Save to Gmail drafts"}
+              </Button>
+            ) : null}
             {draft ? (
               <Button
                 type="button"

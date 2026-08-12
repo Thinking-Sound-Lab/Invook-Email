@@ -5,6 +5,13 @@ function getApiOrigin(): string {
 }
 
 export function proxy(request: NextRequest) {
+  if (
+    request.nextUrl.pathname === "/v1/mailbox/events" ||
+    request.nextUrl.pathname === "/v1/indexing/events"
+  ) {
+    return NextResponse.next();
+  }
+
   const target = new URL(request.nextUrl.pathname, getApiOrigin());
   target.search = request.nextUrl.search;
 

@@ -30,6 +30,40 @@ services:
       retries: 20
     restart: unless-stopped
 
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-invook}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-invook-local-secret}
+    volumes:
+      - invook-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        mc alias set invook http://minio:9000 "$${S3_ACCESS_KEY_ID}" "$${S3_SECRET_ACCESS_KEY}" &&
+        mc mb --ignore-existing "invook/$${S3_BUCKET}"
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-invook-mail}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-invook}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-invook-local-secret}
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
   migrate:
     build:
       context: ..
@@ -55,6 +89,10 @@ services:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GMAIL_PUBSUB_TOPIC: ${GMAIL_PUBSUB_TOPIC:-}
+      GOOGLE_PUBSUB_PUSH_AUDIENCE: ${GOOGLE_PUBSUB_PUSH_AUDIENCE:-}
+      GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL: ${GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL:-}
+      GOOGLE_PUBSUB_SUBSCRIPTION: ${GOOGLE_PUBSUB_SUBSCRIPTION:-}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_API_KEY: ${AI_API_KEY:-}
@@ -73,7 +111,7 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "node", "-e", "import('axios').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "import('./apps/api/node_modules/axios/index.js').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
       interval: 3s
       retries: 20
     restart: unless-stopped
@@ -102,7 +140,13 @@ services:
       REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GMAIL_PUBSUB_TOPIC: ${GMAIL_PUBSUB_TOPIC:-}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-invook-mail}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-invook}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-invook-local-secret}
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-}
@@ -123,8 +167,11 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
   invook-postgres:
   invook-redis:
+  invook-minio:
