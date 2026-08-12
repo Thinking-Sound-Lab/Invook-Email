@@ -3,24 +3,31 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import {
   invookLabelKeys,
+  mailboxViews,
+  type AccountSyncStage,
+  type IndexingStatusEvent,
   type MemoryGenerationProgress,
   type InvookLabelKey,
+  type MailboxView,
   type MailboxWorkspace,
   type SessionState,
 } from "@invook/contracts";
 import {
   getMemoryBatchRequestProgress,
   isAiConfigured,
-  memoryBatchProviders,
-  type MemoryBatchProvider,
+  batchProviders,
+  type BatchProvider,
 } from "@invook/ai";
 import {
   checkDatabaseConnection,
   decryptGoogleCredential,
   encryptGoogleCredential,
   getGmailConnectionForOAuth,
+  getIndexingSyncStateForUser,
   getMailboxWorkspace,
   hasConnectedGmailAccount,
+  listenForAccountSyncNotifications,
+  parseMailboxCursor,
   saveGmailConnection,
   setUserThreadLabel,
 } from "@invook/database";
@@ -57,13 +64,15 @@ import {
 } from "./http/request";
 import { sendJson, sendProblem, sendRedirect } from "./http/responses";
 import { handleGenerateDraft, handleUpdateDraft } from "./routes/drafts";
-import { handleMemoryBatchWebhook } from "./routes/memory-batch-webhook";
+import { handleMailAgent } from "./routes/agent";
+import { handleBatchWebhook } from "./routes/batch-webhook";
 import {
   handleCreateMemory,
   handleDeleteMemory,
   handleGetMemories,
   handleUpdateMemory,
 } from "./routes/memories";
+import { searchMailForUser } from "./services/search";
 
 type ConnectionErrorReason =
   | "authorization"
@@ -71,6 +80,51 @@ type ConnectionErrorReason =
   | "gmail_access"
   | "offline_access"
   | "unknown";
+
+const mailboxViewSet = new Set<string>(mailboxViews);
+
+const indexingStages = new Set<AccountSyncStage>([
+  "pending",
+  "running",
+  "complete",
+  "failed",
+]);
+const indexingStreams = new Map<string, Set<ServerResponse>>();
+
+function parseIndexingNotification(
+  payload: string,
+): { accountId: string; state: AccountSyncStage } | null {
+  try {
+    const value = JSON.parse(payload) as Record<string, unknown>;
+    if (
+      typeof value.accountId !== "string" ||
+      typeof value.state !== "string" ||
+      !indexingStages.has(value.state as AccountSyncStage)
+    ) {
+      return null;
+    }
+    return { accountId: value.accountId, state: value.state as AccountSyncStage };
+  } catch {
+    return null;
+  }
+}
+
+function writeIndexingEvent(response: ServerResponse, state: AccountSyncStage) {
+  const event: IndexingStatusEvent = { state };
+  response.write(`event: indexing\ndata: ${JSON.stringify(event)}\n\n`);
+}
+
+function broadcastIndexingNotification(payload: string) {
+  const notification = parseIndexingNotification(payload);
+  if (!notification) return;
+  const streams = indexingStreams.get(notification.accountId);
+  if (!streams) return;
+  for (const response of streams) {
+    if (!response.destroyed && !response.writableEnded) {
+      writeIndexingEvent(response, notification.state);
+    }
+  }
+}
 
 function connectionErrorUrl(reason: ConnectionErrorReason): string {
   const target = new URL("/auth/error", getPublicAppOrigin());
@@ -97,11 +151,11 @@ async function serializeMemoryProgress(
   const evidenceMessageCount = resultNumber(submission, "evidenceMessageCount");
 
   if (
-    workspace.account.syncState.recent === "pending" ||
-    workspace.account.syncState.recent === "running"
+    workspace.account.syncState.mailSync === "pending" ||
+    workspace.account.syncState.mailSync === "running"
   ) {
     return {
-      stage: "indexing",
+      stage: "waiting_for_mail",
       completedRequestCount: null,
       failedRequestCount: null,
       totalRequestCount: null,
@@ -136,7 +190,7 @@ async function serializeMemoryProgress(
   const providerBatchId = submission?.providerBatchId;
   if (
     typeof provider !== "string" ||
-    !memoryBatchProviders.includes(provider as MemoryBatchProvider) ||
+    !batchProviders.includes(provider as BatchProvider) ||
     typeof providerBatchId !== "string" ||
     !providerBatchId
   ) {
@@ -152,7 +206,7 @@ async function serializeMemoryProgress(
 
   try {
     const progress = await getMemoryBatchRequestProgress({
-      provider: provider as MemoryBatchProvider,
+      provider: provider as BatchProvider,
       providerBatchId,
     });
     const stage =
@@ -197,6 +251,7 @@ async function serializeWorkspace(
     },
     memoryProgress: await serializeMemoryProgress(workspace),
     memories: workspace.memories,
+    pagination: workspace.pagination,
     threads: workspace.threads.map((thread) => ({
       ...thread,
       latestMessageAt: thread.latestMessageAt?.toISOString() ?? null,
@@ -383,13 +438,101 @@ async function handleMailbox(
   }
 
   const threadId = requestUrl.searchParams.get("thread")?.trim() || undefined;
-  const workspace = await getMailboxWorkspace(session.userId, threadId);
+  const requestedView = requestUrl.searchParams.get("view")?.trim();
+  if (requestedView && !mailboxViewSet.has(requestedView)) {
+    sendProblem(response, requestId, 400, "Invalid mailbox view");
+    return;
+  }
+  const view = (requestedView || "all") as MailboxView;
+  const requestedCursor = requestUrl.searchParams.get("cursor")?.trim();
+  const cursor = requestedCursor ? parseMailboxCursor(requestedCursor) : null;
+  if (requestedCursor && !cursor) {
+    sendProblem(response, requestId, 400, "Invalid mailbox cursor");
+    return;
+  }
+  const workspace = await getMailboxWorkspace(session.userId, {
+    cursor,
+    selectedThreadId: threadId,
+    view,
+  });
   if (!workspace) {
     sendProblem(response, requestId, 404, "Connected Gmail account not found");
     return;
   }
 
   sendJson(response, requestId, 200, await serializeWorkspace(workspace));
+}
+
+async function handleIndexingEvents(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+) {
+  const session = getCurrentSession(request);
+  if (!session) {
+    sendProblem(response, requestId, 401, "Authentication required");
+    return;
+  }
+
+  const indexing = await getIndexingSyncStateForUser(session.userId);
+  if (!indexing) {
+    sendProblem(response, requestId, 404, "Connected Gmail account not found");
+    return;
+  }
+
+  response.statusCode = 200;
+  response.setHeader("content-type", "text/event-stream; charset=utf-8");
+  response.setHeader("cache-control", "no-cache, no-transform");
+  response.setHeader("connection", "keep-alive");
+  response.setHeader("x-accel-buffering", "no");
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("x-request-id", requestId);
+  response.flushHeaders();
+
+  const accountStreams = indexingStreams.get(indexing.accountId) ?? new Set();
+  accountStreams.add(response);
+  indexingStreams.set(indexing.accountId, accountStreams);
+
+  let closed = false;
+  const removeStream = () => {
+    if (closed) return;
+    closed = true;
+    accountStreams.delete(response);
+    if (accountStreams.size === 0) indexingStreams.delete(indexing.accountId);
+  };
+  request.once("close", removeStream);
+  response.once("close", removeStream);
+  writeIndexingEvent(response, indexing.state);
+}
+
+async function handleMailSearch(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  requestUrl: URL,
+) {
+  const session = getCurrentSession(request);
+  if (!session) {
+    sendProblem(response, requestId, 401, "Authentication required");
+    return;
+  }
+  const query = requestUrl.searchParams.get("q")?.trim() ?? "";
+  if (!query || query.length > 1_000) {
+    sendProblem(response, requestId, 400, "A valid mail search query is required");
+    return;
+  }
+
+  const results = await searchMailForUser({
+    userId: session.userId,
+    query,
+    onSemanticError: (error) => {
+      console.error("api: semantic mail search unavailable", {
+        requestId,
+        name: error instanceof Error ? error.name : "UnknownError",
+      });
+    },
+  });
+  sendJson(response, requestId, 200, { results });
 }
 
 async function handleThreadLabel(
@@ -469,7 +612,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
     }
 
     if (request.method === "POST" && pathname === "/v1/webhooks/openai") {
-      await handleMemoryBatchWebhook(request, response, requestId, "openai");
+      await handleBatchWebhook(request, response, requestId, "openai");
       return;
     }
 
@@ -477,7 +620,7 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
       request.method === "POST" &&
       pathname === "/v1/webhooks/azure-openai"
     ) {
-      await handleMemoryBatchWebhook(
+      await handleBatchWebhook(
         request,
         response,
         requestId,
@@ -514,6 +657,21 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
 
     if (request.method === "GET" && pathname === "/v1/mailbox") {
       await handleMailbox(request, response, requestId, requestUrl);
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/v1/indexing/events") {
+      await handleIndexingEvents(request, response, requestId);
+      return;
+    }
+
+    if (request.method === "GET" && pathname === "/v1/mail/search") {
+      await handleMailSearch(request, response, requestId, requestUrl);
+      return;
+    }
+
+    if (request.method === "POST" && pathname === "/v1/agent") {
+      await handleMailAgent(request, response, requestId);
       return;
     }
 
@@ -599,6 +757,9 @@ async function routeRequest(request: IncomingMessage, response: ServerResponse) 
 
 const host = getApiHost();
 const port = getApiPort();
+const stopAccountSyncNotifications = await listenForAccountSyncNotifications(
+  broadcastIndexingNotification,
+);
 const server = createServer((request, response) => {
   void routeRequest(request, response);
 });
@@ -609,7 +770,12 @@ server.listen(port, host, () => {
 
 function shutDown(signal: NodeJS.Signals) {
   console.log(`api: received ${signal}, closing`);
-  server.close((error) => {
+  for (const streams of indexingStreams.values()) {
+    for (const response of streams) response.end();
+  }
+  indexingStreams.clear();
+  server.close(async (error) => {
+    await stopAccountSyncNotifications();
     if (error) {
       console.error("api: shutdown failed", error);
       process.exitCode = 1;

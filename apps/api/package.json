@@ -13,6 +13,7 @@
     "@invook/contracts": "workspace:*",
     "@invook/database": "workspace:*",
     "@invook/gmail": "workspace:*",
+    "ai": "^7.0.58",
     "standardwebhooks": "1.0.0"
   },
   "devDependencies": {

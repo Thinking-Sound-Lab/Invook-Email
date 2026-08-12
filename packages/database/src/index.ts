@@ -1,7 +1,8 @@
 export {
   createDatabase,
   getDatabase,
-  listenForJobNotifications,
+  listenForAccountSyncNotifications,
+  listenForOutboxNotifications,
   type Database,
 } from "./client";
 export {
@@ -11,9 +12,12 @@ export {
 } from "./credentials";
 export * from "./repositories";
 export * from "./schema";
+export * from "./versions";
+export * from "./workflows";
 export type {
   AccountSyncStage,
   AccountSyncState,
-  ClaimedJob,
-  IndexedMessage,
+  MailboxMessage,
+  QueueName,
+  WorkflowStepJob,
 } from "./types";

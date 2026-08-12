@@ -1,10 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import {
-  getMemoryBatchWebhookSecret,
-  type MemoryBatchProvider,
+  getBatchWebhookSecret,
+  type BatchProvider,
 } from "@invook/ai";
-import { enqueueMemoryBatchEvent } from "@invook/database";
+import { enqueueBatchEvent } from "@invook/database";
 import { Webhook, WebhookVerificationError } from "standardwebhooks";
 
 import { readRawBody } from "../http/request";
@@ -22,14 +22,14 @@ function headerValue(request: IncomingMessage, name: string): string | null {
   return Array.isArray(value) ? (value[0] ?? null) : (value ?? null);
 }
 
-export async function handleMemoryBatchWebhook(
+export async function handleBatchWebhook(
   request: IncomingMessage,
   response: ServerResponse,
   requestId: string,
-  provider: MemoryBatchProvider,
+  provider: BatchProvider,
 ) {
   const providerName = provider === "openai" ? "OpenAI" : "Azure OpenAI";
-  const signingSecret = getMemoryBatchWebhookSecret(provider);
+  const signingSecret = getBatchWebhookSecret(provider);
   if (!signingSecret) {
     sendProblem(
       response,
@@ -103,7 +103,7 @@ export async function handleMemoryBatchWebhook(
     return;
   }
 
-  const queued = await enqueueMemoryBatchEvent({
+  const queued = await enqueueBatchEvent({
     provider,
     webhookId,
     eventType,

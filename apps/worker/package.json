@@ -10,7 +10,9 @@
   "dependencies": {
     "@invook/ai": "workspace:*",
     "@invook/database": "workspace:*",
-    "@invook/gmail": "workspace:*"
+    "@invook/gmail": "workspace:*",
+    "bullmq": "^5.58.5",
+    "ioredis": "^5.7.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

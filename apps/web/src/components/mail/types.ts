@@ -3,22 +3,10 @@ import type {
   MailboxSelectedThread,
   MailboxThreadMessage,
   MailboxThreadSummary,
+  MailboxView as ContractMailboxView,
 } from "@invook/contracts";
 
-export type MailboxView =
-  | "all"
-  | "travel"
-  | "important"
-  | "pitch"
-  | "newsletter"
-  | "starred"
-  | "shared"
-  | "reminders"
-  | "scheduled"
-  | "drafts"
-  | "done"
-  | "sent"
-  | "trash";
+export type MailboxView = ContractMailboxView;
 
 export type MailSurface = "mail" | "compose" | "search" | "settings" | "automations";
 

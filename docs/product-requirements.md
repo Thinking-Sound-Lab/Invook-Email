@@ -175,7 +175,8 @@ Browser
        -> PostgreSQL
 
 Worker
-  -> PostgreSQL jobs
+  -> PostgreSQL workflow runs, checkpoints, and transactional outbox
+  -> BullMQ queues in persistent Redis
   -> Gmail indexing
   -> selected OpenAI or Azure OpenAI Batch provider for initial Memory
   -> configured model endpoint for labels, feedback, and drafts
@@ -197,10 +198,16 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `memory_entries`
 - `memory_deletions`
 - `drafts`
-- `jobs`
+- `message_attachments`
+- `message_embeddings`
+- `mail_sync_runs`
+- `gmail_sync_pages`
+- `gmail_sync_items`
+- `workflow_steps`
+- `queue_outbox`
 - `audit_events`
 
-This is intentionally smaller than a fully normalized relationship graph. New tables should be added only for a working feature and demonstrated query need.
+BullMQ owns queue locks, retries, and stalled-job recovery in Redis. PostgreSQL workflow tables retain user-visible progress, page-level resumability, provider-Batch correlation, and reliable publication across the PostgreSQL/Redis boundary. New tables should be added only for a working feature and demonstrated query need.
 
 ## API requirements
 

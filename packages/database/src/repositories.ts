@@ -1,13 +1,19 @@
 import { createHash } from "node:crypto";
 
 import {
+  MAIL_EMBEDDING_DIMENSIONS,
+  type MailboxView,
+} from "@invook/contracts";
+import {
   and,
   asc,
   count,
   desc,
   eq,
+  gt,
   inArray,
   isNotNull,
+  isNull,
   lt,
   ne,
   not,
@@ -21,24 +27,121 @@ import {
   auditEvents,
   connectedAccounts,
   drafts,
-  jobs,
+  embeddingBatchSubmissions,
   memoryDeletions,
   memoryEntries,
+  messageAttachments,
+  messageEmbeddings,
   messages,
   profiles,
   threadLabels,
   threads,
+  workflowSteps,
 } from "./schema";
-import type { AccountSyncState, ClaimedJob, IndexedMessage } from "./types";
+import type { AccountSyncState, MailboxMessage } from "./types";
+import {
+  createInitialMailSyncRun,
+  enqueueWorkflowStep,
+  getLatestMemoryBatchSubmission,
+  getWorkflowStepSubmission,
+} from "./workflows";
+import {
+  DRAFT_FEEDBACK_VERSION,
+  MAIL_CLASSIFICATION_VERSION,
+  MAIL_INDEX_VERSION,
+  MEMORY_SCHEMA_VERSION,
+} from "./versions";
 
 const initialSyncState: AccountSyncState = {
-  recent: "pending",
+  mailSync: "pending",
+  indexing: "pending",
   memory: "pending",
-  history: "pending",
 };
 
-export const MEMORY_SCHEMA_VERSION = 3;
-export const DRAFT_FEEDBACK_VERSION = 1;
+const mailboxPageSize = 100;
+
+export type MailboxCursor = {
+  direction: "newer" | "older";
+  latestMessageAt: Date;
+  threadId: string;
+};
+
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export function parseMailboxCursor(value: string): MailboxCursor | null {
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+      direction?: unknown;
+      latestMessageAt?: unknown;
+      threadId?: unknown;
+    };
+    if (
+      (decoded.direction !== "newer" && decoded.direction !== "older") ||
+      typeof decoded.latestMessageAt !== "string" ||
+      typeof decoded.threadId !== "string" ||
+      !uuidPattern.test(decoded.threadId)
+    ) {
+      return null;
+    }
+    const latestMessageAt = new Date(decoded.latestMessageAt);
+    if (!Number.isFinite(latestMessageAt.getTime())) return null;
+    return {
+      direction: decoded.direction,
+      latestMessageAt,
+      threadId: decoded.threadId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function createMailboxCursor(
+  direction: MailboxCursor["direction"],
+  thread: { id: string; latestMessageAt: Date | null },
+): string {
+  return Buffer.from(
+    JSON.stringify({
+      direction,
+      latestMessageAt: (thread.latestMessageAt ?? new Date(0)).toISOString(),
+      threadId: thread.id,
+    }),
+  ).toString("base64url");
+}
+
+function mailboxViewCondition(view: MailboxView) {
+  switch (view) {
+    case "all":
+      return undefined;
+    case "travel":
+    case "important":
+    case "pitch":
+    case "newsletter":
+      return sql<boolean>`exists (
+        select 1
+        from ${threadLabels}
+        where ${threadLabels.threadId} = ${threads.id}
+          and ${threadLabels.labelKey} = ${view}
+          and ${threadLabels.state} = 'applied'
+      )`;
+    case "starred":
+      return sql<boolean>`'STARRED' = any(${threads.labelIds})`;
+    case "shared":
+      return sql<boolean>`'SHARED' = any(${threads.labelIds})`;
+    case "reminders":
+      return sql<boolean>`'REMINDER' = any(${threads.labelIds})`;
+    case "scheduled":
+      return sql<boolean>`'SCHEDULED' = any(${threads.labelIds})`;
+    case "drafts":
+      return sql<boolean>`'DRAFT' = any(${threads.labelIds})`;
+    case "done":
+      return sql<boolean>`'DONE' = any(${threads.labelIds})`;
+    case "sent":
+      return sql<boolean>`'SENT' = any(${threads.labelIds})`;
+    case "trash":
+      return sql<boolean>`'TRASH' = any(${threads.labelIds})`;
+  }
+}
 
 export type MemoryType = "preference" | "contact" | "scheduling";
 export type MemorySource = "user" | "inferred" | "feedback";
@@ -192,30 +295,15 @@ export async function saveGmailConnection(
         },
       });
 
-    const idempotencyKey = `gmail.initial_sync:${account.id}:${input.historyCursor}`;
-    await transaction
-      .insert(jobs)
-      .values({
+    await createInitialMailSyncRun(
+      {
         userId: input.userId,
         accountId: account.id,
-        jobType: "gmail.initial_sync",
-        status: "queued",
-        payload: { historyId: input.historyCursor },
-        attempts: 0,
-        idempotencyKey,
-      })
-      .onConflictDoUpdate({
-        target: jobs.idempotencyKey,
-        set: {
-          status: "queued",
-          payload: { historyId: input.historyCursor },
-          attempts: 0,
-          lockedAt: null,
-          lockedBy: null,
-          lastError: null,
-          updatedAt: new Date(),
-        },
-      });
+        startingHistoryCursor: input.historyCursor,
+        connectionEventId: input.acknowledgedAt.toISOString(),
+      },
+      transaction as unknown as Database,
+    );
 
     await transaction.insert(auditEvents).values({
       userId: input.userId,
@@ -297,11 +385,315 @@ export async function getMailboxSetupSummary(
   };
 }
 
-export async function getMailboxWorkspace(
-  userId: string,
-  selectedThreadId?: string,
+type SearchRow = {
+  messageId: string;
+  threadId: string;
+  subject: string;
+  snippet: string;
+  bodyText: string;
+  sender: { raw: string; email: string };
+  sentAt: Date;
+};
+
+type RankedSearchRow = SearchRow & {
+  fullTextMatch?: boolean;
+  metadataMatch?: boolean;
+  lexicalRank?: number;
+  semanticSimilarity?: number;
+};
+
+export async function searchMailbox(
+  input: {
+    userId: string;
+    query: string;
+    limit?: number;
+    embedding?: {
+      values: number[];
+      modelId: string;
+      dimensions: number;
+      indexVersion: number;
+    };
+  },
   database: Database = getDatabase(),
 ) {
+  const query = input.query.trim();
+  if (!query) return [];
+  if (
+    input.embedding &&
+    input.embedding.dimensions !== MAIL_EMBEDDING_DIMENSIONS
+  ) {
+    throw new Error(
+      `Mailbox search embeddings must have ${MAIL_EMBEDDING_DIMENSIONS} dimensions.`,
+    );
+  }
+  const limit = Math.max(1, Math.min(input.limit ?? 20, 50));
+  const candidateLimit = Math.max(limit * 3, 30);
+  const tsQuery = sql`websearch_to_tsquery('simple', ${query})`;
+  const fullTextMatch = sql<boolean>`${messages.searchDocument} @@ ${tsQuery}`;
+  const metadataMatch = sql<boolean>`${messages.metadataSearchDocument} @@ ${tsQuery}`;
+
+  const lexicalRows = await database
+    .select({
+      messageId: messages.id,
+      threadId: threads.id,
+      subject: messages.subject,
+      snippet: threads.snippet,
+      bodyText: messages.bodyText,
+      sender: messages.sender,
+      sentAt: messages.sentAt,
+      fullTextMatch,
+      metadataMatch,
+      lexicalRank: sql<number>`greatest(
+        ts_rank_cd(${messages.searchDocument}, ${tsQuery}),
+        ts_rank_cd(${messages.metadataSearchDocument}, ${tsQuery})
+      )`,
+    })
+    .from(messages)
+    .innerJoin(threads, eq(threads.id, messages.threadId))
+    .where(
+      and(
+        eq(messages.userId, input.userId),
+        or(fullTextMatch, metadataMatch),
+      ),
+    )
+    .orderBy(
+      desc(sql`greatest(
+        ts_rank_cd(${messages.searchDocument}, ${tsQuery}),
+        ts_rank_cd(${messages.metadataSearchDocument}, ${tsQuery})
+      )`),
+      desc(messages.sentAt),
+    )
+    .limit(candidateLimit);
+
+  const attachmentRows = await database
+    .select({
+      messageId: messages.id,
+      threadId: threads.id,
+      subject: messages.subject,
+      snippet: threads.snippet,
+      bodyText: messages.bodyText,
+      sender: messages.sender,
+      sentAt: messages.sentAt,
+    })
+    .from(messageAttachments)
+    .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
+    .innerJoin(threads, eq(threads.id, messages.threadId))
+    .where(
+      and(
+        eq(messageAttachments.userId, input.userId),
+        sql`${messageAttachments.filenameSearchDocument} @@ ${tsQuery}`,
+      ),
+    )
+    .orderBy(desc(messages.sentAt))
+    .limit(candidateLimit);
+
+  const semanticRows: RankedSearchRow[] = input.embedding
+    ? await database
+        .select({
+          messageId: messages.id,
+          threadId: threads.id,
+          subject: messages.subject,
+          snippet: threads.snippet,
+          bodyText: messages.bodyText,
+          sender: messages.sender,
+          sentAt: messages.sentAt,
+          semanticSimilarity: sql<number>`1 - (${messageEmbeddings.embedding} <=> ${`[${input.embedding.values.join(",")}]`}::vector(1536))`,
+        })
+        .from(messageEmbeddings)
+        .innerJoin(messages, eq(messages.id, messageEmbeddings.messageId))
+        .innerJoin(threads, eq(threads.id, messages.threadId))
+        .where(
+          and(
+            eq(messageEmbeddings.userId, input.userId),
+            eq(messageEmbeddings.modelId, input.embedding.modelId),
+            eq(messageEmbeddings.dimensions, input.embedding.dimensions),
+            eq(messageEmbeddings.indexVersion, input.embedding.indexVersion),
+            eq(messageEmbeddings.status, "complete"),
+            isNotNull(messageEmbeddings.embedding),
+          ),
+        )
+        .orderBy(
+          asc(
+            sql`${messageEmbeddings.embedding} <=> ${`[${input.embedding.values.join(",")}]`}::vector(1536)`,
+          ),
+        )
+        .limit(candidateLimit)
+    : [];
+
+  const results = new Map<
+    string,
+    SearchRow & { score: number; matches: Set<string> }
+  >();
+  const merge = (
+    row: SearchRow,
+    match: "full_text" | "metadata" | "attachment" | "semantic",
+    score: number,
+  ) => {
+    const existing = results.get(row.messageId);
+    if (!existing) {
+      results.set(row.messageId, {
+        ...row,
+        score,
+        matches: new Set([match]),
+      });
+      return;
+    }
+    existing.matches.add(match);
+    existing.score = Math.min(1, Math.max(existing.score, score) + 0.08);
+  };
+
+  for (const row of lexicalRows) {
+    const rank = Number(row.lexicalRank);
+    const normalizedRank = Number.isFinite(rank) ? rank / (rank + 1) : 0;
+    if (row.fullTextMatch) merge(row, "full_text", 0.55 + 0.35 * normalizedRank);
+    if (row.metadataMatch) merge(row, "metadata", 0.48 + 0.3 * normalizedRank);
+  }
+  for (const row of attachmentRows) merge(row, "attachment", 0.9);
+  for (const row of semanticRows) {
+    const similarity = Number(row.semanticSimilarity);
+    const normalized = Number.isFinite(similarity)
+      ? Math.max(0, Math.min(1, (similarity + 1) / 2))
+      : 0;
+    merge(row, "semantic", normalized * 0.82);
+  }
+
+  const ranked = [...results.values()]
+    .sort(
+      (left, right) =>
+        right.score - left.score || right.sentAt.getTime() - left.sentAt.getTime(),
+    )
+    .slice(0, limit);
+  const messageIds = ranked.map((row) => row.messageId);
+  const attachments =
+    messageIds.length > 0
+      ? await database
+          .select({
+            id: messageAttachments.id,
+            messageId: messageAttachments.messageId,
+            providerAttachmentId: messageAttachments.providerAttachmentId,
+            filename: messageAttachments.filename,
+            mimeType: messageAttachments.mimeType,
+            size: messageAttachments.size,
+          })
+          .from(messageAttachments)
+          .where(inArray(messageAttachments.messageId, messageIds))
+          .orderBy(asc(messageAttachments.filename))
+      : [];
+
+  return ranked.map((row) => ({
+    messageId: row.messageId,
+    threadId: row.threadId,
+    subject: row.subject,
+    snippet: row.snippet,
+    bodyPreview: row.bodyText.slice(0, 800),
+    sender: row.sender,
+    sentAt: row.sentAt,
+    attachments: attachments.filter(
+      (attachment) => attachment.messageId === row.messageId,
+    ),
+    matches: [...row.matches] as Array<
+      "full_text" | "metadata" | "attachment" | "semantic"
+    >,
+    score: row.score,
+  }));
+}
+
+export async function getMailboxThreadForAgent(
+  userId: string,
+  threadId: string,
+  database: Database = getDatabase(),
+) {
+  const [thread] = await database
+    .select({
+      id: threads.id,
+      subject: threads.subject,
+      participants: threads.participants,
+    })
+    .from(threads)
+    .where(and(eq(threads.id, threadId), eq(threads.userId, userId)))
+    .limit(1);
+  if (!thread) return null;
+
+  const threadMessages = await database
+    .select({
+      id: messages.id,
+      direction: messages.direction,
+      sender: messages.sender,
+      recipients: messages.recipients,
+      bodyText: messages.bodyText,
+      sentAt: messages.sentAt,
+    })
+    .from(messages)
+    .where(and(eq(messages.threadId, thread.id), eq(messages.userId, userId)))
+    .orderBy(asc(messages.sentAt));
+  const messageIds = threadMessages.map((message) => message.id);
+  const attachmentRows =
+    messageIds.length > 0
+      ? await database
+          .select({
+            id: messageAttachments.id,
+            messageId: messageAttachments.messageId,
+            filename: messageAttachments.filename,
+            mimeType: messageAttachments.mimeType,
+            size: messageAttachments.size,
+          })
+          .from(messageAttachments)
+          .where(
+            and(
+              eq(messageAttachments.userId, userId),
+              inArray(messageAttachments.messageId, messageIds),
+            ),
+          )
+          .orderBy(asc(messageAttachments.filename))
+      : [];
+
+  return {
+    ...thread,
+    messages: threadMessages.map((message) => ({
+      ...message,
+      attachments: attachmentRows.filter(
+        (attachment) => attachment.messageId === message.id,
+      ),
+    })),
+  };
+}
+
+export async function listMailboxThreadAttachments(
+  userId: string,
+  threadId: string,
+  database: Database = getDatabase(),
+) {
+  return database
+    .select({
+      id: messageAttachments.id,
+      messageId: messageAttachments.messageId,
+      filename: messageAttachments.filename,
+      mimeType: messageAttachments.mimeType,
+      size: messageAttachments.size,
+    })
+    .from(messageAttachments)
+    .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
+    .innerJoin(threads, eq(threads.id, messages.threadId))
+    .where(
+      and(
+        eq(messageAttachments.userId, userId),
+        eq(threads.id, threadId),
+        eq(threads.userId, userId),
+      ),
+    )
+    .orderBy(asc(messageAttachments.filename));
+}
+
+export async function getMailboxWorkspace(
+  userId: string,
+  input: {
+    cursor?: MailboxCursor | null;
+    selectedThreadId?: string;
+    view?: MailboxView;
+  } = {},
+  database: Database = getDatabase(),
+) {
+  const { cursor = null, selectedThreadId, view = "all" } = input;
   const [account] = await database
     .select({
       id: connectedAccounts.id,
@@ -322,7 +714,31 @@ export async function getMailboxWorkspace(
 
   if (!account) return null;
 
-  const mailboxThreads = await database
+  const mailboxSortTime = sql<Date>`coalesce(${threads.latestMessageAt}, to_timestamp(0))`;
+  const viewCondition = mailboxViewCondition(view);
+  const mailboxScope = and(
+    eq(threads.userId, userId),
+    eq(threads.accountId, account.id),
+    viewCondition,
+  );
+  const cursorSortTime = cursor
+    ? sql<Date>`${cursor.latestMessageAt.toISOString()}::timestamptz`
+    : undefined;
+  const cursorCondition = cursor && cursorSortTime
+    ? or(
+        cursor.direction === "newer"
+          ? gt(mailboxSortTime, cursorSortTime)
+          : lt(mailboxSortTime, cursorSortTime),
+        and(
+          eq(mailboxSortTime, cursorSortTime),
+          cursor.direction === "newer"
+            ? gt(threads.id, cursor.threadId)
+            : lt(threads.id, cursor.threadId),
+        ),
+      )
+    : undefined;
+
+  const rawMailboxThreads = await database
     .select({
       id: threads.id,
       subject: threads.subject,
@@ -333,9 +749,36 @@ export async function getMailboxWorkspace(
       messageCount: threads.messageCount,
     })
     .from(threads)
-    .where(and(eq(threads.userId, userId), eq(threads.accountId, account.id)))
-    .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt))
-    .limit(150);
+    .where(and(mailboxScope, cursorCondition))
+    .orderBy(
+      cursor?.direction === "newer" ? asc(mailboxSortTime) : desc(mailboxSortTime),
+      cursor?.direction === "newer" ? asc(threads.id) : desc(threads.id),
+    )
+    .limit(mailboxPageSize + 1);
+  const hasExtraPage = rawMailboxThreads.length > mailboxPageSize;
+  const currentPage = rawMailboxThreads.slice(0, mailboxPageSize);
+  const mailboxThreads =
+    cursor?.direction === "newer" ? currentPage.reverse() : currentPage;
+  const hasNewerPage = Boolean(cursor) &&
+    (cursor?.direction === "older" || hasExtraPage);
+  const hasOlderPage = cursor?.direction === "newer" ? true : hasExtraPage;
+  const [threadCount] = await database
+    .select({ value: count(threads.id) })
+    .from(threads)
+    .where(mailboxScope);
+  const firstMailboxThread = mailboxThreads[0];
+  const lastMailboxThread = mailboxThreads.at(-1);
+  const pagination = {
+    newerCursor:
+      hasNewerPage && firstMailboxThread
+        ? createMailboxCursor("newer", firstMailboxThread)
+        : null,
+    olderCursor:
+      hasOlderPage && lastMailboxThread
+        ? createMailboxCursor("older", lastMailboxThread)
+        : null,
+    totalThreadCount: threadCount?.value ?? 0,
+  };
 
   const memoryRows = await database
     .select({
@@ -426,25 +869,17 @@ export async function getMailboxWorkspace(
     updatedAt: memory.updatedAt.toISOString(),
   }));
 
-  const [memoryBatchSubmission] = await database
-    .select({ result: jobs.result })
-    .from(jobs)
-    .where(
-      and(
-        eq(jobs.accountId, account.id),
-        eq(jobs.status, "complete"),
-        inArray(jobs.jobType, ["memory.extract", "memory.batch.retry"]),
-        sql`${jobs.result}->>'status' = 'submitted'`,
-      ),
-    )
-    .orderBy(desc(jobs.updatedAt))
-    .limit(1);
+  const memoryBatchSubmission = await getLatestMemoryBatchSubmission(
+    account.id,
+    database,
+  );
 
   if (!selectedThread) {
     return {
       account,
-      memoryBatchSubmission: memoryBatchSubmission?.result ?? null,
+      memoryBatchSubmission,
       memories: serializedMemories,
+      pagination,
       threads: mailboxThreadsWithLabels,
       selectedThread: null,
     };
@@ -464,6 +899,29 @@ export async function getMailboxWorkspace(
     .from(messages)
     .where(and(eq(messages.userId, userId), eq(messages.threadId, selectedThread.id)))
     .orderBy(asc(messages.sentAt));
+
+  const messageIds = threadMessages.map((message) => message.id);
+  const attachmentRows =
+    messageIds.length > 0
+      ? await database
+          .select({
+            id: messageAttachments.id,
+            messageId: messageAttachments.messageId,
+            providerAttachmentId: messageAttachments.providerAttachmentId,
+            filename: messageAttachments.filename,
+            mimeType: messageAttachments.mimeType,
+            size: messageAttachments.size,
+          })
+          .from(messageAttachments)
+          .where(inArray(messageAttachments.messageId, messageIds))
+          .orderBy(asc(messageAttachments.filename))
+      : [];
+  const attachmentsByMessage = new Map<string, typeof attachmentRows>();
+  for (const attachment of attachmentRows) {
+    const current = attachmentsByMessage.get(attachment.messageId) ?? [];
+    current.push(attachment);
+    attachmentsByMessage.set(attachment.messageId, current);
+  }
 
   const [threadDraft] = await database
     .select({
@@ -489,12 +947,16 @@ export async function getMailboxWorkspace(
 
   return {
     account,
-    memoryBatchSubmission: memoryBatchSubmission?.result ?? null,
+    memoryBatchSubmission,
     memories: serializedMemories,
+    pagination,
     threads: mailboxThreadsWithLabels,
     selectedThread: {
       ...attachLabels(selectedThread),
-      messages: threadMessages,
+      messages: threadMessages.map((message) => ({
+        ...message,
+        attachments: attachmentsByMessage.get(message.id) ?? [],
+      })),
       draft:
         threadDraft && threadDraft.generatedText
           ? {
@@ -507,51 +969,28 @@ export async function getMailboxWorkspace(
   };
 }
 
-export async function claimNextJob(
-  workerId: string,
-  jobTypes: string[],
+export async function getIndexingSyncStateForUser(
+  userId: string,
   database: Database = getDatabase(),
-): Promise<ClaimedJob | null> {
-  if (jobTypes.length === 0) return null;
-  return database.transaction(async (transaction) => {
-    const [candidate] = await transaction
-      .select({ id: jobs.id })
-      .from(jobs)
-      .where(
-        and(
-          inArray(jobs.status, ["queued", "retry"]),
-          lt(jobs.attempts, jobs.maxAttempts),
-          inArray(jobs.jobType, jobTypes),
-        ),
-      )
-      .orderBy(asc(jobs.createdAt))
-      .limit(1)
-      .for("update", { skipLocked: true });
+): Promise<{ accountId: string; state: AccountSyncState["indexing"] } | null> {
+  const [account] = await database
+    .select({
+      accountId: connectedAccounts.id,
+      syncState: connectedAccounts.syncState,
+    })
+    .from(connectedAccounts)
+    .where(
+      and(
+        eq(connectedAccounts.userId, userId),
+        not(eq(connectedAccounts.status, "disconnected")),
+      ),
+    )
+    .orderBy(desc(connectedAccounts.createdAt))
+    .limit(1);
 
-    if (!candidate) return null;
-
-    const [job] = await transaction
-      .update(jobs)
-      .set({
-        status: "running",
-        lockedAt: new Date(),
-        lockedBy: workerId,
-        attempts: sql`${jobs.attempts} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(eq(jobs.id, candidate.id))
-      .returning({
-        id: jobs.id,
-        userId: jobs.userId,
-        accountId: jobs.accountId,
-        jobType: jobs.jobType,
-        payload: jobs.payload,
-        attempts: jobs.attempts,
-        maxAttempts: jobs.maxAttempts,
-      });
-
-    return job ?? null;
-  });
+  return account
+    ? { accountId: account.accountId, state: account.syncState.indexing }
+    : null;
 }
 
 export async function getWorkerAccount(
@@ -589,19 +1028,27 @@ export async function setAccountSyncState(
   syncState: AccountSyncState,
   database: Database = getDatabase(),
 ) {
-  await database
-    .update(connectedAccounts)
-    .set({ syncState, updatedAt: new Date() })
-    .where(eq(connectedAccounts.id, accountId));
+  await database.transaction(async (transaction) => {
+    await transaction
+      .update(connectedAccounts)
+      .set({ syncState, updatedAt: new Date() })
+      .where(eq(connectedAccounts.id, accountId));
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId, state: syncState.indexing })})`,
+    );
+  });
 }
 
-export async function upsertIndexedMessage(
-  input: IndexedMessage,
+export async function upsertMailboxMessage(
+  input: MailboxMessage,
   database: Database = getDatabase(),
-) {
-  await database.transaction(async (transaction) => {
+): Promise<{ messageId: string; threadId: string }> {
+  return database.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerThreadId}`}, 0))`,
+    );
     const [existingThread] = await transaction
-      .select({ id: threads.id, latestMessageAt: threads.latestMessageAt })
+      .select({ id: threads.id })
       .from(threads)
       .where(
         and(
@@ -644,26 +1091,11 @@ export async function upsertIndexedMessage(
           .limit(1);
         threadId = concurrentThread?.id;
       }
-    } else if (
-      !existingThread.latestMessageAt ||
-      input.sentAt.getTime() > existingThread.latestMessageAt.getTime()
-    ) {
-      await transaction
-        .update(threads)
-        .set({
-          subject: input.subject,
-          snippet: input.snippet,
-          participants: input.participants,
-          labelIds: input.labelIds,
-          latestMessageAt: input.sentAt,
-          updatedAt: new Date(),
-        })
-        .where(eq(threads.id, threadId));
     }
 
     if (!threadId) throw new Error("The Gmail thread could not be stored.");
 
-    await transaction
+    const [storedMessage] = await transaction
       .insert(messages)
       .values({
         userId: input.userId,
@@ -691,7 +1123,56 @@ export async function upsertIndexedMessage(
           isMemoryEligible: input.isMemoryEligible,
           updatedAt: new Date(),
         },
-      });
+      })
+      .returning({ id: messages.id });
+
+    if (!storedMessage) throw new Error("The Gmail message could not be stored.");
+
+    await transaction
+      .update(threads)
+      .set({
+        subject: input.subject,
+        snippet: input.snippet,
+        participants: input.participants,
+        labelIds: input.labelIds,
+        latestMessageAt: input.sentAt,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(threads.id, threadId),
+          or(
+            isNull(threads.latestMessageAt),
+            sql`${threads.latestMessageAt} <= ${input.sentAt}`,
+          ),
+        ),
+      );
+
+    await transaction
+      .delete(messageAttachments)
+      .where(eq(messageAttachments.messageId, storedMessage.id));
+    if (input.attachments.length > 0) {
+      await transaction.insert(messageAttachments).values(
+        input.attachments.map((attachment) => ({
+          userId: input.userId,
+          accountId: input.accountId,
+          messageId: storedMessage.id,
+          providerAttachmentId: attachment.providerAttachmentId,
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          size: attachment.size,
+        })),
+      );
+    }
+
+    await transaction
+      .delete(messageEmbeddings)
+      .where(
+        and(
+          eq(messageEmbeddings.messageId, storedMessage.id),
+          ne(messageEmbeddings.contentHash, createMessageContentHash(input)),
+        ),
+      );
 
     const [messageTotal] = await transaction
       .select({ value: count(messages.id) })
@@ -702,7 +1183,36 @@ export async function upsertIndexedMessage(
       .update(threads)
       .set({ messageCount: messageTotal?.value ?? 0, updatedAt: new Date() })
       .where(eq(threads.id, threadId));
+
+    const [account] = await transaction
+      .select({ syncState: connectedAccounts.syncState })
+      .from(connectedAccounts)
+      .where(eq(connectedAccounts.id, input.accountId))
+      .limit(1);
+    if (account?.syncState.mailSync === "complete") {
+      const contentHash = createMessageContentHash(input);
+      await enqueueWorkflowStep(
+        {
+          userId: input.userId,
+          accountId: input.accountId,
+          stepType: "embedding.incremental",
+          payload: { messageId: storedMessage.id },
+          idempotencyKey: `embedding.incremental:${storedMessage.id}:${contentHash}`,
+        },
+        transaction as unknown as Database,
+      );
+    }
+
+    return { messageId: storedMessage.id, threadId };
   });
+}
+
+export function createMessageContentHash(
+  input: Pick<MailboxMessage, "subject" | "bodyText">,
+): string {
+  return createHash("sha256")
+    .update(`${input.subject.trim()}\n${input.bodyText.trim()}`)
+    .digest("hex");
 }
 
 export async function countMemoryEligibleMessages(
@@ -725,122 +1235,7 @@ export async function countMemoryEligibleMessages(
   return total?.value ?? 0;
 }
 
-export const MAIL_CLASSIFICATION_VERSION = 1;
-
 type InvookLabelKey = "important" | "travel" | "pitch" | "newsletter";
-
-export async function getThreadsForClassification(
-  accountId: string,
-  analysisVersion = MAIL_CLASSIFICATION_VERSION,
-  limit = 12,
-  database: Database = getDatabase(),
-) {
-  const candidateThreads = await database
-    .select({
-      id: threads.id,
-      subject: threads.subject,
-      participants: threads.participants,
-    })
-    .from(threads)
-    .where(
-      and(
-        eq(threads.accountId, accountId),
-        lt(threads.classificationVersion, analysisVersion),
-      ),
-    )
-    .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt))
-    .limit(limit);
-
-  if (candidateThreads.length === 0) return [];
-
-  const candidateIds = candidateThreads.map((thread) => thread.id);
-  const messageRows = await database
-    .select({
-      threadId: messages.threadId,
-      direction: messages.direction,
-      sender: messages.sender,
-      bodyText: messages.bodyText,
-      sentAt: messages.sentAt,
-    })
-    .from(messages)
-    .where(inArray(messages.threadId, candidateIds))
-    .orderBy(desc(messages.sentAt));
-
-  return candidateThreads.map((thread) => ({
-    ...thread,
-    messages: messageRows
-      .filter((message) => message.threadId === thread.id)
-      .slice(0, 4)
-      .map((message) => ({
-        direction: message.direction,
-        sender: message.sender.raw || message.sender.email,
-        bodyText: message.bodyText,
-      })),
-  }));
-}
-
-export async function saveThreadClassifications(
-  input: {
-    userId: string;
-    accountId: string;
-    modelId: string;
-    analysisVersion?: number;
-    threads: Array<{
-      threadId: string;
-      labels: Array<{ key: InvookLabelKey; confidence: number }>;
-    }>;
-  },
-  database: Database = getDatabase(),
-) {
-  const analysisVersion = input.analysisVersion ?? MAIL_CLASSIFICATION_VERSION;
-  await database.transaction(async (transaction) => {
-    for (const classification of input.threads) {
-      await transaction
-        .delete(threadLabels)
-        .where(
-          and(
-            eq(threadLabels.threadId, classification.threadId),
-            eq(threadLabels.source, "ai"),
-          ),
-        );
-
-      if (classification.labels.length > 0) {
-        await transaction
-          .insert(threadLabels)
-          .values(
-            classification.labels.map((label) => ({
-              userId: input.userId,
-              accountId: input.accountId,
-              threadId: classification.threadId,
-              labelKey: label.key,
-              source: "ai" as const,
-              state: "applied" as const,
-              confidence: label.confidence.toFixed(2),
-              modelId: input.modelId,
-              analysisVersion,
-            })),
-          )
-          .onConflictDoNothing({
-            target: [threadLabels.threadId, threadLabels.labelKey],
-          });
-      }
-
-      await transaction
-        .update(threads)
-        .set({
-          classificationVersion: analysisVersion,
-          classifiedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(threads.id, classification.threadId),
-            eq(threads.accountId, input.accountId),
-          ),
-        );
-    }
-  });
-}
 
 export async function setUserThreadLabel(
   input: {
@@ -1427,20 +1822,13 @@ export async function saveExtractedMemories(
     });
 
     if (input.source === "inferred" && input.markComplete !== false) {
-      const [account] = await transaction
-        .select({ syncState: connectedAccounts.syncState })
-        .from(connectedAccounts)
-        .where(eq(connectedAccounts.id, input.accountId))
-        .limit(1);
-      if (account) {
-        await transaction
-          .update(connectedAccounts)
-          .set({
-            syncState: { ...account.syncState, memory: "complete" },
-            updatedAt: new Date(),
-          })
-          .where(eq(connectedAccounts.id, input.accountId));
-      }
+      await transaction
+        .update(connectedAccounts)
+        .set({
+          syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{memory}', to_jsonb(${"complete"}::text), true)`,
+          updatedAt: new Date(),
+        })
+        .where(eq(connectedAccounts.id, input.accountId));
     }
 
     return savedCount;
@@ -1452,17 +1840,554 @@ export async function setMemorySyncStage(
   stage: AccountSyncState["memory"],
   database: Database = getDatabase(),
 ) {
-  const [account] = await database
-    .select({ syncState: connectedAccounts.syncState })
-    .from(connectedAccounts)
-    .where(eq(connectedAccounts.id, accountId))
-    .limit(1);
-  if (!account) return;
-
   await database
     .update(connectedAccounts)
-    .set({ syncState: { ...account.syncState, memory: stage }, updatedAt: new Date() })
+    .set({
+      syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{memory}', to_jsonb(${stage}::text), true)`,
+      updatedAt: new Date(),
+    })
     .where(eq(connectedAccounts.id, accountId));
+}
+
+export async function setIndexingSyncStage(
+  accountId: string,
+  stage: AccountSyncState["indexing"],
+  database: Database = getDatabase(),
+) {
+  await database.transaction(async (transaction) => {
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{indexing}', to_jsonb(${stage}::text), true)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, accountId));
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId, state: stage })})`,
+    );
+  });
+}
+
+export async function getEmbeddingCandidates(
+  input: {
+    accountId: string;
+    modelId: string;
+    indexVersion: number;
+    limit?: number;
+    messageIds?: string[];
+    includeFailed?: boolean;
+  },
+  database: Database = getDatabase(),
+) {
+  if (input.messageIds?.length === 0) return [];
+  const rows = await database
+    .select({
+      messageId: messages.id,
+      userId: messages.userId,
+      subject: messages.subject,
+      bodyText: messages.bodyText,
+      embeddingStatus: messageEmbeddings.status,
+      embeddedContentHash: messageEmbeddings.contentHash,
+    })
+    .from(messages)
+    .innerJoin(threads, eq(threads.id, messages.threadId))
+    .leftJoin(
+      messageEmbeddings,
+      and(
+        eq(messageEmbeddings.messageId, messages.id),
+        eq(messageEmbeddings.modelId, input.modelId),
+        eq(messageEmbeddings.indexVersion, input.indexVersion),
+      ),
+    )
+    .where(
+      and(
+        eq(threads.accountId, input.accountId),
+        input.messageIds ? inArray(messages.id, input.messageIds) : undefined,
+        or(
+          isNull(messageEmbeddings.id),
+          input.includeFailed === false
+            ? not(
+                inArray(messageEmbeddings.status, [
+                  "complete",
+                  "submitted",
+                  "failed",
+                ]),
+              )
+            : not(inArray(messageEmbeddings.status, ["complete", "submitted"])),
+        ),
+      ),
+    )
+    .orderBy(asc(messages.sentAt))
+    .limit(input.limit ?? 50_000);
+
+  return rows.flatMap((row) => {
+    const contentHash = createMessageContentHash(row);
+    if (
+      row.embeddedContentHash === contentHash &&
+      (row.embeddingStatus === "complete" || row.embeddingStatus === "submitted")
+    ) {
+      return [];
+    }
+    if (row.embeddingStatus === "failed" && input.includeFailed === false) {
+      return [];
+    }
+    return [{ ...row, contentHash }];
+  });
+}
+
+type EmbeddingBatchManifest = Array<{
+  key: string;
+  messageId: string;
+  contentHash: string;
+}>;
+
+export async function getEmbeddingBatchSubmissionForStep(
+  workflowStepId: string,
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .select()
+    .from(embeddingBatchSubmissions)
+    .where(eq(embeddingBatchSubmissions.workflowStepId, workflowStepId))
+    .limit(1);
+  return submission ?? null;
+}
+
+export async function getActiveEmbeddingBatchSubmissionForAccount(
+  accountId: string,
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .select({
+      id: embeddingBatchSubmissions.id,
+      workflowStepId: embeddingBatchSubmissions.workflowStepId,
+      providerBatchId: embeddingBatchSubmissions.providerBatchId,
+      status: embeddingBatchSubmissions.status,
+    })
+    .from(embeddingBatchSubmissions)
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.accountId, accountId),
+        inArray(embeddingBatchSubmissions.status, ["preparing", "submitted"]),
+      ),
+    )
+    .limit(1);
+  return submission ?? null;
+}
+
+export async function prepareEmbeddingBatchSubmission(
+  input: {
+    workflowStepId: string;
+    userId: string;
+    accountId: string;
+    modelId: string;
+    dimensions: number;
+    indexVersion: number;
+    batchAttempt: number;
+    hasMore: boolean;
+    manifest: EmbeddingBatchManifest;
+  },
+  database: Database = getDatabase(),
+) {
+  const [inserted] = await database
+    .insert(embeddingBatchSubmissions)
+    .values({
+      workflowStepId: input.workflowStepId,
+      userId: input.userId,
+      accountId: input.accountId,
+      modelId: input.modelId,
+      dimensions: input.dimensions,
+      indexVersion: input.indexVersion,
+      batchAttempt: input.batchAttempt,
+      hasMore: input.hasMore,
+      requestCount: input.manifest.length,
+      manifest: input.manifest,
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (inserted) return inserted;
+
+  const existing = await getEmbeddingBatchSubmissionForStep(
+    input.workflowStepId,
+    database,
+  );
+  return existing;
+}
+
+export async function refreshPreparingEmbeddingBatchSubmission(
+  input: {
+    submissionId: string;
+    modelId: string;
+    dimensions: number;
+    indexVersion: number;
+    batchAttempt: number;
+    hasMore: boolean;
+    manifest: EmbeddingBatchManifest;
+  },
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .update(embeddingBatchSubmissions)
+    .set({
+      modelId: input.modelId,
+      dimensions: input.dimensions,
+      indexVersion: input.indexVersion,
+      batchAttempt: input.batchAttempt,
+      hasMore: input.hasMore,
+      requestCount: input.manifest.length,
+      manifest: input.manifest,
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.id, input.submissionId),
+        eq(embeddingBatchSubmissions.status, "preparing"),
+        isNull(embeddingBatchSubmissions.inputFileId),
+        isNull(embeddingBatchSubmissions.providerBatchId),
+      ),
+    )
+    .returning();
+  return submission ?? null;
+}
+
+export async function recordEmbeddingBatchInputFile(
+  input: { submissionId: string; inputFileId: string },
+  database: Database = getDatabase(),
+): Promise<string> {
+  const [submission] = await database
+    .update(embeddingBatchSubmissions)
+    .set({
+      inputFileId: sql`coalesce(${embeddingBatchSubmissions.inputFileId}, ${input.inputFileId})`,
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.id, input.submissionId),
+        eq(embeddingBatchSubmissions.status, "preparing"),
+      ),
+    )
+    .returning({ inputFileId: embeddingBatchSubmissions.inputFileId });
+  if (!submission?.inputFileId) {
+    throw new Error("The embedding batch input file could not be recorded.");
+  }
+  return submission.inputFileId;
+}
+
+export async function recordEmbeddingProviderBatch(
+  input: {
+    submissionId: string;
+    providerBatchId: string;
+    inputFileId: string;
+  },
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .update(embeddingBatchSubmissions)
+    .set({
+      providerBatchId: input.providerBatchId,
+      inputFileId: input.inputFileId,
+      status: "submitted",
+      submittedAt: sql`coalesce(${embeddingBatchSubmissions.submittedAt}, now())`,
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.id, input.submissionId),
+        inArray(embeddingBatchSubmissions.status, ["preparing", "submitted"]),
+      ),
+    )
+    .returning();
+  if (!submission) {
+    throw new Error("The OpenAI embedding batch could not be recorded.");
+  }
+  return submission;
+}
+
+export async function completeEmbeddingBatchSubmission(
+  input: {
+    submissionId: string;
+    providerState: string;
+    error: string | null;
+  },
+  database: Database = getDatabase(),
+) {
+  await database
+    .update(embeddingBatchSubmissions)
+    .set({
+      status: "complete",
+      providerState: input.providerState,
+      lastError: input.error,
+      completedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(embeddingBatchSubmissions.id, input.submissionId));
+}
+
+export async function markEmbeddingBatchSubmitted(
+  input: {
+    accountId: string;
+    modelId: string;
+    dimensions: number;
+    indexVersion: number;
+    providerBatchId: string;
+    messages: Array<{ messageId: string; userId: string; contentHash: string }>;
+  },
+  database: Database = getDatabase(),
+) {
+  if (input.messages.length === 0) return;
+  await database
+    .insert(messageEmbeddings)
+    .values(
+      input.messages.map((message) => ({
+        userId: message.userId,
+        accountId: input.accountId,
+        messageId: message.messageId,
+        modelId: input.modelId,
+        dimensions: input.dimensions,
+        indexVersion: input.indexVersion,
+        contentHash: message.contentHash,
+        status: "submitted" as const,
+        providerBatchId: input.providerBatchId,
+      })),
+    )
+    .onConflictDoUpdate({
+      target: [
+        messageEmbeddings.messageId,
+        messageEmbeddings.modelId,
+        messageEmbeddings.indexVersion,
+      ],
+      set: {
+        dimensions: input.dimensions,
+        contentHash: sql`excluded.content_hash`,
+        status: "submitted",
+        providerBatchId: input.providerBatchId,
+        lastError: null,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+export async function listSubmittedEmbeddingBatchIds(
+  input: { accountId?: string } = {},
+  database: Database = getDatabase(),
+): Promise<string[]> {
+  const rows = await database
+    .select({ providerBatchId: embeddingBatchSubmissions.providerBatchId })
+    .from(embeddingBatchSubmissions)
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.status, "submitted"),
+        isNotNull(embeddingBatchSubmissions.providerBatchId),
+        input.accountId
+          ? eq(embeddingBatchSubmissions.accountId, input.accountId)
+          : undefined,
+      ),
+    )
+    .groupBy(embeddingBatchSubmissions.providerBatchId);
+
+  return rows.flatMap(({ providerBatchId }) =>
+    providerBatchId ? [providerBatchId] : [],
+  );
+}
+
+export async function countFailedEmbeddings(
+  input: { accountId: string; modelId: string; indexVersion: number },
+  database: Database = getDatabase(),
+): Promise<number> {
+  const [result] = await database
+    .select({ value: count(messageEmbeddings.id) })
+    .from(messageEmbeddings)
+    .where(
+      and(
+        eq(messageEmbeddings.accountId, input.accountId),
+        eq(messageEmbeddings.modelId, input.modelId),
+        eq(messageEmbeddings.indexVersion, input.indexVersion),
+        eq(messageEmbeddings.status, "failed"),
+      ),
+    );
+  return result?.value ?? 0;
+}
+
+export async function saveMessageEmbeddings(
+  input: {
+    accountId: string;
+    modelId: string;
+    dimensions: number;
+    indexVersion: number;
+    values: Array<{
+      messageId: string;
+      userId: string;
+      contentHash: string;
+      embedding: number[];
+    }>;
+  },
+  database: Database = getDatabase(),
+): Promise<number> {
+  if (input.values.length === 0) return 0;
+  const currentMessages = await database
+    .select({
+      id: messages.id,
+      subject: messages.subject,
+      bodyText: messages.bodyText,
+    })
+    .from(messages)
+    .innerJoin(threads, eq(threads.id, messages.threadId))
+    .where(
+      and(
+        eq(threads.accountId, input.accountId),
+        inArray(
+          messages.id,
+          input.values.map((value) => value.messageId),
+        ),
+      ),
+    );
+  const currentHashes = new Map(
+    currentMessages.map((message) => [
+      message.id,
+      createMessageContentHash(message),
+    ]),
+  );
+  const values = input.values.filter(
+    (value) => currentHashes.get(value.messageId) === value.contentHash,
+  );
+  if (values.length === 0) return 0;
+
+  await database
+    .insert(messageEmbeddings)
+    .values(
+      values.map((value) => ({
+        userId: value.userId,
+        accountId: input.accountId,
+        messageId: value.messageId,
+        modelId: input.modelId,
+        dimensions: input.dimensions,
+        indexVersion: input.indexVersion,
+        contentHash: value.contentHash,
+        status: "complete" as const,
+        embedding: value.embedding,
+      })),
+    )
+    .onConflictDoUpdate({
+      target: [
+        messageEmbeddings.messageId,
+        messageEmbeddings.modelId,
+        messageEmbeddings.indexVersion,
+      ],
+      set: {
+        dimensions: input.dimensions,
+        contentHash: sql`excluded.content_hash`,
+        status: "complete",
+        embedding: sql`excluded.embedding`,
+        providerBatchId: null,
+        lastError: null,
+        updatedAt: new Date(),
+      },
+    });
+  return values.length;
+}
+
+export async function markMessageEmbeddingsFailed(
+  input: {
+    modelId: string;
+    indexVersion: number;
+    values: Array<{ messageId: string; contentHash: string }>;
+    error: string;
+  },
+  database: Database = getDatabase(),
+) {
+  for (const value of input.values) {
+    await database
+      .update(messageEmbeddings)
+      .set({
+        status: "failed",
+        providerBatchId: null,
+        lastError: input.error,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(messageEmbeddings.messageId, value.messageId),
+          eq(messageEmbeddings.modelId, input.modelId),
+          eq(messageEmbeddings.indexVersion, input.indexVersion),
+          eq(messageEmbeddings.contentHash, value.contentHash),
+        ),
+      );
+  }
+}
+
+export async function countIncompleteEmbeddings(
+  input: { accountId: string; modelId: string; indexVersion: number },
+  database: Database = getDatabase(),
+): Promise<number> {
+  const [result] = await database
+    .select({ value: count(messages.id) })
+    .from(messages)
+    .innerJoin(threads, eq(threads.id, messages.threadId))
+    .leftJoin(
+      messageEmbeddings,
+      and(
+        eq(messageEmbeddings.messageId, messages.id),
+        eq(messageEmbeddings.modelId, input.modelId),
+        eq(messageEmbeddings.indexVersion, input.indexVersion),
+        eq(messageEmbeddings.status, "complete"),
+      ),
+    )
+    .where(
+      and(
+        eq(threads.accountId, input.accountId),
+        sql`${messageEmbeddings.id} is null`,
+      ),
+    );
+  return result?.value ?? 0;
+}
+
+export async function enqueueEmbeddingBackfillContinuation(
+  input: {
+    userId: string;
+    accountId: string;
+    modelId: string;
+    indexVersion: number;
+    predecessorBatchId: string;
+    includeFailed: boolean;
+    batchAttempt: number;
+    reason: "next" | "retry";
+  },
+  database: Database = getDatabase(),
+): Promise<string | null> {
+  if (input.reason === "retry") {
+    const [activeRetry] = await database
+      .select({ id: workflowSteps.id })
+      .from(workflowSteps)
+      .where(
+        and(
+          eq(workflowSteps.accountId, input.accountId),
+          eq(workflowSteps.stepType, "embedding.backfill"),
+          inArray(workflowSteps.status, ["queued", "running"]),
+          sql`${workflowSteps.input}->>'includeFailed' = 'true'`,
+        ),
+      )
+      .orderBy(asc(workflowSteps.createdAt))
+      .limit(1);
+    if (activeRetry) return activeRetry.id;
+  }
+  return enqueueWorkflowStep(
+    {
+      userId: input.userId,
+      accountId: input.accountId,
+      stepType: "embedding.backfill",
+      payload: {
+        modelId: input.modelId,
+        indexVersion: input.indexVersion,
+        includeFailed: input.includeFailed,
+        batchAttempt: input.batchAttempt,
+      },
+      idempotencyKey: `embedding.backfill.continue:${input.reason}:${input.predecessorBatchId}`,
+    },
+    database,
+  );
 }
 
 export async function getReplyDraftContext(
@@ -1614,18 +2539,16 @@ export async function saveDraftEdit(
 
     if (normalizeMemoryStatement(existing.generatedText) !== normalizeMemoryStatement(input.currentText)) {
       const contentHash = createHash("sha256").update(input.currentText).digest("hex");
-      await transaction
-        .insert(jobs)
-        .values({
+      await enqueueWorkflowStep(
+        {
           userId: input.userId,
           accountId: existing.accountId,
-          jobType: "memory.feedback",
-          status: "queued",
+          stepType: "memory.feedback",
           payload: { draftId: existing.id, feedbackVersion: DRAFT_FEEDBACK_VERSION },
-          attempts: 0,
           idempotencyKey: `memory.feedback:${existing.accountId}:${existing.id}:${contentHash}`,
-        })
-        .onConflictDoNothing({ target: jobs.idempotencyKey });
+        },
+        transaction as unknown as Database,
+      );
     }
 
     await transaction.insert(auditEvents).values({
@@ -1693,117 +2616,7 @@ export async function markDraftFeedbackAnalyzed(
   });
 }
 
-export async function completeInitialSync(
-  accountId: string,
-  historyCursor: string,
-  database: Database = getDatabase(),
-) {
-  await database.transaction(async (transaction) => {
-    const [account] = await transaction
-      .update(connectedAccounts)
-      .set({
-        historyCursor,
-        lastSyncedAt: new Date(),
-        syncState: { recent: "complete", memory: "pending", history: "complete" },
-        updatedAt: new Date(),
-      })
-      .where(eq(connectedAccounts.id, accountId))
-      .returning({ userId: connectedAccounts.userId });
-    if (!account) throw new Error("The indexed Gmail account was not found.");
-
-    const analysisJobs = [
-      {
-        jobType: "mail.classify",
-        idempotencyKey: `mail.classify:${accountId}:${MAIL_CLASSIFICATION_VERSION}:${historyCursor}`,
-        payload: { analysisVersion: MAIL_CLASSIFICATION_VERSION },
-      },
-      {
-        jobType: "memory.extract",
-        idempotencyKey: `memory.extract:${accountId}:${MEMORY_SCHEMA_VERSION}:${historyCursor}`,
-        payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
-      },
-    ];
-    await transaction
-      .insert(jobs)
-      .values(
-        analysisJobs.map((job) => ({
-          userId: account.userId,
-          accountId,
-          jobType: job.jobType,
-          status: "queued" as const,
-          payload: job.payload,
-          attempts: 0,
-          idempotencyKey: job.idempotencyKey,
-        })),
-      )
-      .onConflictDoNothing({ target: jobs.idempotencyKey });
-  });
-}
-
-export async function enqueueAnalysisJobsForIndexedAccounts(
-  database: Database = getDatabase(),
-): Promise<number> {
-  const indexedAccounts = await database
-    .select({
-      id: connectedAccounts.id,
-      userId: connectedAccounts.userId,
-      historyCursor: connectedAccounts.historyCursor,
-      syncState: connectedAccounts.syncState,
-    })
-    .from(connectedAccounts)
-    .where(eq(connectedAccounts.status, "connected"));
-
-  const values = indexedAccounts.flatMap((account) => {
-    if (account.syncState.recent !== "complete" || !account.historyCursor) return [];
-    return [
-      {
-        userId: account.userId,
-        accountId: account.id,
-        jobType: "mail.classify",
-        status: "queued" as const,
-        payload: { analysisVersion: MAIL_CLASSIFICATION_VERSION },
-        attempts: 0,
-        idempotencyKey: `mail.classify:${account.id}:${MAIL_CLASSIFICATION_VERSION}:${account.historyCursor}`,
-      },
-      {
-        userId: account.userId,
-        accountId: account.id,
-        jobType: "memory.extract",
-        status: "queued" as const,
-        payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
-        attempts: 0,
-        idempotencyKey: `memory.extract:${account.id}:${MEMORY_SCHEMA_VERSION}:${account.historyCursor}`,
-      },
-    ];
-  });
-  if (values.length === 0) return 0;
-
-  const inserted = await database
-    .insert(jobs)
-    .values(values)
-    .onConflictDoNothing({ target: jobs.idempotencyKey })
-    .returning({ id: jobs.id });
-  return inserted.length;
-}
-
-export async function completeJob(
-  jobId: string,
-  result: Record<string, unknown> = {},
-  database: Database = getDatabase(),
-) {
-  await database
-    .update(jobs)
-    .set({
-      status: "complete",
-      result: { ...result, completedAt: new Date().toISOString() },
-      lockedAt: null,
-      lockedBy: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(jobs.id, jobId));
-}
-
-export async function enqueueMemoryBatchEvent(
+export async function enqueueBatchEvent(
   input: {
     provider: "openai" | "azure-openai";
     webhookId: string;
@@ -1813,32 +2626,67 @@ export async function enqueueMemoryBatchEvent(
   database: Database = getDatabase(),
 ): Promise<{ submissionJobId: string } | null> {
   return database.transaction(async (transaction) => {
-    const [submission] = await transaction
-      .select({
-        id: jobs.id,
-        userId: jobs.userId,
-        accountId: jobs.accountId,
-      })
-      .from(jobs)
-      .where(
-        and(
-          eq(jobs.status, "complete"),
-          inArray(jobs.jobType, ["memory.extract", "memory.batch.retry"]),
-          sql`${jobs.result}->>'provider' = ${input.provider}`,
-          sql`${jobs.result}->>'providerBatchId' = ${input.providerBatchId}`,
-        ),
-      )
-      .orderBy(desc(jobs.updatedAt))
-      .limit(1);
+    const [embeddingSubmission] =
+      input.provider === "openai"
+        ? await transaction
+            .select({
+              id: embeddingBatchSubmissions.workflowStepId,
+              userId: embeddingBatchSubmissions.userId,
+              accountId: embeddingBatchSubmissions.accountId,
+              stepType: workflowSteps.stepType,
+            })
+            .from(embeddingBatchSubmissions)
+            .innerJoin(
+              workflowSteps,
+              eq(workflowSteps.id, embeddingBatchSubmissions.workflowStepId),
+            )
+            .where(
+              and(
+                eq(embeddingBatchSubmissions.provider, "openai"),
+                eq(
+                  embeddingBatchSubmissions.providerBatchId,
+                  input.providerBatchId,
+                ),
+                eq(embeddingBatchSubmissions.status, "submitted"),
+              ),
+            )
+            .limit(1)
+        : [];
+    const [memorySubmission] = embeddingSubmission
+      ? []
+      : await transaction
+          .select({
+            id: workflowSteps.id,
+            userId: workflowSteps.userId,
+            accountId: workflowSteps.accountId,
+            stepType: workflowSteps.stepType,
+          })
+          .from(workflowSteps)
+          .where(
+            and(
+              eq(workflowSteps.status, "complete"),
+              inArray(workflowSteps.stepType, [
+                "memory.extract",
+                "memory.batch.retry",
+              ]),
+              sql`${workflowSteps.result}->>'provider' = ${input.provider}`,
+              sql`${workflowSteps.result}->>'providerBatchId' = ${input.providerBatchId}`,
+            ),
+          )
+          .orderBy(desc(workflowSteps.updatedAt))
+          .limit(1);
+    const submission = embeddingSubmission ?? memorySubmission;
     if (!submission) return null;
 
-    await transaction
-      .insert(jobs)
-      .values({
+    const eventJobType = submission.stepType.startsWith("embedding.")
+      ? "embedding.batch.event"
+      : "memory.batch.event";
+
+    await enqueueWorkflowStep(
+      {
         userId: submission.userId,
         accountId: submission.accountId,
-        jobType: "memory.batch.event",
-        status: "queued",
+        stepType: eventJobType,
         payload: {
           submissionJobId: submission.id,
           webhookId: input.webhookId,
@@ -1846,39 +2694,20 @@ export async function enqueueMemoryBatchEvent(
           provider: input.provider,
           providerBatchId: input.providerBatchId,
         },
-        attempts: 0,
-        idempotencyKey: `${input.provider}.webhook:${input.webhookId}`,
-      })
-      .onConflictDoNothing({ target: jobs.idempotencyKey });
+        idempotencyKey: `${input.provider}.batch-event:${input.eventType}:${input.providerBatchId}`,
+      },
+      transaction as unknown as Database,
+    );
 
     return { submissionJobId: submission.id };
   });
 }
 
-export async function getMemoryBatchSubmission(
+export async function getBatchSubmission(
   jobId: string,
   database: Database = getDatabase(),
 ) {
-  const [submission] = await database
-    .select({
-      id: jobs.id,
-      userId: jobs.userId,
-      accountId: jobs.accountId,
-      jobType: jobs.jobType,
-      result: jobs.result,
-      maxAttempts: jobs.maxAttempts,
-    })
-    .from(jobs)
-    .where(
-      and(
-        eq(jobs.id, jobId),
-        eq(jobs.status, "complete"),
-        inArray(jobs.jobType, ["memory.extract", "memory.batch.retry"]),
-      ),
-    )
-    .limit(1);
-
-  return submission ?? null;
+  return getWorkflowStepSubmission(jobId, database);
 }
 
 export async function enqueueMemoryBatchRetry(
@@ -1910,13 +2739,11 @@ export async function enqueueMemoryBatchRetry(
     .digest("hex");
 
   const idempotencyKey = `memory.batch.retry:${input.parentSubmissionJobId}:${manifestHash}`;
-  const inserted = await database
-    .insert(jobs)
-    .values({
+  return enqueueWorkflowStep(
+    {
       userId: input.userId,
       accountId: input.accountId,
-      jobType: "memory.batch.retry",
-      status: "queued",
+      stepType: "memory.batch.retry",
       payload: {
         parentSubmissionJobId: input.parentSubmissionJobId,
         rootSubmissionJobId: input.rootSubmissionJobId,
@@ -1924,108 +2751,8 @@ export async function enqueueMemoryBatchRetry(
         replaceExisting: input.replaceExisting,
         manifest: input.manifest,
       },
-      attempts: 0,
       idempotencyKey,
-    })
-    .onConflictDoNothing({ target: jobs.idempotencyKey })
-    .returning({ id: jobs.id });
-
-  if (inserted[0]) return inserted[0].id;
-  const [existing] = await database
-    .select({ id: jobs.id })
-    .from(jobs)
-    .where(eq(jobs.idempotencyKey, idempotencyKey))
-    .limit(1);
-  return existing?.id ?? null;
-}
-
-export async function deferJobWithoutAttempt(
-  input: { jobId: string; message: string },
-  database: Database = getDatabase(),
-) {
-  await database
-    .update(jobs)
-    .set({
-      status: "queued",
-      attempts: sql`greatest(${jobs.attempts} - 1, 0)`,
-      lastError: input.message,
-      lockedAt: null,
-      lockedBy: null,
-      updatedAt: new Date(),
-    })
-    .where(eq(jobs.id, input.jobId));
-}
-
-export async function failAnalysisJob(
-  input: { job: ClaimedJob; message: string },
-  database: Database = getDatabase(),
-) {
-  const terminal = input.job.attempts >= input.job.maxAttempts;
-  await database.transaction(async (transaction) => {
-    await transaction
-      .update(jobs)
-      .set({
-        status: terminal ? "failed" : "retry",
-        lastError: input.message,
-        lockedAt: null,
-        lockedBy: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(jobs.id, input.job.id));
-
-    if (
-      terminal &&
-      ["memory.extract", "memory.batch.retry", "memory.batch.event"].includes(
-        input.job.jobType,
-      ) &&
-      input.job.accountId
-    ) {
-      const [account] = await transaction
-        .select({ syncState: connectedAccounts.syncState })
-        .from(connectedAccounts)
-        .where(eq(connectedAccounts.id, input.job.accountId))
-        .limit(1);
-      if (account) {
-        await transaction
-          .update(connectedAccounts)
-          .set({
-            syncState: { ...account.syncState, memory: "failed" },
-            updatedAt: new Date(),
-          })
-          .where(eq(connectedAccounts.id, input.job.accountId));
-      }
-    }
-  });
-}
-
-export async function failJobAndAccount(input: {
-  job: ClaimedJob;
-  message: string;
-  reconnectRequired: boolean;
-}, database: Database = getDatabase()) {
-  const accountId = input.job.accountId;
-
-  await database.transaction(async (transaction) => {
-    await transaction
-      .update(jobs)
-      .set({
-        status: input.job.attempts < input.job.maxAttempts ? "retry" : "failed",
-        lastError: input.message,
-        lockedAt: null,
-        lockedBy: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(jobs.id, input.job.id));
-
-    if (accountId) {
-      await transaction
-        .update(connectedAccounts)
-        .set({
-          status: input.reconnectRequired ? "reconnect_required" : "connected",
-          syncState: { recent: "failed", memory: "pending", history: "pending" },
-          updatedAt: new Date(),
-        })
-        .where(eq(connectedAccounts.id, accountId));
-    }
-  });
+    },
+    database,
+  );
 }
