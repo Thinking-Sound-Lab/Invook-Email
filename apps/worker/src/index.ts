@@ -81,6 +81,7 @@ import {
   getGmailReplicaContext,
   getGmailReplicaInventory,
   getGmailWatchContext,
+  isActiveMailSyncRun,
   listenForJobNotifications,
   saveLabelBatchResults,
   setLabelAnalysisState,
@@ -714,7 +715,8 @@ async function runGmailPage(job: WorkflowStepJob) {
     return { status: "current", runId, pageNumber };
   }
 
-  await startMailSyncRun(runId);
+  const active = await startMailSyncRun(runId, job.accountId);
+  if (!active) return { status: "inactive", runId, pageNumber };
   const { account, credential } = await getMailSyncContext(job.accountId);
   if (pageNumber === 1) {
     await ensureGmailWatch(account.id, credential.accessToken);
@@ -759,6 +761,7 @@ async function runGmailMessage(job: WorkflowStepJob) {
   );
   const shouldProcess = await markMailSyncItemRunning(
     runId,
+    job.accountId,
     providerMessageId,
     job.attempts,
   );
@@ -1112,6 +1115,9 @@ async function runGmailFinalize(job: WorkflowStepJob) {
     throw new Error("The Gmail finalization job is missing its synchronization run.");
   }
   const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
+  if (!(await isActiveMailSyncRun({ runId, accountId: job.accountId }))) {
+    return { status: "inactive", runId };
+  }
   const replica = await getGmailReplicaContext(job.accountId);
   if (!replica) throw new Error("The Gmail replica state was not found.");
   const { account, credential } = await getMailSyncContext(job.accountId);
@@ -2880,7 +2886,7 @@ async function executeWorkflowJob(
     maxAttempts: bullJob.data.maxAttempts,
   };
   const started = await markWorkflowStepRunning(job.id, job.attempts);
-  if (started.alreadyComplete) return started.result;
+  if (!started.shouldExecute) return started.result;
   try {
     const result = await handler(job);
     await completeWorkflowStep(job.id, result);

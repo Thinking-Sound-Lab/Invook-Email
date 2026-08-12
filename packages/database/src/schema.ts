@@ -891,7 +891,7 @@ export const mailSyncRuns = pgTable(
       .notNull()
       .references(() => connectedAccounts.id, { onDelete: "cascade" }),
     status: text("status")
-      .$type<"queued" | "running" | "complete" | "failed">()
+      .$type<"queued" | "running" | "complete" | "failed" | "superseded">()
       .notNull()
       .default("queued"),
     startingHistoryCursor: text("starting_history_cursor").notNull(),
@@ -913,10 +913,13 @@ export const mailSyncRuns = pgTable(
   },
   (table) => [
     uniqueIndex("mail_sync_runs_idempotency_key_idx").on(table.idempotencyKey),
+    uniqueIndex("mail_sync_runs_single_active_account_idx")
+      .on(table.accountId)
+      .where(sql`${table.status} in ('queued', 'running')`),
     index("mail_sync_runs_account_created_idx").on(table.accountId, table.createdAt),
     check(
       "mail_sync_runs_status_check",
-      sql`${table.status} in ('queued', 'running', 'complete', 'failed')`,
+      sql`${table.status} in ('queued', 'running', 'complete', 'failed', 'superseded')`,
     ),
     check("mail_sync_runs_page_count_check", sql`${table.pageCount} >= 0`),
     check(

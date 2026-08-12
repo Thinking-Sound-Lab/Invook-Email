@@ -4,7 +4,8 @@ import {
   decryptGoogleCredential,
   encryptGoogleCredential,
   getGmailConnectionForOAuth,
-  saveGmailConnection,
+  refreshGmailAuthentication,
+  saveNewGmailConnection,
 } from "@invook/database";
 import {
   createGoogleAuthorizationRequest,
@@ -96,17 +97,6 @@ async function handleGoogleCallback(
       codeVerifier: oauthRequest.codeVerifier,
     });
     const gmailProfile = await getGmailProfile(authorization.accessToken);
-    const topicName = process.env.GMAIL_PUBSUB_TOPIC;
-    if (!topicName) {
-      throw new Error("GMAIL_PUBSUB_TOPIC is required to connect Gmail.");
-    }
-    const watch = await startGmailWatch(authorization.accessToken, {
-      topicName,
-    });
-    const watchExpiration = Number(watch.expiration);
-    if (!Number.isFinite(watchExpiration)) {
-      throw new Error("Gmail returned an invalid watch expiration.");
-    }
     const providerAccountId = authorization.identity.subject;
     const userId = getInvookUserId(providerAccountId);
     const existingAccount = await getGmailConnectionForOAuth(providerAccountId);
@@ -127,7 +117,7 @@ async function handleGoogleCallback(
       return;
     }
 
-    const acknowledgedAt = new Date();
+    const authenticatedAt = new Date();
     const tokenCiphertext = encryptGoogleCredential(
       {
         accessToken: authorization.accessToken,
@@ -137,21 +127,41 @@ async function handleGoogleCallback(
       },
       process.env.TOKEN_ENCRYPTION_KEY ?? "",
     );
-    await saveGmailConnection({
+    const authentication = {
       userId,
       displayName: authorization.identity.displayName,
       providerAccountId,
       email: gmailProfile.emailAddress,
       scopes: authorization.scopes,
-      initialHistoryId: gmailProfile.historyId,
-      watch: {
-        topicName,
-        historyId: watch.historyId,
-        expirationAt: new Date(watchExpiration),
-      },
+      currentHistoryId: gmailProfile.historyId,
       tokenCiphertext,
-      acknowledgedAt,
-    });
+      authenticatedAt,
+    };
+    let account = existingAccount
+      ? await refreshGmailAuthentication(authentication)
+      : null;
+    if (!account) {
+      const topicName = process.env.GMAIL_PUBSUB_TOPIC;
+      if (!topicName) {
+        throw new Error("GMAIL_PUBSUB_TOPIC is required to connect Gmail.");
+      }
+      const watch = await startGmailWatch(authorization.accessToken, {
+        topicName,
+      });
+      const watchExpiration = Number(watch.expiration);
+      if (!Number.isFinite(watchExpiration)) {
+        throw new Error("Gmail returned an invalid watch expiration.");
+      }
+      account = await saveNewGmailConnection({
+        ...authentication,
+        initialHistoryId: gmailProfile.historyId,
+        watch: {
+          topicName,
+          historyId: watch.historyId,
+          expirationAt: new Date(watchExpiration),
+        },
+      });
+    }
 
     clearOAuthRequestCookies(reply);
     createSessionCookie(reply, { userId, googleSubject: providerAccountId });

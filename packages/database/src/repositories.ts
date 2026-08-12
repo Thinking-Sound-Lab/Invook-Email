@@ -245,62 +245,220 @@ export async function getGmailConnectionForOAuth(
   return connection ?? null;
 }
 
-type SaveGmailConnectionInput = {
+type GmailAuthenticationInput = {
   userId: string;
   displayName: string | null;
   providerAccountId: string;
   email: string;
   scopes: string[];
+  currentHistoryId: string;
+  tokenCiphertext: string;
+  authenticatedAt: Date;
+};
+
+type NewGmailConnectionInput = GmailAuthenticationInput & {
   initialHistoryId: string;
   watch: {
     topicName: string;
     historyId: string;
     expirationAt: Date;
   };
-  tokenCiphertext: string;
-  acknowledgedAt: Date;
 };
 
-export async function saveGmailConnection(
-  input: SaveGmailConnectionInput,
-  database: Database = getDatabase(),
-): Promise<{ id: string }> {
-  return database.transaction(async (transaction) => {
-    await transaction
-      .insert(profiles)
-      .values({
-        id: input.userId,
-        displayName: input.displayName,
-        memoryAcknowledgedAt: input.acknowledgedAt,
-      })
-      .onConflictDoUpdate({
-        target: profiles.id,
-        set: {
-          displayName: input.displayName,
-          memoryAcknowledgedAt: input.acknowledgedAt,
-          updatedAt: new Date(),
-        },
-      });
+type GmailAuthenticationAccount = {
+  id: string;
+  userId: string;
+  replicaState: typeof gmailReplicaStates.$inferSelect.state | null;
+  historyCursor: string | null;
+};
 
-    const [existingAccount] = await transaction
-      .select({
-        id: connectedAccounts.id,
-        userId: connectedAccounts.userId,
-        lastSyncedAt: connectedAccounts.lastSyncedAt,
-        syncState: connectedAccounts.syncState,
-      })
-      .from(connectedAccounts)
+async function lockGmailAuthentication(
+  transaction: DatabaseTransaction,
+  providerAccountId: string,
+) {
+  await transaction.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`invook:gmail-auth:${providerAccountId}`}, 0))`,
+  );
+}
+
+async function findGmailAuthenticationAccount(
+  transaction: DatabaseTransaction,
+  providerAccountId: string,
+): Promise<GmailAuthenticationAccount | null> {
+  const [account] = await transaction
+    .select({
+      id: connectedAccounts.id,
+      userId: connectedAccounts.userId,
+      replicaState: gmailReplicaStates.state,
+      historyCursor: gmailReplicaStates.historyCursor,
+    })
+    .from(connectedAccounts)
+    .leftJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
+    .where(
+      and(
+        eq(connectedAccounts.provider, "gmail"),
+        eq(connectedAccounts.providerAccountId, providerAccountId),
+      ),
+    )
+    .limit(1);
+  return account ?? null;
+}
+
+async function saveNewGmailProfile(
+  transaction: DatabaseTransaction,
+  input: GmailAuthenticationInput,
+) {
+  await transaction
+    .insert(profiles)
+    .values({
+      id: input.userId,
+      displayName: input.displayName,
+      memoryAcknowledgedAt: input.authenticatedAt,
+    })
+    .onConflictDoUpdate({
+      target: profiles.id,
+      set: {
+        displayName: input.displayName,
+        memoryAcknowledgedAt: input.authenticatedAt,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+async function saveGmailCredential(
+  transaction: DatabaseTransaction,
+  input: GmailAuthenticationInput,
+  accountId: string,
+) {
+  await transaction
+    .insert(accountSecrets)
+    .values({
+      accountId,
+      tokenCiphertext: input.tokenCiphertext,
+      keyVersion: 1,
+      refreshedAt: input.authenticatedAt,
+    })
+    .onConflictDoUpdate({
+      target: accountSecrets.accountId,
+      set: {
+        tokenCiphertext: input.tokenCiphertext,
+        keyVersion: 1,
+        refreshedAt: input.authenticatedAt,
+        updatedAt: new Date(),
+      },
+    });
+}
+
+async function saveGmailProfileAndCredential(
+  transaction: DatabaseTransaction,
+  input: GmailAuthenticationInput,
+  accountId: string,
+) {
+  await transaction
+    .update(profiles)
+    .set({ displayName: input.displayName, updatedAt: new Date() })
+    .where(eq(profiles.id, input.userId));
+  await transaction
+    .update(connectedAccounts)
+    .set({
+      email: input.email,
+      status: "connected",
+      scopes: input.scopes,
+      updatedAt: new Date(),
+    })
+    .where(eq(connectedAccounts.id, accountId));
+  await saveGmailCredential(transaction, input, accountId);
+}
+
+async function saveReturningGmailAuthentication(
+  transaction: DatabaseTransaction,
+  input: GmailAuthenticationInput,
+  account: GmailAuthenticationAccount,
+) {
+  if (account.userId !== input.userId) {
+    throw new Error("This Gmail account is already linked to another Invook user.");
+  }
+  await saveGmailProfileAndCredential(transaction, input, account.id);
+
+  if (
+    account.replicaState === "ready" &&
+    account.historyCursor &&
+    account.historyCursor !== input.currentHistoryId
+  ) {
+    const [activeCatchup] = await transaction
+      .select({ id: workflowSteps.id })
+      .from(workflowSteps)
       .where(
         and(
-          eq(connectedAccounts.provider, "gmail"),
-          eq(connectedAccounts.providerAccountId, input.providerAccountId),
+          eq(workflowSteps.accountId, account.id),
+          eq(workflowSteps.stepType, "gmail.history.catchup"),
+          inArray(workflowSteps.status, ["queued", "running"]),
         ),
       )
       .limit(1);
-
-    if (existingAccount && existingAccount.userId !== input.userId) {
-      throw new Error("This Gmail account is already linked to another Invook user.");
+    if (!activeCatchup) {
+      await enqueueWorkflowStep(
+        {
+          userId: input.userId,
+          accountId: account.id,
+          stepType: "gmail.history.catchup",
+          payload: { reason: "oauth_reauthentication" },
+          idempotencyKey: `gmail-history-reauth:${account.id}:${input.currentHistoryId}:${input.authenticatedAt.toISOString()}`,
+        },
+        transaction as unknown as Database,
+      );
     }
+  }
+
+  await transaction.insert(auditEvents).values({
+    userId: input.userId,
+    accountId: account.id,
+    eventType: "gmail.reauthenticated",
+    targetType: "connected_account",
+    targetId: account.id,
+    metadata: { scopes: input.scopes },
+  });
+  return { id: account.id };
+}
+
+export async function refreshGmailAuthentication(
+  input: GmailAuthenticationInput,
+  database: Database = getDatabase(),
+): Promise<{ id: string } | null> {
+  return database.transaction(async (transaction) => {
+    await lockGmailAuthentication(transaction, input.providerAccountId);
+    const account = await findGmailAuthenticationAccount(
+      transaction,
+      input.providerAccountId,
+    );
+    if (!account) return null;
+    return saveReturningGmailAuthentication(transaction, input, account);
+  });
+}
+
+export async function saveNewGmailConnection(
+  input: NewGmailConnectionInput,
+  database: Database = getDatabase(),
+): Promise<{ id: string; created: boolean }> {
+  return database.transaction(async (transaction) => {
+    await lockGmailAuthentication(transaction, input.providerAccountId);
+    const existingAccount = await findGmailAuthenticationAccount(
+      transaction,
+      input.providerAccountId,
+    );
+    if (existingAccount) {
+      const account = await saveReturningGmailAuthentication(
+        transaction,
+        input,
+        existingAccount,
+      );
+      return { ...account, created: false };
+    }
+
+    await saveNewGmailProfile(transaction, input);
 
     const [account] = await transaction
       .insert(connectedAccounts)
@@ -311,20 +469,8 @@ export async function saveGmailConnection(
         email: input.email,
         status: "connected",
         scopes: input.scopes,
-        memoryAcknowledgedAt: input.acknowledgedAt,
+        memoryAcknowledgedAt: input.authenticatedAt,
         syncState: initialSyncState,
-      })
-      .onConflictDoUpdate({
-        target: [connectedAccounts.provider, connectedAccounts.providerAccountId],
-        set: {
-          userId: input.userId,
-          email: input.email,
-          status: "connected",
-          scopes: input.scopes,
-          memoryAcknowledgedAt: input.acknowledgedAt,
-          syncState: existingAccount?.syncState ?? initialSyncState,
-          updatedAt: new Date(),
-        },
       })
       .returning({ id: connectedAccounts.id });
 
@@ -337,76 +483,29 @@ export async function saveGmailConnection(
         initialHistoryId: input.initialHistoryId,
         historyCursor: null,
         state: "pending",
-      })
-      .onConflictDoUpdate({
-        target: gmailReplicaStates.accountId,
-        set: {
-          initialHistoryId: input.initialHistoryId,
-          historyCursor: null,
-          state: "pending",
-          readyAt: null,
-          lastError: null,
-          updatedAt: new Date(),
-        },
       });
     await transaction
       .insert(gmailWatchStates)
-      .values({ accountId: account.id, ...input.watch })
-      .onConflictDoUpdate({
-        target: gmailWatchStates.accountId,
-        set: {
-          ...input.watch,
-          status: "active",
-          lastRenewedAt: new Date(),
-          lastError: null,
-          updatedAt: new Date(),
-        },
-      });
-
-    if (!existingAccount) {
-      await transaction
-        .insert(mailLabels)
-        .values(
-          systemLabelDefinitions.map((definition) => ({
-            userId: input.userId,
-            accountId: account.id,
-            name: definition.name,
-            normalizedName: definition.name.toLowerCase(),
-            description: definition.description,
-            systemKey: definition.key,
-            definitionVersion: 1,
-            analysisState: "pending" as const,
-          })),
-        )
-        .onConflictDoNothing({
-          target: [mailLabels.accountId, mailLabels.systemKey],
-        });
-    }
-
-    await transaction
-      .insert(accountSecrets)
-      .values({
+      .values({ accountId: account.id, ...input.watch });
+    await transaction.insert(mailLabels).values(
+      systemLabelDefinitions.map((definition) => ({
+        userId: input.userId,
         accountId: account.id,
-        tokenCiphertext: input.tokenCiphertext,
-        keyVersion: 1,
-        refreshedAt: input.acknowledgedAt,
-      })
-      .onConflictDoUpdate({
-        target: accountSecrets.accountId,
-        set: {
-          tokenCiphertext: input.tokenCiphertext,
-          keyVersion: 1,
-          refreshedAt: input.acknowledgedAt,
-          updatedAt: new Date(),
-        },
-      });
+        name: definition.name,
+        normalizedName: definition.name.toLowerCase(),
+        description: definition.description,
+        systemKey: definition.key,
+        definitionVersion: 1,
+        analysisState: "pending" as const,
+      })),
+    );
+    await saveGmailCredential(transaction, input, account.id);
 
     await createInitialMailSyncRun(
       {
         userId: input.userId,
         accountId: account.id,
         startingHistoryCursor: input.initialHistoryId,
-        connectionEventId: input.acknowledgedAt.toISOString(),
       },
       transaction as unknown as Database,
     );
@@ -441,7 +540,7 @@ export async function saveGmailConnection(
       },
     });
 
-    return account;
+    return { ...account, created: true };
   });
 }
 

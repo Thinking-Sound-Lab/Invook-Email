@@ -41,6 +41,12 @@ An account is not readable by indexing or Memory workflows until all of these st
 
 There is no finalization path that jumps directly to the latest profile cursor.
 
+## Authentication lifecycle
+
+Browser authentication and Gmail replication are separate lifecycles. Signing out clears only the browser session. A later OAuth callback for the same Google identity refreshes profile and encrypted credential data while preserving the account ID, active initial run, replica state, applied history cursor, audit state, watch state, sync stages, and stored mailbox.
+
+Returning authentication never creates another initial run or registers a replacement watch. If the replica is ready and Gmail reports a different current history ID, it durably queues catch-up; the worker rereads the stored cursor, and a provider `404` enters the existing expired-history repair workflow. Account-scoped authentication transactions serialize concurrent callbacks, while PostgreSQL permits only one queued or running initial sync per account. Migration cutover marks duplicate active runs and their pending work as superseded without changing the surviving replica state.
+
 ## Continuous synchronization
 
 Google Pub/Sub sends authenticated OIDC push requests to `/v1/webhooks/google-pubsub`. The API validates the token audience, verified service-account email, and exact subscription. It commits the unique Pub/Sub message ID and a catch-up workflow step before returning `204`.

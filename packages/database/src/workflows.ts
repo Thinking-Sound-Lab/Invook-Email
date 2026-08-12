@@ -144,55 +144,73 @@ export async function createInitialMailSyncRun(
     userId: string;
     accountId: string;
     startingHistoryCursor: string;
-    connectionEventId?: string;
   },
   database: Database = getDatabase(),
 ): Promise<string> {
   return database.transaction(async (transaction) => {
     const executor = transaction as unknown as Database;
-    const idempotencyKey = [
-      "gmail.initial-sync",
-      input.accountId,
-      input.startingHistoryCursor,
-      input.connectionEventId,
-    ]
-      .filter(Boolean)
-      .join(":");
-    const [inserted] = await transaction
-      .insert(mailSyncRuns)
-      .values({
-        userId: input.userId,
-        accountId: input.accountId,
-        startingHistoryCursor: input.startingHistoryCursor,
-        idempotencyKey,
-      })
-      .onConflictDoNothing({ target: mailSyncRuns.idempotencyKey })
-      .returning({ id: mailSyncRuns.id });
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id, userId: connectedAccounts.userId })
+      .from(connectedAccounts)
+      .where(eq(connectedAccounts.id, input.accountId))
+      .for("update")
+      .limit(1);
+    if (!account || account.userId !== input.userId) {
+      throw new Error("The Gmail account is unavailable for synchronization.");
+    }
 
-    let runId = inserted?.id;
+    const [activeRun] = await transaction
+      .select({ id: mailSyncRuns.id })
+      .from(mailSyncRuns)
+      .where(
+        and(
+          eq(mailSyncRuns.accountId, input.accountId),
+          inArray(mailSyncRuns.status, ["queued", "running"]),
+        ),
+      )
+      .limit(1);
+    const idempotencyKey = `gmail.initial-sync:${input.accountId}`;
+    const [inserted] = activeRun
+      ? []
+      : await transaction
+          .insert(mailSyncRuns)
+          .values({
+            userId: input.userId,
+            accountId: input.accountId,
+            startingHistoryCursor: input.startingHistoryCursor,
+            idempotencyKey,
+          })
+          .onConflictDoNothing()
+          .returning({ id: mailSyncRuns.id });
+
+    let runId = activeRun?.id ?? inserted?.id;
+    let active = Boolean(activeRun ?? inserted);
     if (!runId) {
       const [existing] = await transaction
-        .select({ id: mailSyncRuns.id })
+        .select({ id: mailSyncRuns.id, status: mailSyncRuns.status })
         .from(mailSyncRuns)
         .where(eq(mailSyncRuns.idempotencyKey, idempotencyKey))
         .limit(1);
       runId = existing?.id;
+      active = existing?.status === "queued" || existing?.status === "running";
     }
     if (!runId) {
       throw new Error("The Gmail synchronization run could not be created.");
     }
 
-    await enqueueWorkflowStep(
-      {
-        runId,
-        userId: input.userId,
-        accountId: input.accountId,
-        stepType: "gmail.sync.page",
-        payload: { runId, pageNumber: 1, pageToken: null },
-        idempotencyKey: `gmail-page:${runId}:1`,
-      },
-      executor,
-    );
+    if (active) {
+      await enqueueWorkflowStep(
+        {
+          runId,
+          userId: input.userId,
+          accountId: input.accountId,
+          stepType: "gmail.sync.page",
+          payload: { runId, pageNumber: 1, pageToken: null },
+          idempotencyKey: `gmail-page:${runId}:1`,
+        },
+        executor,
+      );
+    }
     return runId;
   });
 }
@@ -248,7 +266,6 @@ export async function enqueueMissingMailSyncRuns(
       userId: account.userId,
       accountId: account.id,
       startingHistoryCursor: account.initialHistoryId,
-      connectionEventId: "gmail-replica-backfill-v1",
     }, database);
     created += 1;
   }
@@ -324,22 +341,27 @@ export async function markWorkflowStepRunning(
       completedAt: null,
       updatedAt: new Date(),
     })
-    .where(and(eq(workflowSteps.id, stepId), ne(workflowSteps.status, "complete")))
+    .where(
+      and(
+        eq(workflowSteps.id, stepId),
+        inArray(workflowSteps.status, ["queued", "running"]),
+      ),
+    )
     .returning({ id: workflowSteps.id });
-  if (step) return { alreadyComplete: false as const, result: null };
+  if (step) return { shouldExecute: true as const, result: null };
 
-  const [completed] = await database
+  const [terminal] = await database
     .select({ status: workflowSteps.status, result: workflowSteps.result })
     .from(workflowSteps)
     .where(eq(workflowSteps.id, stepId))
     .limit(1);
-  if (!completed) throw new Error("The workflow step no longer exists.");
-  if (completed.status !== "complete") {
-    throw new Error("The workflow step could not be started.");
-  }
+  if (!terminal) throw new Error("The workflow step no longer exists.");
   return {
-    alreadyComplete: true as const,
-    result: completed.result ?? {},
+    shouldExecute: false as const,
+    result:
+      terminal.status === "complete"
+        ? terminal.result ?? {}
+        : { status: "inactive" },
   };
 }
 
@@ -508,9 +530,10 @@ export async function failWorkflowStep(
 
 export async function startMailSyncRun(
   runId: string,
+  accountId: string,
   database: Database = getDatabase(),
-) {
-  await database.transaction(async (transaction) => {
+): Promise<boolean> {
+  return database.transaction(async (transaction) => {
     const [run] = await transaction
       .update(mailSyncRuns)
       .set({
@@ -522,11 +545,12 @@ export async function startMailSyncRun(
       .where(
         and(
           eq(mailSyncRuns.id, runId),
+          eq(mailSyncRuns.accountId, accountId),
           inArray(mailSyncRuns.status, ["queued", "running"]),
         ),
       )
       .returning({ accountId: mailSyncRuns.accountId });
-    if (!run) return;
+    if (!run) return false;
     await transaction
       .update(connectedAccounts)
       .set({
@@ -534,7 +558,26 @@ export async function startMailSyncRun(
         updatedAt: new Date(),
       })
       .where(eq(connectedAccounts.id, run.accountId));
+    return true;
   });
+}
+
+export async function isActiveMailSyncRun(
+  input: { runId: string; accountId: string },
+  database: Database = getDatabase(),
+): Promise<boolean> {
+  const [run] = await database
+    .select({ id: mailSyncRuns.id })
+    .from(mailSyncRuns)
+    .where(
+      and(
+        eq(mailSyncRuns.id, input.runId),
+        eq(mailSyncRuns.accountId, input.accountId),
+        inArray(mailSyncRuns.status, ["queued", "running"]),
+      ),
+    )
+    .limit(1);
+  return Boolean(run);
 }
 
 export async function hasCompletedMailSyncPage(
@@ -651,6 +694,7 @@ export async function recordMailSyncPage(
 
 export async function markMailSyncItemRunning(
   runId: string,
+  accountId: string,
   providerMessageId: string,
   attempt: number,
   database: Database = getDatabase(),
@@ -668,7 +712,14 @@ export async function markMailSyncItemRunning(
       and(
         eq(gmailSyncItems.runId, runId),
         eq(gmailSyncItems.providerMessageId, providerMessageId),
-        ne(gmailSyncItems.status, "complete"),
+        inArray(gmailSyncItems.status, ["queued", "running"]),
+        sql`exists (
+          select 1
+          from ${mailSyncRuns}
+          where ${mailSyncRuns.id} = ${runId}
+            and ${mailSyncRuns.accountId} = ${accountId}
+            and ${mailSyncRuns.status} in ('queued', 'running')
+        )`,
       ),
     )
     .returning({ id: gmailSyncItems.id });
@@ -837,7 +888,12 @@ export async function failMailSyncRun(
       completedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(eq(mailSyncRuns.id, input.runId))
+    .where(
+      and(
+        eq(mailSyncRuns.id, input.runId),
+        inArray(mailSyncRuns.status, ["queued", "running"]),
+      ),
+    )
     .returning({ accountId: mailSyncRuns.accountId });
   if (!run) return;
   await database.transaction(async (transaction) => {
@@ -879,8 +935,11 @@ export async function completeMailSyncRun(
       )
       .where(eq(mailSyncRuns.id, input.runId))
       .limit(1);
-    if (!run || run.status === "failed") {
-      throw new Error("The Gmail synchronization run is unavailable for finalization.");
+    if (
+      !run ||
+      (run.status !== "queued" && run.status !== "running")
+    ) {
+      return;
     }
     if (
       run.replicaState !== "ready" ||
