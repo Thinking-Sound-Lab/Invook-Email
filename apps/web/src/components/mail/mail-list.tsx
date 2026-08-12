@@ -167,7 +167,7 @@ export function MailList({
         </div>
       </header>
 
-      <ScrollArea className="min-h-0 flex-1">
+      <ScrollArea type="always" className="min-h-0 flex-1">
         {currentView === "all" && !query ? (
           <>
             {importantThreads.length > 0 ? (
