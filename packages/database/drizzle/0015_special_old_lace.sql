@@ -1,3 +1,58 @@
+LOCK TABLE "mail_sync_runs", "workflow_steps", "gmail_sync_items", "queue_outbox" IN ACCESS EXCLUSIVE MODE;--> statement-breakpoint
+DO $$
+BEGIN
+	IF EXISTS (
+		WITH "ranked_active_runs" AS (
+			SELECT
+				"id",
+				row_number() OVER (
+					PARTITION BY "account_id"
+					ORDER BY
+						CASE WHEN "status" = 'running' THEN 0 ELSE 1 END,
+						"discovery_complete" DESC,
+						"processed_message_count" DESC,
+						"page_count" DESC,
+						"created_at" ASC,
+						"id" ASC
+				) AS "active_rank"
+			FROM "mail_sync_runs"
+			WHERE "status" in ('queued', 'running')
+		)
+		SELECT 1
+		FROM "ranked_active_runs"
+		INNER JOIN "workflow_steps"
+			ON "workflow_steps"."run_id" = "ranked_active_runs"."id"
+		WHERE "ranked_active_runs"."active_rank" > 1
+			AND "workflow_steps"."status" = 'running'
+	) OR EXISTS (
+		WITH "ranked_active_runs" AS (
+			SELECT
+				"id",
+				row_number() OVER (
+					PARTITION BY "account_id"
+					ORDER BY
+						CASE WHEN "status" = 'running' THEN 0 ELSE 1 END,
+						"discovery_complete" DESC,
+						"processed_message_count" DESC,
+						"page_count" DESC,
+						"created_at" ASC,
+						"id" ASC
+				) AS "active_rank"
+			FROM "mail_sync_runs"
+			WHERE "status" in ('queued', 'running')
+		)
+		SELECT 1
+		FROM "ranked_active_runs"
+		INNER JOIN "gmail_sync_items"
+			ON "gmail_sync_items"."run_id" = "ranked_active_runs"."id"
+		WHERE "ranked_active_runs"."active_rank" > 1
+			AND "gmail_sync_items"."status" = 'running'
+	) THEN
+		RAISE EXCEPTION USING
+			MESSAGE = 'Cannot enforce one active Gmail synchronization run while a duplicate run still has executing work.',
+			HINT = 'Drain or stop Gmail workers, then retry the migration. No synchronization run was superseded.';
+	END IF;
+END $$;--> statement-breakpoint
 ALTER TABLE "mail_sync_runs" DROP CONSTRAINT "mail_sync_runs_status_check";--> statement-breakpoint
 WITH "ranked_active_runs" AS (
 	SELECT

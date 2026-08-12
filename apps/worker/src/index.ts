@@ -732,7 +732,7 @@ async function runGmailPage(job: WorkflowStepJob) {
     pageToken: rawPageToken ?? undefined,
   });
   const providerMessageIds = (page.messages ?? []).map((message) => message.id);
-  await recordMailSyncPage({
+  const recorded = await recordMailSyncPage({
     runId,
     userId: account.userId,
     accountId: account.id,
@@ -741,6 +741,7 @@ async function runGmailPage(job: WorkflowStepJob) {
     nextPageToken: page.nextPageToken ?? null,
     providerMessageIds,
   });
+  if (!recorded) return { status: "inactive", runId, pageNumber };
   return {
     status: "complete",
     runId,
@@ -774,8 +775,12 @@ async function runGmailMessage(job: WorkflowStepJob) {
     gmailMessage = await getGmailMessage(credential.accessToken, providerMessageId);
   } catch (error) {
     if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
-    await completeMailSyncItem(runId, providerMessageId);
-    return { status: "gone", runId, providerMessageId };
+    const completed = await completeMailSyncItem(runId, providerMessageId);
+    return {
+      status: completed ? "gone" : "inactive",
+      runId,
+      providerMessageId,
+    };
   }
   await storeMessage({
     userId: account.userId,
@@ -784,8 +789,12 @@ async function runGmailMessage(job: WorkflowStepJob) {
     ingestionMode: "initial",
     message: await parseGmailMessage(gmailMessage),
   });
-  await completeMailSyncItem(runId, providerMessageId);
-  return { status: "complete", runId, providerMessageId };
+  const completed = await completeMailSyncItem(runId, providerMessageId);
+  return {
+    status: completed ? "complete" : "inactive",
+    runId,
+    providerMessageId,
+  };
 }
 
 function gmailPubSubTopic(): string {
@@ -1175,7 +1184,11 @@ async function runGmailFinalize(job: WorkflowStepJob) {
     auditId = repaired.auditId;
   }
 
-  await completeMailSyncRun({ runId, finalHistoryCursor: historyCursor });
+  const completed = await completeMailSyncRun({
+    runId,
+    finalHistoryCursor: historyCursor,
+  });
+  if (!completed) return { status: "inactive", runId };
   await enqueueAnalysisJobsForIndexedAccounts();
   return { status: "complete", runId, historyCursor, auditId };
 }
