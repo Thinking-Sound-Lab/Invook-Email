@@ -279,6 +279,17 @@ export function getGmailMessage(
   );
 }
 
+export function getGmailMessageState(
+  accessToken: string,
+  messageId: string,
+): Promise<GmailMessageState> {
+  const search = new URLSearchParams({ format: "minimal" });
+  return gmailRequest<GmailMessageState>(
+    accessToken,
+    `/users/me/messages/${encodeURIComponent(messageId)}?${search.toString()}`,
+  );
+}
+
 export function listGmailMessages(
   accessToken: string,
   options: {

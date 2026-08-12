@@ -16,6 +16,8 @@ export const queueNames: QueueName[] = [
 
 export type WorkflowJob = Job<WorkflowStepJob, Record<string, unknown>, string>;
 
+export const gmailControlConcurrency = 5;
+
 const completedJobRetention = { age: 7 * 24 * 60 * 60, count: 1_000 };
 const failedJobRetention = { age: 30 * 24 * 60 * 60, count: 5_000 };
 
@@ -66,7 +68,7 @@ export class BullQueueRuntime {
     await gmailMessages.setGlobalConcurrency(5);
     const gmailControl = this.queues.get("gmail-control");
     if (!gmailControl) throw new Error("The Gmail control queue is unavailable.");
-    await gmailControl.setGlobalConcurrency(1);
+    await gmailControl.setGlobalConcurrency(gmailControlConcurrency);
   }
 
   async publish(jobs: OutboxJob[]) {

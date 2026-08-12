@@ -83,6 +83,26 @@ const initialSyncState: AccountSyncState = {
 
 const mailboxPageSize = 100;
 
+export class GmailLabelCatalogMismatchError extends Error {
+  readonly accountId: string;
+  readonly providerMessageId: string;
+  readonly missingProviderLabelIds: string[];
+
+  constructor(input: {
+    accountId: string;
+    providerMessageId: string;
+    missingProviderLabelIds: string[];
+  }) {
+    super(
+      `Gmail label catalog is missing membership for message ${input.providerMessageId}.`,
+    );
+    this.name = "GmailLabelCatalogMismatchError";
+    this.accountId = input.accountId;
+    this.providerMessageId = input.providerMessageId;
+    this.missingProviderLabelIds = input.missingProviderLabelIds;
+  }
+}
+
 export type MailboxCursor = {
   direction: "newer" | "older";
   latestMessageAt: Date;
@@ -1671,37 +1691,46 @@ export async function upsertIndexedMessage(
       messageId = storedMessage?.id;
       if (!messageId) throw new Error("The Gmail message could not be stored.");
 
-      await transaction
-        .delete(gmailMessageLabels)
-        .where(eq(gmailMessageLabels.messageId, messageId));
-      if (input.gmailLabelIds.length > 0) {
-        const providerLabels = await transaction
-          .select({ id: gmailLabels.id })
+      const requestedProviderLabelIds = Array.from(new Set(input.gmailLabelIds));
+      let providerLabels: Array<{ id: string; providerLabelId: string }> = [];
+      if (requestedProviderLabelIds.length > 0) {
+        providerLabels = await transaction
+          .select({
+            id: gmailLabels.id,
+            providerLabelId: gmailLabels.providerLabelId,
+          })
           .from(gmailLabels)
           .where(
             and(
               eq(gmailLabels.accountId, input.accountId),
-              inArray(gmailLabels.providerLabelId, input.gmailLabelIds),
+              inArray(gmailLabels.providerLabelId, requestedProviderLabelIds),
             ),
           );
-        const expectedLabelCount = new Set(input.gmailLabelIds).size;
-        if (
-          input.ingestionMode === "incremental" &&
-          providerLabels.length !== expectedLabelCount
-        ) {
-          throw new Error(
-            `Gmail label catalog is missing membership for message ${input.providerMessageId}.`,
-          );
+        const storedProviderLabelIds = new Set(
+          providerLabels.map((label) => label.providerLabelId),
+        );
+        const missingProviderLabelIds = requestedProviderLabelIds.filter(
+          (providerLabelId) => !storedProviderLabelIds.has(providerLabelId),
+        );
+        if (missingProviderLabelIds.length > 0) {
+          throw new GmailLabelCatalogMismatchError({
+            accountId: input.accountId,
+            providerMessageId: input.providerMessageId,
+            missingProviderLabelIds,
+          });
         }
-        if (providerLabels.length > 0) {
-          await transaction.insert(gmailMessageLabels).values(
-            providerLabels.map((label) => ({
-              accountId: input.accountId,
-              messageId,
-              gmailLabelId: label.id,
-            })),
-          );
-        }
+      }
+      await transaction
+        .delete(gmailMessageLabels)
+        .where(eq(gmailMessageLabels.messageId, messageId));
+      if (providerLabels.length > 0) {
+        await transaction.insert(gmailMessageLabels).values(
+          providerLabels.map((label) => ({
+            accountId: input.accountId,
+            messageId,
+            gmailLabelId: label.id,
+          })),
+        );
       }
       await transaction
         .delete(gmailMessageTombstones)
