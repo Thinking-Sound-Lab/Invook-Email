@@ -43,6 +43,34 @@ export type OutboxJob = WorkflowStepJob & {
   queueName: QueueName;
 };
 
+async function lockMailSyncRun(
+  input: { runId: string; accountId?: string; allowCompleted?: boolean },
+  database: Database,
+) {
+  const allowedStatuses = input.allowCompleted
+    ? (["queued", "running", "complete"] as const)
+    : (["queued", "running"] as const);
+  const conditions = [
+    eq(mailSyncRuns.id, input.runId),
+    inArray(mailSyncRuns.status, allowedStatuses),
+  ];
+  if (input.accountId) {
+    conditions.push(eq(mailSyncRuns.accountId, input.accountId));
+  }
+  const [run] = await database
+    .select({
+      id: mailSyncRuns.id,
+      userId: mailSyncRuns.userId,
+      accountId: mailSyncRuns.accountId,
+      discoveryComplete: mailSyncRuns.discoveryComplete,
+    })
+    .from(mailSyncRuns)
+    .where(and(...conditions))
+    .for("update")
+    .limit(1);
+  return run ?? null;
+}
+
 function queueNameForStepType(stepType: string): QueueName {
   switch (stepType) {
     case "gmail.sync.page":
@@ -144,55 +172,73 @@ export async function createInitialMailSyncRun(
     userId: string;
     accountId: string;
     startingHistoryCursor: string;
-    connectionEventId?: string;
   },
   database: Database = getDatabase(),
 ): Promise<string> {
   return database.transaction(async (transaction) => {
     const executor = transaction as unknown as Database;
-    const idempotencyKey = [
-      "gmail.initial-sync",
-      input.accountId,
-      input.startingHistoryCursor,
-      input.connectionEventId,
-    ]
-      .filter(Boolean)
-      .join(":");
-    const [inserted] = await transaction
-      .insert(mailSyncRuns)
-      .values({
-        userId: input.userId,
-        accountId: input.accountId,
-        startingHistoryCursor: input.startingHistoryCursor,
-        idempotencyKey,
-      })
-      .onConflictDoNothing({ target: mailSyncRuns.idempotencyKey })
-      .returning({ id: mailSyncRuns.id });
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id, userId: connectedAccounts.userId })
+      .from(connectedAccounts)
+      .where(eq(connectedAccounts.id, input.accountId))
+      .for("update")
+      .limit(1);
+    if (!account || account.userId !== input.userId) {
+      throw new Error("The Gmail account is unavailable for synchronization.");
+    }
 
-    let runId = inserted?.id;
+    const [activeRun] = await transaction
+      .select({ id: mailSyncRuns.id })
+      .from(mailSyncRuns)
+      .where(
+        and(
+          eq(mailSyncRuns.accountId, input.accountId),
+          inArray(mailSyncRuns.status, ["queued", "running"]),
+        ),
+      )
+      .limit(1);
+    const idempotencyKey = `gmail.initial-sync:${input.accountId}`;
+    const [inserted] = activeRun
+      ? []
+      : await transaction
+          .insert(mailSyncRuns)
+          .values({
+            userId: input.userId,
+            accountId: input.accountId,
+            startingHistoryCursor: input.startingHistoryCursor,
+            idempotencyKey,
+          })
+          .onConflictDoNothing()
+          .returning({ id: mailSyncRuns.id });
+
+    let runId = activeRun?.id ?? inserted?.id;
+    let active = Boolean(activeRun ?? inserted);
     if (!runId) {
       const [existing] = await transaction
-        .select({ id: mailSyncRuns.id })
+        .select({ id: mailSyncRuns.id, status: mailSyncRuns.status })
         .from(mailSyncRuns)
         .where(eq(mailSyncRuns.idempotencyKey, idempotencyKey))
         .limit(1);
       runId = existing?.id;
+      active = existing?.status === "queued" || existing?.status === "running";
     }
     if (!runId) {
       throw new Error("The Gmail synchronization run could not be created.");
     }
 
-    await enqueueWorkflowStep(
-      {
-        runId,
-        userId: input.userId,
-        accountId: input.accountId,
-        stepType: "gmail.sync.page",
-        payload: { runId, pageNumber: 1, pageToken: null },
-        idempotencyKey: `gmail-page:${runId}:1`,
-      },
-      executor,
-    );
+    if (active) {
+      await enqueueWorkflowStep(
+        {
+          runId,
+          userId: input.userId,
+          accountId: input.accountId,
+          stepType: "gmail.sync.page",
+          payload: { runId, pageNumber: 1, pageToken: null },
+          idempotencyKey: `gmail-page:${runId}:1`,
+        },
+        executor,
+      );
+    }
     return runId;
   });
 }
@@ -248,7 +294,6 @@ export async function enqueueMissingMailSyncRuns(
       userId: account.userId,
       accountId: account.id,
       startingHistoryCursor: account.initialHistoryId,
-      connectionEventId: "gmail-replica-backfill-v1",
     }, database);
     created += 1;
   }
@@ -324,22 +369,27 @@ export async function markWorkflowStepRunning(
       completedAt: null,
       updatedAt: new Date(),
     })
-    .where(and(eq(workflowSteps.id, stepId), ne(workflowSteps.status, "complete")))
+    .where(
+      and(
+        eq(workflowSteps.id, stepId),
+        inArray(workflowSteps.status, ["queued", "running"]),
+      ),
+    )
     .returning({ id: workflowSteps.id });
-  if (step) return { alreadyComplete: false as const, result: null };
+  if (step) return { shouldExecute: true as const, result: null };
 
-  const [completed] = await database
+  const [terminal] = await database
     .select({ status: workflowSteps.status, result: workflowSteps.result })
     .from(workflowSteps)
     .where(eq(workflowSteps.id, stepId))
     .limit(1);
-  if (!completed) throw new Error("The workflow step no longer exists.");
-  if (completed.status !== "complete") {
-    throw new Error("The workflow step could not be started.");
-  }
+  if (!terminal) throw new Error("The workflow step no longer exists.");
   return {
-    alreadyComplete: true as const,
-    result: completed.result ?? {},
+    shouldExecute: false as const,
+    result:
+      terminal.status === "complete"
+        ? terminal.result ?? {}
+        : { status: "inactive" },
   };
 }
 
@@ -348,9 +398,11 @@ export async function completeWorkflowStep(
   result: Record<string, unknown> = {},
   database: Database = getDatabase(),
 ) {
-  await database.transaction(async (transaction) => {
+  return database.transaction(async (transaction) => {
     const [step] = await transaction
       .select({
+        status: workflowSteps.status,
+        runId: workflowSteps.runId,
         stepType: workflowSteps.stepType,
         accountId: workflowSteps.accountId,
         input: workflowSteps.input,
@@ -360,6 +412,20 @@ export async function completeWorkflowStep(
       .for("update")
       .limit(1);
     if (!step) throw new Error("The workflow step no longer exists.");
+    if (step.status !== "queued" && step.status !== "running") return false;
+    if (
+      step.runId &&
+      !(await lockMailSyncRun(
+        {
+          runId: step.runId,
+          accountId: step.accountId ?? undefined,
+          allowCompleted: true,
+        },
+        transaction as unknown as Database,
+      ))
+    ) {
+      return false;
+    }
 
     await transaction
       .update(workflowSteps)
@@ -372,7 +438,7 @@ export async function completeWorkflowStep(
       })
       .where(eq(workflowSteps.id, stepId));
 
-    if (step.stepType !== "gmail.account.cleanup" || !step.accountId) return;
+    if (step.stepType !== "gmail.account.cleanup" || !step.accountId) return true;
     const cleanupId =
       typeof step.input.cleanupId === "string" ? step.input.cleanupId : null;
     if (!cleanupId) {
@@ -392,6 +458,7 @@ export async function completeWorkflowStep(
     await transaction
       .delete(connectedAccounts)
       .where(eq(connectedAccounts.id, step.accountId));
+    return true;
   });
 }
 
@@ -508,9 +575,10 @@ export async function failWorkflowStep(
 
 export async function startMailSyncRun(
   runId: string,
+  accountId: string,
   database: Database = getDatabase(),
-) {
-  await database.transaction(async (transaction) => {
+): Promise<boolean> {
+  return database.transaction(async (transaction) => {
     const [run] = await transaction
       .update(mailSyncRuns)
       .set({
@@ -522,11 +590,12 @@ export async function startMailSyncRun(
       .where(
         and(
           eq(mailSyncRuns.id, runId),
+          eq(mailSyncRuns.accountId, accountId),
           inArray(mailSyncRuns.status, ["queued", "running"]),
         ),
       )
       .returning({ accountId: mailSyncRuns.accountId });
-    if (!run) return;
+    if (!run) return false;
     await transaction
       .update(connectedAccounts)
       .set({
@@ -534,7 +603,26 @@ export async function startMailSyncRun(
         updatedAt: new Date(),
       })
       .where(eq(connectedAccounts.id, run.accountId));
+    return true;
   });
+}
+
+export async function isActiveMailSyncRun(
+  input: { runId: string; accountId: string },
+  database: Database = getDatabase(),
+): Promise<boolean> {
+  const [run] = await database
+    .select({ id: mailSyncRuns.id })
+    .from(mailSyncRuns)
+    .where(
+      and(
+        eq(mailSyncRuns.id, input.runId),
+        eq(mailSyncRuns.accountId, input.accountId),
+        inArray(mailSyncRuns.status, ["queued", "running"]),
+      ),
+    )
+    .limit(1);
+  return Boolean(run);
 }
 
 export async function hasCompletedMailSyncPage(
@@ -562,8 +650,13 @@ export async function recordMailSyncPage(
   },
   database: Database = getDatabase(),
 ) {
-  await database.transaction(async (transaction) => {
+  return database.transaction(async (transaction) => {
     const executor = transaction as unknown as Database;
+    const run = await lockMailSyncRun(
+      { runId: input.runId, accountId: input.accountId },
+      executor,
+    );
+    if (!run || run.userId !== input.userId) return false;
     const [insertedPage] = await transaction
       .insert(gmailSyncPages)
       .values({
@@ -575,7 +668,7 @@ export async function recordMailSyncPage(
       })
       .onConflictDoNothing({ target: [gmailSyncPages.runId, gmailSyncPages.pageNumber] })
       .returning({ id: gmailSyncPages.id });
-    if (!insertedPage) return;
+    if (!insertedPage) return true;
 
     const uniqueMessageIds = Array.from(new Set(input.providerMessageIds));
     const insertedItems = uniqueMessageIds.length
@@ -646,11 +739,13 @@ export async function recordMailSyncPage(
     if (input.nextPageToken === null && insertedItems.length === 0) {
       await enqueueFinalizeIfReady(input.runId, executor);
     }
+    return true;
   });
 }
 
 export async function markMailSyncItemRunning(
   runId: string,
+  accountId: string,
   providerMessageId: string,
   attempt: number,
   database: Database = getDatabase(),
@@ -668,7 +763,14 @@ export async function markMailSyncItemRunning(
       and(
         eq(gmailSyncItems.runId, runId),
         eq(gmailSyncItems.providerMessageId, providerMessageId),
-        ne(gmailSyncItems.status, "complete"),
+        inArray(gmailSyncItems.status, ["queued", "running"]),
+        sql`exists (
+          select 1
+          from ${mailSyncRuns}
+          where ${mailSyncRuns.id} = ${runId}
+            and ${mailSyncRuns.accountId} = ${accountId}
+            and ${mailSyncRuns.status} in ('queued', 'running')
+        )`,
       ),
     )
     .returning({ id: gmailSyncItems.id });
@@ -766,19 +868,23 @@ export async function completeMailSyncItem(
   providerMessageId: string,
   database: Database = getDatabase(),
 ) {
-  await database.transaction(async (transaction) => {
+  return database.transaction(async (transaction) => {
     const executor = transaction as unknown as Database;
-    await transaction
+    if (!(await lockMailSyncRun({ runId }, executor))) return false;
+    const [item] = await transaction
       .update(gmailSyncItems)
       .set({ status: "complete", lastError: null, completedAt: new Date(), updatedAt: new Date() })
       .where(
         and(
           eq(gmailSyncItems.runId, runId),
           eq(gmailSyncItems.providerMessageId, providerMessageId),
-          ne(gmailSyncItems.status, "complete"),
+          inArray(gmailSyncItems.status, ["queued", "running"]),
         ),
-      );
+      )
+      .returning({ id: gmailSyncItems.id });
+    if (!item) return false;
     await enqueueFinalizeIfReady(runId, executor);
+    return true;
   });
 }
 
@@ -794,8 +900,10 @@ export async function failMailSyncItem(
   database: Database = getDatabase(),
 ) {
   const message = toPostgresTextProjection(input.message);
-  await database.transaction(async (transaction) => {
-    await transaction
+  return database.transaction(async (transaction) => {
+    const executor = transaction as unknown as Database;
+    if (!(await lockMailSyncRun({ runId: input.runId }, executor))) return false;
+    const [item] = await transaction
       .update(gmailSyncItems)
       .set({
         status: input.terminal ? "failed" : "queued",
@@ -808,9 +916,11 @@ export async function failMailSyncItem(
         and(
           eq(gmailSyncItems.runId, input.runId),
           eq(gmailSyncItems.providerMessageId, input.providerMessageId),
-          ne(gmailSyncItems.status, "complete"),
+          inArray(gmailSyncItems.status, ["queued", "running"]),
         ),
-      );
+      )
+      .returning({ id: gmailSyncItems.id });
+    if (!item) return false;
     if (input.terminal) {
       await failMailSyncRun(
         {
@@ -818,9 +928,10 @@ export async function failMailSyncItem(
           message,
           reconnectRequired: input.reconnectRequired,
         },
-        transaction as unknown as Database,
+        executor,
       );
     }
+    return true;
   });
 }
 
@@ -837,7 +948,12 @@ export async function failMailSyncRun(
       completedAt: new Date(),
       updatedAt: new Date(),
     })
-    .where(eq(mailSyncRuns.id, input.runId))
+    .where(
+      and(
+        eq(mailSyncRuns.id, input.runId),
+        inArray(mailSyncRuns.status, ["queued", "running"]),
+      ),
+    )
     .returning({ accountId: mailSyncRuns.accountId });
   if (!run) return;
   await database.transaction(async (transaction) => {
@@ -860,7 +976,7 @@ export async function completeMailSyncRun(
   input: { runId: string; finalHistoryCursor: string },
   database: Database = getDatabase(),
 ) {
-  await database.transaction(async (transaction) => {
+  return database.transaction(async (transaction) => {
     const executor = transaction as unknown as Database;
     const [run] = await transaction
       .select({
@@ -878,9 +994,13 @@ export async function completeMailSyncRun(
         eq(gmailReplicaStates.accountId, mailSyncRuns.accountId),
       )
       .where(eq(mailSyncRuns.id, input.runId))
+      .for("update")
       .limit(1);
-    if (!run || run.status === "failed") {
-      throw new Error("The Gmail synchronization run is unavailable for finalization.");
+    if (
+      !run ||
+      (run.status !== "queued" && run.status !== "running")
+    ) {
+      return false;
     }
     if (
       run.replicaState !== "ready" ||
@@ -940,6 +1060,7 @@ export async function completeMailSyncRun(
       ],
       executor,
     );
+    return true;
   });
 }
 

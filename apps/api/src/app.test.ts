@@ -86,6 +86,22 @@ test("an anonymous session remains an honest disconnected state", async () => {
   });
 });
 
+test("signing out clears only the browser session cookie", async () => {
+  const response = await api.inject({
+    method: "POST",
+    url: "/v1/auth/sign-out",
+  });
+
+  const setCookie = response.headers["set-cookie"];
+  const sessionCookie = Array.isArray(setCookie)
+    ? setCookie.join("; ")
+    : setCookie ?? "";
+  assert.equal(response.statusCode, 303);
+  assert.equal(response.headers.location, "http://localhost:3000/");
+  assert.match(sessionCookie, /^invook_session=;/);
+  assert.match(sessionCookie, /Max-Age=0/);
+});
+
 test("authentication runs before JSON body parsing", async () => {
   const response = await api.inject({
     method: "POST",

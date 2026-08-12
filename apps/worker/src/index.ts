@@ -82,6 +82,7 @@ import {
   getGmailReplicaInventory,
   getGmailWatchContext,
   GmailLabelCatalogMismatchError,
+  isActiveMailSyncRun,
   listenForJobNotifications,
   saveLabelBatchResults,
   setLabelAnalysisState,
@@ -795,7 +796,8 @@ async function runGmailPage(job: WorkflowStepJob) {
     return { status: "current", runId, pageNumber };
   }
 
-  await startMailSyncRun(runId);
+  const active = await startMailSyncRun(runId, job.accountId);
+  if (!active) return { status: "inactive", runId, pageNumber };
   const { account, credential } = await getMailSyncContext(job.accountId);
   if (pageNumber === 1) {
     await ensureGmailWatch(account.id, credential.accessToken);
@@ -811,7 +813,7 @@ async function runGmailPage(job: WorkflowStepJob) {
     pageToken: rawPageToken ?? undefined,
   });
   const providerMessageIds = (page.messages ?? []).map((message) => message.id);
-  await recordMailSyncPage({
+  const recorded = await recordMailSyncPage({
     runId,
     userId: account.userId,
     accountId: account.id,
@@ -820,6 +822,7 @@ async function runGmailPage(job: WorkflowStepJob) {
     nextPageToken: page.nextPageToken ?? null,
     providerMessageIds,
   });
+  if (!recorded) return { status: "inactive", runId, pageNumber };
   return {
     status: "complete",
     runId,
@@ -840,6 +843,7 @@ async function runGmailMessage(job: WorkflowStepJob) {
   );
   const shouldProcess = await markMailSyncItemRunning(
     runId,
+    job.accountId,
     providerMessageId,
     job.attempts,
   );
@@ -852,8 +856,12 @@ async function runGmailMessage(job: WorkflowStepJob) {
     gmailMessage = await getGmailMessage(credential.accessToken, providerMessageId);
   } catch (error) {
     if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
-    await completeMailSyncItem(runId, providerMessageId);
-    return { status: "gone", runId, providerMessageId };
+    const completed = await completeMailSyncItem(runId, providerMessageId);
+    return {
+      status: completed ? "gone" : "inactive",
+      runId,
+      providerMessageId,
+    };
   }
   await storeMessage({
     accessToken: credential.accessToken,
@@ -863,8 +871,12 @@ async function runGmailMessage(job: WorkflowStepJob) {
     ingestionMode: "initial",
     message: await parseGmailMessage(gmailMessage),
   });
-  await completeMailSyncItem(runId, providerMessageId);
-  return { status: "complete", runId, providerMessageId };
+  const completed = await completeMailSyncItem(runId, providerMessageId);
+  return {
+    status: completed ? "complete" : "inactive",
+    runId,
+    providerMessageId,
+  };
 }
 
 function gmailPubSubTopic(): string {
@@ -1263,6 +1275,9 @@ async function runGmailFinalize(job: WorkflowStepJob) {
     throw new Error("The Gmail finalization job is missing its synchronization run.");
   }
   const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
+  if (!(await isActiveMailSyncRun({ runId, accountId: job.accountId }))) {
+    return { status: "inactive", runId };
+  }
   const replica = await getGmailReplicaContext(job.accountId);
   if (!replica) throw new Error("The Gmail replica state was not found.");
   const { account, credential } = await getMailSyncContext(job.accountId);
@@ -1320,7 +1335,11 @@ async function runGmailFinalize(job: WorkflowStepJob) {
     auditId = repaired.auditId;
   }
 
-  await completeMailSyncRun({ runId, finalHistoryCursor: historyCursor });
+  const completed = await completeMailSyncRun({
+    runId,
+    finalHistoryCursor: historyCursor,
+  });
+  if (!completed) return { status: "inactive", runId };
   await enqueueAnalysisJobsForIndexedAccounts();
   return { status: "complete", runId, historyCursor, auditId };
 }
@@ -3031,7 +3050,7 @@ async function executeWorkflowJob(
     maxAttempts: bullJob.data.maxAttempts,
   };
   const started = await markWorkflowStepRunning(job.id, job.attempts);
-  if (started.alreadyComplete) return started.result;
+  if (!started.shouldExecute) return started.result;
   try {
     const result = await handler(job);
     await completeWorkflowStep(job.id, result);

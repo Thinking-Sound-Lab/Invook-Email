@@ -2,7 +2,7 @@
 
 **Status:** Implemented contract
 **Canonical provider:** Gmail
-**Updated:** August 12, 2026
+**Updated:** August 13, 2026
 
 ## Scope
 
@@ -40,6 +40,12 @@ An account is not readable by indexing or Memory workflows until all of these st
 8. Mark the replica ready, then enqueue search indexing and Memory extraction.
 
 There is no finalization path that jumps directly to the latest profile cursor.
+
+## Authentication lifecycle
+
+Browser authentication and Gmail replication are separate lifecycles. Signing out clears only the browser session. A later OAuth callback for the same Google identity refreshes profile and encrypted credential data while preserving the account ID, active initial run, replica state, applied history cursor, audit state, watch state, sync stages, and stored mailbox.
+
+Returning authentication never creates another initial run or registers a replacement watch. If the replica is ready and Gmail reports a different current history ID, it durably queues catch-up; the worker rereads the stored cursor, and a provider `404` enters the existing expired-history repair workflow. Account-scoped authentication transactions serialize concurrent callbacks, while PostgreSQL permits only one queued or running initial sync per account. Migration cutover takes exclusive workflow-table locks before ranking duplicates. It aborts without superseding anything if a losing run still has executing work, so operators can drain or stop Gmail workers and retry safely. Otherwise it marks duplicate active runs and their pending work as superseded without changing the surviving replica state.
 
 ## Continuous synchronization
 

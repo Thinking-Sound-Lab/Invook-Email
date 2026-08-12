@@ -55,7 +55,11 @@ Google OAuth must:
 - request the Gmail permissions required by the product;
 - return to `/mail` after a valid callback;
 - encrypt refresh and access credentials before persistence;
-- capture H0, register a Gmail watch, and queue full-mailbox replication without blocking the callback.
+- on first connection, capture H0, register a Gmail watch, and create exactly one durable full-mailbox replication run without blocking the callback;
+- on returning authentication, refresh the session, profile, and encrypted credentials without resetting replica, cursor, audit, watch, sync-stage, or mailbox state;
+- keep an existing initial replication run, or enqueue stored-cursor history catch-up for a ready replica only when Gmail reports newer history.
+
+Signing out clears only the browser session cookie. It does not revoke Google credentials, stop the Gmail watch, cancel durable work, or change the mailbox replica. Account deletion remains the explicit destructive lifecycle.
 
 The first connection follows every Gmail result page with Spam and Trash included, stores exact raw MIME and attachment bytes in S3-compatible storage, and stores complete headers, text/HTML, normalized provider labels, Gmail Draft resources, tombstones, cursor/watch state, and audit state in PostgreSQL. It replays history from H0 and passes a completeness audit before indexing or Memory can start. Authenticated Pub/Sub pushes durably queue serialized history catch-up from the stored cursor. An expired cursor triggers watch renewal, full snapshot repair, replay, label/draft refresh, and another audit. Gmail remains canonical. The detailed boundary is defined in `docs/gmail-replica-contract.md`.
 
