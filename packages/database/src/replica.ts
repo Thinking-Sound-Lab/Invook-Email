@@ -10,6 +10,7 @@ import {
   gmailAccountCleanups,
   gmailDrafts,
   gmailLabels,
+  gmailMessageLabels,
   gmailMessageTombstones,
   gmailPushEvents,
   gmailReplicaAudits,
@@ -755,10 +756,17 @@ export async function getGmailReplicaInventory(
   accountId: string,
   database: Database = getDatabase(),
 ) {
-  const [messageRows, attachmentRows, labelRows, draftRows, tombstoneRows] =
-    await Promise.all([
+  const [
+    messageRows,
+    attachmentRows,
+    labelRows,
+    messageLabelRows,
+    draftRows,
+    tombstoneRows,
+  ] = await Promise.all([
       database
         .select({
+          id: messages.id,
           providerMessageId: messages.providerMessageId,
           rawObjectKey: messages.rawObjectKey,
           checksumSha256: messages.rawChecksumSha256,
@@ -781,6 +789,15 @@ export async function getGmailReplicaInventory(
         .from(gmailLabels)
         .where(eq(gmailLabels.accountId, accountId)),
       database
+        .select({
+          messageId: gmailMessageLabels.messageId,
+          providerLabelId: gmailLabels.providerLabelId,
+        })
+        .from(gmailMessageLabels)
+        .innerJoin(messages, eq(messages.id, gmailMessageLabels.messageId))
+        .innerJoin(gmailLabels, eq(gmailLabels.id, gmailMessageLabels.gmailLabelId))
+        .where(eq(gmailMessageLabels.accountId, accountId)),
+      database
         .select({ providerDraftId: gmailDrafts.providerDraftId })
         .from(gmailDrafts)
         .where(eq(gmailDrafts.accountId, accountId)),
@@ -793,9 +810,25 @@ export async function getGmailReplicaInventory(
         .where(eq(gmailMessageTombstones.accountId, accountId)),
     ]);
 
+  const messageLabelMemberships = new Map(
+    messageRows.map((message) => [
+      message.id,
+      {
+        providerMessageId: message.providerMessageId,
+        providerLabelIds: [] as string[],
+      },
+    ]),
+  );
+  for (const membership of messageLabelRows) {
+    messageLabelMemberships
+      .get(membership.messageId)
+      ?.providerLabelIds.push(membership.providerLabelId);
+  }
+
   return {
     providerMessageIds: messageRows.map((message) => message.providerMessageId),
     providerLabelIds: labelRows.map((label) => label.providerLabelId),
+    messageLabelMemberships: Array.from(messageLabelMemberships.values()),
     providerDraftIds: draftRows.map((draft) => draft.providerDraftId),
     objects: [
       ...messageRows.map((message) => ({

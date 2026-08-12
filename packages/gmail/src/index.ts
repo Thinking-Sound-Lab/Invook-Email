@@ -6,6 +6,7 @@ export {
   getGmailDraft,
   getGmailLabel,
   getGmailMessage,
+  getGmailMessageState,
   getGmailProfile,
   gmailHistoryChanges,
   GmailApiError,

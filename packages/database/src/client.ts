@@ -8,13 +8,14 @@ export type Database = PostgresJsDatabase<typeof schema>;
 type DatabaseConnection = {
   url: string;
   database: Database;
+  client: ReturnType<typeof postgres>;
 };
 
 const databaseState = globalThis as typeof globalThis & {
   invookDatabaseConnection?: DatabaseConnection;
 };
 
-export function createDatabase(databaseUrl: string): Database {
+function openDatabase(databaseUrl: string): DatabaseConnection {
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required for application data access.");
   }
@@ -24,7 +25,15 @@ export function createDatabase(databaseUrl: string): Database {
     prepare: false,
   });
 
-  return drizzle(client, { schema });
+  return {
+    url: databaseUrl,
+    database: drizzle(client, { schema }),
+    client,
+  };
+}
+
+export function createDatabase(databaseUrl: string): Database {
+  return openDatabase(databaseUrl).database;
 }
 
 export function getDatabase(): Database {
@@ -38,9 +47,34 @@ export function getDatabase(): Database {
     return existing.database;
   }
 
-  const database = createDatabase(databaseUrl);
-  databaseState.invookDatabaseConnection = { url: databaseUrl, database };
-  return database;
+  const connection = openDatabase(databaseUrl);
+  databaseState.invookDatabaseConnection = connection;
+  return connection.database;
+}
+
+export async function withGmailAccountControlLock<T>(
+  accountId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lockName = `gmail-control:${accountId}`;
+  getDatabase();
+  const client = databaseState.invookDatabaseConnection?.client;
+  if (!client) throw new Error("The database connection is unavailable.");
+  const connection = await client.reserve();
+  let locked = false;
+  try {
+    await connection`select pg_advisory_lock(hashtextextended(${lockName}, 0))`;
+    locked = true;
+    return await operation();
+  } finally {
+    try {
+      if (locked) {
+        await connection`select pg_advisory_unlock(hashtextextended(${lockName}, 0))`;
+      }
+    } finally {
+      connection.release();
+    }
+  }
 }
 
 async function listenForDatabaseNotifications(

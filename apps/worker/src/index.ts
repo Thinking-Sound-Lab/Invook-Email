@@ -81,6 +81,7 @@ import {
   getGmailReplicaContext,
   getGmailReplicaInventory,
   getGmailWatchContext,
+  GmailLabelCatalogMismatchError,
   isActiveMailSyncRun,
   listenForJobNotifications,
   saveLabelBatchResults,
@@ -118,6 +119,7 @@ import {
   startMailSyncRun,
   updateStoredCredential,
   upsertMailboxMessage,
+  withGmailAccountControlLock,
   type ClaimedJob,
   type GoogleCredential,
   type IndexedMessage,
@@ -129,6 +131,7 @@ import {
   gmailHistoryChanges,
   getGmailDraft,
   getGmailMessage,
+  getGmailMessageState,
   getGmailProfile,
   GmailApiError,
   isMemoryEligible,
@@ -144,7 +147,15 @@ import {
 } from "@invook/gmail";
 import { createObjectStorage } from "@invook/object-storage";
 
-import { BullQueueRuntime, type WorkflowJob } from "./queue";
+import {
+  BullQueueRuntime,
+  gmailControlConcurrency,
+  type WorkflowJob,
+} from "./queue";
+import {
+  findGmailLabelMembershipMismatches,
+  type GmailLabelMembershipSnapshot,
+} from "./gmail-label-membership";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
@@ -346,8 +357,32 @@ async function prepareMessage(options: {
   };
 }
 
-async function storeMessage(options: Parameters<typeof prepareMessage>[0]) {
-  return upsertMailboxMessage(await prepareMessage(options));
+async function withRefreshedGmailLabelCatalog<T>(
+  options: { accessToken: string; userId: string; accountId: string },
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!(error instanceof GmailLabelCatalogMismatchError)) throw error;
+    await syncGmailLabelCatalog(options);
+    return operation();
+  }
+}
+
+async function storeMessage(
+  options: Parameters<typeof prepareMessage>[0] & { accessToken: string },
+) {
+  const { accessToken, ...messageOptions } = options;
+  const message = await prepareMessage(messageOptions);
+  return withRefreshedGmailLabelCatalog(
+    {
+      accessToken,
+      userId: messageOptions.userId,
+      accountId: messageOptions.accountId,
+    },
+    () => upsertMailboxMessage(message),
+  );
 }
 
 async function syncGmailLabelCatalog(options: {
@@ -409,6 +444,7 @@ async function syncGmailDraftResources(options: {
       const draft = await getGmailDraft(options.accessToken, reference.id);
       const parsed = await parseGmailMessage(draft.message);
       await storeMessage({
+        accessToken: options.accessToken,
         userId: options.userId,
         accountId: options.accountId,
         accountEmail: options.accountEmail,
@@ -474,6 +510,7 @@ async function syncMailbox(options: {
         if (!gmailMessage) continue;
         providerMessageIds.add(gmailMessage.id);
         const stored = await storeMessage({
+          accessToken: options.accessToken,
           userId: options.userId,
           accountId: options.accountId,
           accountEmail: options.accountEmail,
@@ -514,6 +551,42 @@ async function listProviderMessageIds(accessToken: string): Promise<string[]> {
     pageToken = page.nextPageToken;
   } while (pageToken);
   return messageIds;
+}
+
+async function getProviderMessageLabelMemberships(
+  accessToken: string,
+  providerMessageIds: string[],
+): Promise<{
+  memberships: GmailLabelMembershipSnapshot[];
+  unavailableMessageIds: string[];
+}> {
+  const memberships: GmailLabelMembershipSnapshot[] = [];
+  const unavailableMessageIds: string[] = [];
+  for (let start = 0; start < providerMessageIds.length; start += 5) {
+    const batch = providerMessageIds.slice(start, start + 5);
+    const states = await Promise.all(
+      batch.map(async (providerMessageId) => {
+        try {
+          return await getGmailMessageState(accessToken, providerMessageId);
+        } catch (error) {
+          if (error instanceof GmailApiError && error.status === 404) return null;
+          throw error;
+        }
+      }),
+    );
+    states.forEach((state, index) => {
+      if (!state) {
+        const providerMessageId = batch[index];
+        if (providerMessageId) unavailableMessageIds.push(providerMessageId);
+        return;
+      }
+      memberships.push({
+        providerMessageId: state.id,
+        providerLabelIds: state.labelIds ?? [],
+      });
+    });
+  }
+  return { memberships, unavailableMessageIds };
 }
 
 async function findObjectFailures(
@@ -673,17 +746,25 @@ async function applyHistoryRange(options: {
     }
   }
 
-  const applied = await applyGmailHistoryBatch({
-    userId: options.userId,
-    accountId: options.accountId,
-    expectedCursor: options.expectedCursor,
-    nextCursor: historyId,
-    messages,
-    deletedMessageIds,
-    pushEventId: options.pushEventId,
-    stateAfterApply: options.stateAfterApply,
-    markStoredPushEventsProcessed: options.markStoredPushEventsProcessed,
-  });
+  const applied = await withRefreshedGmailLabelCatalog(
+    {
+      accessToken: options.accessToken,
+      userId: options.userId,
+      accountId: options.accountId,
+    },
+    () =>
+      applyGmailHistoryBatch({
+        userId: options.userId,
+        accountId: options.accountId,
+        expectedCursor: options.expectedCursor,
+        nextCursor: historyId,
+        messages,
+        deletedMessageIds,
+        pushEventId: options.pushEventId,
+        stateAfterApply: options.stateAfterApply,
+        markStoredPushEventsProcessed: options.markStoredPushEventsProcessed,
+      }),
+  );
   return { ...applied, historyId };
 }
 
@@ -783,6 +864,7 @@ async function runGmailMessage(job: WorkflowStepJob) {
     };
   }
   await storeMessage({
+    accessToken: credential.accessToken,
     userId: account.userId,
     accountId: account.id,
     accountEmail: account.email,
@@ -884,6 +966,7 @@ async function runReplicaAudit(options: {
       for (const gmailMessage of gmailMessages) {
         if (!gmailMessage) continue;
         await storeMessage({
+          accessToken: options.accessToken,
           userId: options.userId,
           accountId: options.accountId,
           accountEmail: options.accountEmail,
@@ -896,7 +979,7 @@ async function runReplicaAudit(options: {
       await deleteIndexedMessage({ accountId: options.accountId, providerMessageId });
     }
 
-    const providerLabels = await syncGmailLabelCatalog({
+    let providerLabels = await syncGmailLabelCatalog({
       accessToken: options.accessToken,
       userId: options.userId,
       accountId: options.accountId,
@@ -927,6 +1010,7 @@ async function runReplicaAudit(options: {
       );
       for (const gmailMessage of gmailMessages) {
         await storeMessage({
+          accessToken: options.accessToken,
           userId: options.userId,
           accountId: options.accountId,
           accountEmail: options.accountEmail,
@@ -939,6 +1023,66 @@ async function runReplicaAudit(options: {
       inventory = await getGmailReplicaInventory(options.accountId);
       objectFailures = await findObjectFailures(inventory.objects);
     }
+
+    const providerMembershipSnapshot = await getProviderMessageLabelMemberships(
+      options.accessToken,
+      repairedProviderMessageIds,
+    );
+    const membershipMismatches = findGmailLabelMembershipMismatches(
+      providerMembershipSnapshot.memberships,
+      inventory.messageLabelMemberships,
+    );
+    const unavailableMembershipMessageIds = new Set(
+      providerMembershipSnapshot.unavailableMessageIds,
+    );
+    for (let start = 0; start < membershipMismatches.length; start += 5) {
+      const batch = membershipMismatches.slice(start, start + 5);
+      const gmailMessages = await Promise.all(
+        batch.map(async (mismatch) => {
+          try {
+            return await getGmailMessage(
+              options.accessToken,
+              mismatch.providerMessageId,
+            );
+          } catch (error) {
+            if (error instanceof GmailApiError && error.status === 404) return null;
+            throw error;
+          }
+        }),
+      );
+      for (const [index, gmailMessage] of gmailMessages.entries()) {
+        if (!gmailMessage) {
+          const mismatch = batch[index];
+          if (mismatch) {
+            unavailableMembershipMessageIds.add(mismatch.providerMessageId);
+          }
+          continue;
+        }
+        await storeMessage({
+          accessToken: options.accessToken,
+          userId: options.userId,
+          accountId: options.accountId,
+          accountEmail: options.accountEmail,
+          message: await parseGmailMessage(gmailMessage),
+          ingestionMode,
+        });
+      }
+    }
+    if (membershipMismatches.length > 0) {
+      providerLabels = await syncGmailLabelCatalog({
+        accessToken: options.accessToken,
+        userId: options.userId,
+        accountId: options.accountId,
+      });
+      inventory = await getGmailReplicaInventory(options.accountId);
+    }
+    const remainingMembershipMismatches = findGmailLabelMembershipMismatches(
+      providerMembershipSnapshot.memberships,
+      inventory.messageLabelMemberships,
+    ).filter(
+      (mismatch) =>
+        !unavailableMembershipMessageIds.has(mismatch.providerMessageId),
+    );
 
     const labelIds = new Set(inventory.providerLabelIds);
     const providerLabelIds = new Set(providerLabels.map((label) => label.id));
@@ -955,7 +1099,9 @@ async function runReplicaAudit(options: {
       extraLabelIds.length +
       missingDraftIds.length +
       extraDraftIds.length +
-      objectFailures.length;
+      objectFailures.length +
+      remainingMembershipMismatches.length +
+      unavailableMembershipMessageIds.size;
     const repaired = await completeGmailReplicaAudit({
       auditId,
       providerMessageIds: repairedProviderMessageIds,
@@ -964,8 +1110,13 @@ async function runReplicaAudit(options: {
       details: {
         repairedMissingMessageCount: missingMessageIds.length,
         repairedExtraMessageCount: extraMessageIds.length,
+        repairedMessageLabelMembershipCount: membershipMismatches.length,
         missingLabelIds,
         extraLabelIds,
+        messageLabelMembershipMismatches: remainingMembershipMismatches,
+        unavailableMembershipMessageIds: Array.from(
+          unavailableMembershipMessageIds,
+        ),
         missingDraftIds,
         extraDraftIds,
         objectFailures,
@@ -2914,11 +3065,16 @@ async function executeWorkflowJob(
 }
 
 function processGmailPages(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, async (job) => {
-    if (job.stepType === "gmail.sync.page") return runGmailPage(job);
-    if (job.stepType === "gmail.sync.finalize") return runGmailFinalize(job);
-    throw new Error(`Unsupported Gmail page step: ${job.stepType}`);
-  });
+  const execute = () =>
+    executeWorkflowJob(bullJob, async (job) => {
+      if (job.stepType === "gmail.sync.page") return runGmailPage(job);
+      if (job.stepType === "gmail.sync.finalize") return runGmailFinalize(job);
+      throw new Error(`Unsupported Gmail page step: ${job.stepType}`);
+    });
+  const accountId = bullJob.data.accountId;
+  return bullJob.name === "gmail.sync.finalize" && accountId
+    ? withGmailAccountControlLock(accountId, execute)
+    : execute();
 }
 
 function processGmailMessage(bullJob: WorkflowJob) {
@@ -2926,17 +3082,21 @@ function processGmailMessage(bullJob: WorkflowJob) {
 }
 
 function processGmailControl(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, async (job) => {
-    if (job.stepType === "gmail.history.catchup") {
-      return runGmailHistoryCatchup(job);
-    }
-    if (job.stepType === "gmail.watch.renew") return runGmailWatchRenewal(job);
-    if (job.stepType === "gmail.replica.audit") return runGmailReplicaAudit(job);
-    if (job.stepType === "gmail.account.cleanup") {
-      return runGmailAccountCleanup(job);
-    }
-    throw new Error(`Unsupported Gmail control step: ${job.stepType}`);
-  });
+  const execute = () =>
+    executeWorkflowJob(bullJob, async (job) => {
+      if (!job.accountId) throw new Error("The Gmail control step has no account.");
+      if (job.stepType === "gmail.history.catchup") {
+        return runGmailHistoryCatchup(job);
+      }
+      if (job.stepType === "gmail.watch.renew") return runGmailWatchRenewal(job);
+      if (job.stepType === "gmail.replica.audit") return runGmailReplicaAudit(job);
+      if (job.stepType === "gmail.account.cleanup") {
+        return runGmailAccountCleanup(job);
+      }
+      throw new Error(`Unsupported Gmail control step: ${job.stepType}`);
+    });
+  const accountId = bullJob.data.accountId;
+  return accountId ? withGmailAccountControlLock(accountId, execute) : execute();
 }
 
 function processIndexingBatch(bullJob: WorkflowJob) {
@@ -2979,7 +3139,10 @@ function startBullWorkers(runtime: BullQueueRuntime) {
   runtime.createWorker(
     "gmail-control",
     processGmailControl,
-    withFailureReconciliation,
+    {
+      ...withFailureReconciliation,
+      concurrency: gmailControlConcurrency,
+    },
   );
   if (isAiConfigured()) {
     runtime.createWorker(
