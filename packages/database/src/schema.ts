@@ -13,7 +13,10 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  vector,
 } from "drizzle-orm/pg-core";
+
+import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 
 import type { AccountSyncState } from "./types";
 
@@ -26,22 +29,6 @@ const timestampWithTimezone = (name: string) =>
 const searchVector = customType<{ data: string }>({
   dataType() {
     return "tsvector";
-  },
-});
-
-const embeddingVector = customType<{ data: number[]; driverData: string }>({
-  dataType() {
-    return "vector";
-  },
-  toDriver(value) {
-    return `[${value.join(",")}]`;
-  },
-  fromDriver(value) {
-    return value
-      .slice(1, -1)
-      .split(",")
-      .filter(Boolean)
-      .map(Number);
   },
 });
 
@@ -316,7 +303,7 @@ export const messageEmbeddings = pgTable(
       .$type<"pending" | "submitted" | "complete" | "failed">()
       .notNull()
       .default("pending"),
-    embedding: embeddingVector("embedding"),
+    embedding: vector("embedding", { dimensions: MAIL_EMBEDDING_DIMENSIONS }),
     providerBatchId: text("provider_batch_id"),
     lastError: text("last_error"),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
@@ -337,6 +324,9 @@ export const messageEmbeddings = pgTable(
       table.indexVersion,
       table.status,
     ),
+    index("message_embeddings_embedding_hnsw_idx")
+      .using("hnsw", table.embedding.op("vector_cosine_ops"))
+      .where(sql`${table.status} = 'complete'`),
     check("message_embeddings_dimensions_check", sql`${table.dimensions} > 0`),
     check(
       "message_embeddings_status_check",
@@ -584,6 +574,80 @@ export const workflowSteps = pgTable(
   ],
 );
 
+export const embeddingBatchSubmissions = pgTable(
+  "embedding_batch_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workflowStepId: uuid("workflow_step_id")
+      .notNull()
+      .references(() => workflowSteps.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    provider: text("provider").$type<"openai">().notNull().default("openai"),
+    providerBatchId: text("provider_batch_id"),
+    inputFileId: text("input_file_id"),
+    modelId: text("model_id").notNull(),
+    dimensions: integer("dimensions").notNull(),
+    indexVersion: integer("index_version").notNull(),
+    batchAttempt: integer("batch_attempt").notNull().default(1),
+    hasMore: boolean("has_more").notNull(),
+    requestCount: integer("request_count").notNull(),
+    manifest: jsonb("manifest")
+      .$type<Array<{ key: string; messageId: string; contentHash: string }>>()
+      .notNull(),
+    status: text("status")
+      .$type<"preparing" | "submitted" | "complete" | "failed">()
+      .notNull()
+      .default("preparing"),
+    providerState: text("provider_state"),
+    lastError: text("last_error"),
+    submittedAt: timestampWithTimezone("submitted_at"),
+    completedAt: timestampWithTimezone("completed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("embedding_batch_submissions_workflow_step_idx").on(
+      table.workflowStepId,
+    ),
+    uniqueIndex("embedding_batch_submissions_provider_batch_idx")
+      .on(table.provider, table.providerBatchId)
+      .where(sql`${table.providerBatchId} is not null`),
+    uniqueIndex("embedding_batch_submissions_account_active_idx")
+      .on(table.accountId)
+      .where(sql`${table.status} in ('preparing', 'submitted')`),
+    index("embedding_batch_submissions_account_status_idx").on(
+      table.accountId,
+      table.status,
+      table.createdAt,
+    ),
+    check("embedding_batch_submissions_provider_check", sql`${table.provider} = 'openai'`),
+    check(
+      "embedding_batch_submissions_status_check",
+      sql`${table.status} in ('preparing', 'submitted', 'complete', 'failed')`,
+    ),
+    check(
+      "embedding_batch_submissions_dimensions_check",
+      sql`${table.dimensions} = ${sql.raw(String(MAIL_EMBEDDING_DIMENSIONS))}`,
+    ),
+    check(
+      "embedding_batch_submissions_request_count_check",
+      sql`${table.requestCount} > 0`,
+    ),
+    check(
+      "embedding_batch_submissions_batch_attempt_check",
+      sql`${table.batchAttempt} > 0`,
+    ),
+  ],
+);
+
 export const queueOutbox = pgTable(
   "queue_outbox",
   {
@@ -595,7 +659,6 @@ export const queueOutbox = pgTable(
       .$type<
         | "gmail-pages"
         | "gmail-messages"
-        | "mail-classification"
         | "mail-indexing-batch"
         | "mail-indexing-live"
         | "mail-memory-submit"
@@ -620,7 +683,7 @@ export const queueOutbox = pgTable(
     check("queue_outbox_publish_attempts_check", sql`${table.publishAttempts} >= 0`),
     check(
       "queue_outbox_queue_name_check",
-      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'mail-classification', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback')`,
+      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback')`,
     ),
   ],
 );

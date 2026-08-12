@@ -57,6 +57,34 @@
       "when": 1786445243818,
       "tag": "0007_glamorous_winter_soldier",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786470313758,
+      "tag": "0008_ambiguous_hellfire_club",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786470433068,
+      "tag": "0009_wakeful_epoch",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786470980614,
+      "tag": "0010_backfill_embedding_batch_submissions",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786515824043,
+      "tag": "0011_faithful_corsair",
+      "breakpoints": true
     }
   ]
 }

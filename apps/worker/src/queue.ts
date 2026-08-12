@@ -6,7 +6,6 @@ import type { OutboxJob, QueueName, WorkflowStepJob } from "@invook/database";
 export const queueNames: QueueName[] = [
   "gmail-pages",
   "gmail-messages",
-  "mail-classification",
   "mail-indexing-batch",
   "mail-indexing-live",
   "mail-memory-submit",
@@ -15,6 +14,9 @@ export const queueNames: QueueName[] = [
 ];
 
 export type WorkflowJob = Job<WorkflowStepJob, Record<string, unknown>, string>;
+
+const completedJobRetention = { age: 7 * 24 * 60 * 60, count: 1_000 };
+const failedJobRetention = { age: 30 * 24 * 60 * 60, count: 5_000 };
 
 type WorkerRegistrationOptions = {
   concurrency?: number;
@@ -90,6 +92,8 @@ export class BullQueueRuntime {
           opts: {
             jobId: job.id,
             attempts: Math.max(job.maxAttempts - job.attempts, 1),
+            removeOnComplete: completedJobRetention,
+            removeOnFail: failedJobRetention,
           },
         })),
       );

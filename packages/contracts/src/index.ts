@@ -1,5 +1,7 @@
 export type AccountSyncStage = "pending" | "running" | "complete" | "failed";
 
+export const MAIL_EMBEDDING_DIMENSIONS = 1_536;
+
 export type AccountSyncState = {
   mailSync: AccountSyncStage;
   indexing: AccountSyncStage;

@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 
-import type { MailboxView } from "@invook/contracts";
+import {
+  MAIL_EMBEDDING_DIMENSIONS,
+  type MailboxView,
+} from "@invook/contracts";
 import {
   and,
   asc,
@@ -24,6 +27,7 @@ import {
   auditEvents,
   connectedAccounts,
   drafts,
+  embeddingBatchSubmissions,
   memoryDeletions,
   memoryEntries,
   messageAttachments,
@@ -414,6 +418,14 @@ export async function searchMailbox(
 ) {
   const query = input.query.trim();
   if (!query) return [];
+  if (
+    input.embedding &&
+    input.embedding.dimensions !== MAIL_EMBEDDING_DIMENSIONS
+  ) {
+    throw new Error(
+      `Mailbox search embeddings must have ${MAIL_EMBEDDING_DIMENSIONS} dimensions.`,
+    );
+  }
   const limit = Math.max(1, Math.min(input.limit ?? 20, 50));
   const candidateLimit = Math.max(limit * 3, 30);
   const tsQuery = sql`websearch_to_tsquery('simple', ${query})`;
@@ -485,7 +497,7 @@ export async function searchMailbox(
           bodyText: messages.bodyText,
           sender: messages.sender,
           sentAt: messages.sentAt,
-          semanticSimilarity: sql<number>`1 - (${messageEmbeddings.embedding} <=> ${`[${input.embedding.values.join(",")}]`}::vector)`,
+          semanticSimilarity: sql<number>`1 - (${messageEmbeddings.embedding} <=> ${`[${input.embedding.values.join(",")}]`}::vector(1536))`,
         })
         .from(messageEmbeddings)
         .innerJoin(messages, eq(messages.id, messageEmbeddings.messageId))
@@ -502,7 +514,7 @@ export async function searchMailbox(
         )
         .orderBy(
           asc(
-            sql`${messageEmbeddings.embedding} <=> ${`[${input.embedding.values.join(",")}]`}::vector`,
+            sql`${messageEmbeddings.embedding} <=> ${`[${input.embedding.values.join(",")}]`}::vector(1536)`,
           ),
         )
         .limit(candidateLimit)
@@ -1032,8 +1044,11 @@ export async function upsertMailboxMessage(
   database: Database = getDatabase(),
 ): Promise<{ messageId: string; threadId: string }> {
   return database.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerThreadId}`}, 0))`,
+    );
     const [existingThread] = await transaction
-      .select({ id: threads.id, latestMessageAt: threads.latestMessageAt })
+      .select({ id: threads.id })
       .from(threads)
       .where(
         and(
@@ -1076,21 +1091,6 @@ export async function upsertMailboxMessage(
           .limit(1);
         threadId = concurrentThread?.id;
       }
-    } else if (
-      !existingThread.latestMessageAt ||
-      input.sentAt.getTime() > existingThread.latestMessageAt.getTime()
-    ) {
-      await transaction
-        .update(threads)
-        .set({
-          subject: input.subject,
-          snippet: input.snippet,
-          participants: input.participants,
-          labelIds: input.labelIds,
-          latestMessageAt: input.sentAt,
-          updatedAt: new Date(),
-        })
-        .where(eq(threads.id, threadId));
     }
 
     if (!threadId) throw new Error("The Gmail thread could not be stored.");
@@ -1127,6 +1127,26 @@ export async function upsertMailboxMessage(
       .returning({ id: messages.id });
 
     if (!storedMessage) throw new Error("The Gmail message could not be stored.");
+
+    await transaction
+      .update(threads)
+      .set({
+        subject: input.subject,
+        snippet: input.snippet,
+        participants: input.participants,
+        labelIds: input.labelIds,
+        latestMessageAt: input.sentAt,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(threads.id, threadId),
+          or(
+            isNull(threads.latestMessageAt),
+            sql`${threads.latestMessageAt} <= ${input.sentAt}`,
+          ),
+        ),
+      );
 
     await transaction
       .delete(messageAttachments)
@@ -1216,119 +1236,6 @@ export async function countMemoryEligibleMessages(
 }
 
 type InvookLabelKey = "important" | "travel" | "pitch" | "newsletter";
-
-export async function getThreadsForClassification(
-  accountId: string,
-  analysisVersion = MAIL_CLASSIFICATION_VERSION,
-  limit = 12,
-  database: Database = getDatabase(),
-) {
-  const candidateThreads = await database
-    .select({
-      id: threads.id,
-      subject: threads.subject,
-      participants: threads.participants,
-    })
-    .from(threads)
-    .where(
-      and(
-        eq(threads.accountId, accountId),
-        lt(threads.classificationVersion, analysisVersion),
-      ),
-    )
-    .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt))
-    .limit(limit);
-
-  if (candidateThreads.length === 0) return [];
-
-  const candidateIds = candidateThreads.map((thread) => thread.id);
-  const messageRows = await database
-    .select({
-      threadId: messages.threadId,
-      direction: messages.direction,
-      sender: messages.sender,
-      bodyText: messages.bodyText,
-      sentAt: messages.sentAt,
-    })
-    .from(messages)
-    .where(inArray(messages.threadId, candidateIds))
-    .orderBy(desc(messages.sentAt));
-
-  return candidateThreads.map((thread) => ({
-    ...thread,
-    messages: messageRows
-      .filter((message) => message.threadId === thread.id)
-      .slice(0, 4)
-      .map((message) => ({
-        direction: message.direction,
-        sender: message.sender.raw || message.sender.email,
-        bodyText: message.bodyText,
-      })),
-  }));
-}
-
-export async function saveThreadClassifications(
-  input: {
-    userId: string;
-    accountId: string;
-    modelId: string;
-    analysisVersion?: number;
-    threads: Array<{
-      threadId: string;
-      labels: Array<{ key: InvookLabelKey; confidence: number }>;
-    }>;
-  },
-  database: Database = getDatabase(),
-) {
-  const analysisVersion = input.analysisVersion ?? MAIL_CLASSIFICATION_VERSION;
-  await database.transaction(async (transaction) => {
-    for (const classification of input.threads) {
-      await transaction
-        .delete(threadLabels)
-        .where(
-          and(
-            eq(threadLabels.threadId, classification.threadId),
-            eq(threadLabels.source, "ai"),
-          ),
-        );
-
-      if (classification.labels.length > 0) {
-        await transaction
-          .insert(threadLabels)
-          .values(
-            classification.labels.map((label) => ({
-              userId: input.userId,
-              accountId: input.accountId,
-              threadId: classification.threadId,
-              labelKey: label.key,
-              source: "ai" as const,
-              state: "applied" as const,
-              confidence: label.confidence.toFixed(2),
-              modelId: input.modelId,
-              analysisVersion,
-            })),
-          )
-          .onConflictDoNothing({
-            target: [threadLabels.threadId, threadLabels.labelKey],
-          });
-      }
-
-      await transaction
-        .update(threads)
-        .set({
-          classificationVersion: analysisVersion,
-          classifiedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(threads.id, classification.threadId),
-            eq(threads.accountId, input.accountId),
-          ),
-        );
-    }
-  });
-}
 
 export async function setUserThreadLabel(
   input: {
@@ -2028,6 +1935,197 @@ export async function getEmbeddingCandidates(
   });
 }
 
+type EmbeddingBatchManifest = Array<{
+  key: string;
+  messageId: string;
+  contentHash: string;
+}>;
+
+export async function getEmbeddingBatchSubmissionForStep(
+  workflowStepId: string,
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .select()
+    .from(embeddingBatchSubmissions)
+    .where(eq(embeddingBatchSubmissions.workflowStepId, workflowStepId))
+    .limit(1);
+  return submission ?? null;
+}
+
+export async function getActiveEmbeddingBatchSubmissionForAccount(
+  accountId: string,
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .select({
+      id: embeddingBatchSubmissions.id,
+      workflowStepId: embeddingBatchSubmissions.workflowStepId,
+      providerBatchId: embeddingBatchSubmissions.providerBatchId,
+      status: embeddingBatchSubmissions.status,
+    })
+    .from(embeddingBatchSubmissions)
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.accountId, accountId),
+        inArray(embeddingBatchSubmissions.status, ["preparing", "submitted"]),
+      ),
+    )
+    .limit(1);
+  return submission ?? null;
+}
+
+export async function prepareEmbeddingBatchSubmission(
+  input: {
+    workflowStepId: string;
+    userId: string;
+    accountId: string;
+    modelId: string;
+    dimensions: number;
+    indexVersion: number;
+    batchAttempt: number;
+    hasMore: boolean;
+    manifest: EmbeddingBatchManifest;
+  },
+  database: Database = getDatabase(),
+) {
+  const [inserted] = await database
+    .insert(embeddingBatchSubmissions)
+    .values({
+      workflowStepId: input.workflowStepId,
+      userId: input.userId,
+      accountId: input.accountId,
+      modelId: input.modelId,
+      dimensions: input.dimensions,
+      indexVersion: input.indexVersion,
+      batchAttempt: input.batchAttempt,
+      hasMore: input.hasMore,
+      requestCount: input.manifest.length,
+      manifest: input.manifest,
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (inserted) return inserted;
+
+  const existing = await getEmbeddingBatchSubmissionForStep(
+    input.workflowStepId,
+    database,
+  );
+  return existing;
+}
+
+export async function refreshPreparingEmbeddingBatchSubmission(
+  input: {
+    submissionId: string;
+    modelId: string;
+    dimensions: number;
+    indexVersion: number;
+    batchAttempt: number;
+    hasMore: boolean;
+    manifest: EmbeddingBatchManifest;
+  },
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .update(embeddingBatchSubmissions)
+    .set({
+      modelId: input.modelId,
+      dimensions: input.dimensions,
+      indexVersion: input.indexVersion,
+      batchAttempt: input.batchAttempt,
+      hasMore: input.hasMore,
+      requestCount: input.manifest.length,
+      manifest: input.manifest,
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.id, input.submissionId),
+        eq(embeddingBatchSubmissions.status, "preparing"),
+        isNull(embeddingBatchSubmissions.inputFileId),
+        isNull(embeddingBatchSubmissions.providerBatchId),
+      ),
+    )
+    .returning();
+  return submission ?? null;
+}
+
+export async function recordEmbeddingBatchInputFile(
+  input: { submissionId: string; inputFileId: string },
+  database: Database = getDatabase(),
+): Promise<string> {
+  const [submission] = await database
+    .update(embeddingBatchSubmissions)
+    .set({
+      inputFileId: sql`coalesce(${embeddingBatchSubmissions.inputFileId}, ${input.inputFileId})`,
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.id, input.submissionId),
+        eq(embeddingBatchSubmissions.status, "preparing"),
+      ),
+    )
+    .returning({ inputFileId: embeddingBatchSubmissions.inputFileId });
+  if (!submission?.inputFileId) {
+    throw new Error("The embedding batch input file could not be recorded.");
+  }
+  return submission.inputFileId;
+}
+
+export async function recordEmbeddingProviderBatch(
+  input: {
+    submissionId: string;
+    providerBatchId: string;
+    inputFileId: string;
+  },
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .update(embeddingBatchSubmissions)
+    .set({
+      providerBatchId: input.providerBatchId,
+      inputFileId: input.inputFileId,
+      status: "submitted",
+      submittedAt: sql`coalesce(${embeddingBatchSubmissions.submittedAt}, now())`,
+      lastError: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(embeddingBatchSubmissions.id, input.submissionId),
+        inArray(embeddingBatchSubmissions.status, ["preparing", "submitted"]),
+      ),
+    )
+    .returning();
+  if (!submission) {
+    throw new Error("The OpenAI embedding batch could not be recorded.");
+  }
+  return submission;
+}
+
+export async function completeEmbeddingBatchSubmission(
+  input: {
+    submissionId: string;
+    providerState: string;
+    error: string | null;
+  },
+  database: Database = getDatabase(),
+) {
+  await database
+    .update(embeddingBatchSubmissions)
+    .set({
+      status: "complete",
+      providerState: input.providerState,
+      lastError: input.error,
+      completedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(embeddingBatchSubmissions.id, input.submissionId));
+}
+
 export async function markEmbeddingBatchSubmitted(
   input: {
     accountId: string;
@@ -2073,18 +2171,22 @@ export async function markEmbeddingBatchSubmitted(
 }
 
 export async function listSubmittedEmbeddingBatchIds(
+  input: { accountId?: string } = {},
   database: Database = getDatabase(),
 ): Promise<string[]> {
   const rows = await database
-    .select({ providerBatchId: messageEmbeddings.providerBatchId })
-    .from(messageEmbeddings)
+    .select({ providerBatchId: embeddingBatchSubmissions.providerBatchId })
+    .from(embeddingBatchSubmissions)
     .where(
       and(
-        eq(messageEmbeddings.status, "submitted"),
-        isNotNull(messageEmbeddings.providerBatchId),
+        eq(embeddingBatchSubmissions.status, "submitted"),
+        isNotNull(embeddingBatchSubmissions.providerBatchId),
+        input.accountId
+          ? eq(embeddingBatchSubmissions.accountId, input.accountId)
+          : undefined,
       ),
     )
-    .groupBy(messageEmbeddings.providerBatchId);
+    .groupBy(embeddingBatchSubmissions.providerBatchId);
 
   return rows.flatMap(({ providerBatchId }) =>
     providerBatchId ? [providerBatchId] : [],
@@ -2524,28 +2626,56 @@ export async function enqueueBatchEvent(
   database: Database = getDatabase(),
 ): Promise<{ submissionJobId: string } | null> {
   return database.transaction(async (transaction) => {
-    const [submission] = await transaction
-      .select({
-        id: workflowSteps.id,
-        userId: workflowSteps.userId,
-        accountId: workflowSteps.accountId,
-        stepType: workflowSteps.stepType,
-      })
-      .from(workflowSteps)
-      .where(
-        and(
-          eq(workflowSteps.status, "complete"),
-          inArray(workflowSteps.stepType, [
-            "memory.extract",
-            "memory.batch.retry",
-            "embedding.backfill",
-          ]),
-          sql`${workflowSteps.result}->>'provider' = ${input.provider}`,
-          sql`${workflowSteps.result}->>'providerBatchId' = ${input.providerBatchId}`,
-        ),
-      )
-      .orderBy(desc(workflowSteps.updatedAt))
-      .limit(1);
+    const [embeddingSubmission] =
+      input.provider === "openai"
+        ? await transaction
+            .select({
+              id: embeddingBatchSubmissions.workflowStepId,
+              userId: embeddingBatchSubmissions.userId,
+              accountId: embeddingBatchSubmissions.accountId,
+              stepType: workflowSteps.stepType,
+            })
+            .from(embeddingBatchSubmissions)
+            .innerJoin(
+              workflowSteps,
+              eq(workflowSteps.id, embeddingBatchSubmissions.workflowStepId),
+            )
+            .where(
+              and(
+                eq(embeddingBatchSubmissions.provider, "openai"),
+                eq(
+                  embeddingBatchSubmissions.providerBatchId,
+                  input.providerBatchId,
+                ),
+                eq(embeddingBatchSubmissions.status, "submitted"),
+              ),
+            )
+            .limit(1)
+        : [];
+    const [memorySubmission] = embeddingSubmission
+      ? []
+      : await transaction
+          .select({
+            id: workflowSteps.id,
+            userId: workflowSteps.userId,
+            accountId: workflowSteps.accountId,
+            stepType: workflowSteps.stepType,
+          })
+          .from(workflowSteps)
+          .where(
+            and(
+              eq(workflowSteps.status, "complete"),
+              inArray(workflowSteps.stepType, [
+                "memory.extract",
+                "memory.batch.retry",
+              ]),
+              sql`${workflowSteps.result}->>'provider' = ${input.provider}`,
+              sql`${workflowSteps.result}->>'providerBatchId' = ${input.providerBatchId}`,
+            ),
+          )
+          .orderBy(desc(workflowSteps.updatedAt))
+          .limit(1);
+    const submission = embeddingSubmission ?? memorySubmission;
     if (!submission) return null;
 
     const eventJobType = submission.stepType.startsWith("embedding.")

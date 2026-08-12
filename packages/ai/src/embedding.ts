@@ -1,5 +1,6 @@
 import { scheduler } from "node:timers/promises";
 
+import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 import { getEncoding } from "js-tiktoken";
 import OpenAI, { APIError, toFile } from "openai";
 import type { Batch } from "openai/resources/batches";
@@ -24,12 +25,10 @@ export type EmbeddingBatchManifestEntry = {
   contentHash: string;
 };
 
-export type EmbeddingBatchSubmission = EmbeddingConfiguration & {
-  provider: "openai";
-  providerBatchId: string;
-  inputFileId: string;
+export type PreparedEmbeddingBatch = EmbeddingConfiguration & {
   requestCount: number;
   manifest: EmbeddingBatchManifestEntry[];
+  jsonl: string;
 };
 
 export class EmbeddingConfigurationError extends Error {
@@ -55,13 +54,19 @@ function configuration(): EmbeddingConfiguration & { apiKey: string } {
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   const modelId = process.env.OPENAI_EMBEDDING_MODEL?.trim();
   if (!apiKey || !modelId) throw new EmbeddingConfigurationError();
+  const dimensions = positiveInteger(
+    process.env.OPENAI_EMBEDDING_DIMENSIONS,
+    "OPENAI_EMBEDDING_DIMENSIONS",
+  );
+  if (dimensions !== MAIL_EMBEDDING_DIMENSIONS) {
+    throw new EmbeddingConfigurationError(
+      `OPENAI_EMBEDDING_DIMENSIONS must be ${MAIL_EMBEDDING_DIMENSIONS} for the mailbox vector index.`,
+    );
+  }
   return {
     apiKey,
     modelId,
-    dimensions: positiveInteger(
-      process.env.OPENAI_EMBEDDING_DIMENSIONS,
-      "OPENAI_EMBEDDING_DIMENSIONS",
-    ),
+    dimensions,
   };
 }
 
@@ -166,15 +171,14 @@ export async function embedMailboxTexts(inputs: string[]): Promise<{
   return { ...asConfiguration(config), embeddings };
 }
 
-export async function submitEmbeddingBatch(input: {
-  submissionId: string;
+export async function prepareEmbeddingBatch(input: {
   messages: Array<{
     messageId: string;
     contentHash: string;
     subject: string;
     bodyText: string;
   }>;
-}): Promise<EmbeddingBatchSubmission | null> {
+}): Promise<PreparedEmbeddingBatch | null> {
   if (!process.env.OPENAI_WEBHOOK_SECRET?.trim()) {
     throw new EmbeddingConfigurationError(
       "OPENAI_WEBHOOK_SECRET is required for OpenAI Batch embeddings.",
@@ -223,42 +227,62 @@ export async function submitEmbeddingBatch(input: {
   }));
   const jsonl = `${accepted.map(({ line }) => line).join("\n")}\n`;
 
-  const openai = client();
-  let inputFileId: string | undefined;
-  try {
-    const uploaded = await providerCall(async () =>
-      openai.files.create({
-        file: await toFile(
-          Buffer.from(jsonl, "utf8"),
-          `invook-embeddings-${input.submissionId}.jsonl`,
-          { type: "application/jsonl" },
-        ),
-        purpose: "batch",
-      }),
-    );
-    inputFileId = uploaded.id;
-    const batch = await providerCall(() =>
-      openai.batches.create({
-        input_file_id: uploaded.id,
+  return {
+    ...asConfiguration(config),
+    requestCount: manifest.length,
+    manifest,
+    jsonl,
+  };
+}
+
+export async function uploadEmbeddingBatchInput(input: {
+  submissionId: string;
+  jsonl: string;
+}): Promise<string> {
+  const uploaded = await providerCall(async () =>
+    client().files.create({
+      file: await toFile(
+        Buffer.from(input.jsonl, "utf8"),
+        `invook-embeddings-${input.submissionId}.jsonl`,
+        { type: "application/jsonl" },
+      ),
+      purpose: "batch",
+    }),
+  );
+  return uploaded.id;
+}
+
+export async function createEmbeddingBatch(input: {
+  submissionId: string;
+  inputFileId: string;
+}): Promise<{ providerBatchId: string; inputFileId: string }> {
+  const batch = await providerCall(() =>
+    client().batches.create(
+      {
+        input_file_id: input.inputFileId,
         endpoint: "/v1/embeddings",
         completion_window: "24h",
         metadata: { invook_job_id: input.submissionId },
-      }),
-    );
+      },
+      { idempotencyKey: input.submissionId },
+    ),
+  );
+  return { providerBatchId: batch.id, inputFileId: input.inputFileId };
+}
+
+export async function findEmbeddingBatchBySubmissionId(
+  submissionId: string,
+): Promise<{ providerBatchId: string; inputFileId: string } | null> {
+  configuration();
+  const batches = client().batches.list({ limit: 100 });
+  for await (const batch of batches) {
+    if (batch.metadata?.invook_job_id !== submissionId) continue;
     return {
-      provider: "openai",
       providerBatchId: batch.id,
-      inputFileId: uploaded.id,
-      ...asConfiguration(config),
-      requestCount: manifest.length,
-      manifest,
+      inputFileId: batch.input_file_id,
     };
-  } catch (error) {
-    if (inputFileId) await openai.files.delete(inputFileId).catch(() => undefined);
-    const mapped = configurationError(error);
-    if (mapped) throw mapped;
-    throw error;
   }
+  return null;
 }
 
 function customId(value: unknown): string | null {

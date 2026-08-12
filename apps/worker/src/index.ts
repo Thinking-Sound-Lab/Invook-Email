@@ -1,11 +1,12 @@
 import {
   AiConfigurationError,
   buildEmbeddingInput,
-  classifyThreads,
+  createEmbeddingBatch,
   deleteEmbeddingBatchInputFile,
   deleteMemoryBatchFiles,
   embedMailboxTexts,
   extractFeedbackMemories,
+  findEmbeddingBatchBySubmissionId,
   getEmbeddingBatchState,
   getEmbeddingConfiguration,
   isAnyMemoryBatchProviderConfigured,
@@ -18,9 +19,9 @@ import {
   MemoryBatchConfigurationError,
   readEmbeddingBatch,
   readMemoryBatch,
-  submitEmbeddingBatch,
+  prepareEmbeddingBatch,
   submitMemoryBatch,
-  type EmbeddingBatchManifestEntry,
+  uploadEmbeddingBatchInput,
   type FeedbackMemoryCandidate,
   type MemoryAnalysisThread,
   type MemoryBatchManifestEntry,
@@ -30,6 +31,7 @@ import {
 import {
   completeMailSyncItem,
   completeMailSyncRun,
+  completeEmbeddingBatchSubmission,
   completeWorkflowStep,
   countFailedEmbeddings,
   decryptGoogleCredential,
@@ -44,17 +46,17 @@ import {
   failMailSyncItem,
   failMailSyncRun,
   failWorkflowStep,
+  getActiveEmbeddingBatchSubmissionForAccount,
   getEmbeddingCandidates,
+  getEmbeddingBatchSubmissionForStep,
   getDraftFeedbackSamples,
   getMemoryAnalysisThreads,
   getBatchSubmission,
-  getThreadsForClassification,
   getUserAuthoredMemories,
   getWorkerAccount,
   hasCompletedMailSyncPage,
   listenForOutboxNotifications,
   MAIL_INDEX_VERSION,
-  MAIL_CLASSIFICATION_VERSION,
   listSubmittedEmbeddingBatchIds,
   markMailSyncItemRunning,
   markWorkflowStepRunning,
@@ -65,11 +67,14 @@ import {
   countIncompleteEmbeddings,
   saveMessageEmbeddings,
   saveExtractedMemories,
-  saveThreadClassifications,
   setIndexingSyncStage,
   setMemorySyncStage,
   publishOutboxBatch,
+  prepareEmbeddingBatchSubmission,
+  recordEmbeddingBatchInputFile,
+  recordEmbeddingProviderBatch,
   recordMailSyncPage,
+  refreshPreparingEmbeddingBatchSubmission,
   startMailSyncRun,
   updateStoredCredential,
   upsertMailboxMessage,
@@ -94,7 +99,6 @@ import { BullQueueRuntime, type WorkflowJob } from "./queue";
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
-const classificationBatchSize = 12;
 const feedbackBatchSize = 24;
 const embeddingBatchRequestLimit = 2_000;
 const embeddingBatchAttemptLimit = 3;
@@ -296,116 +300,6 @@ async function runGmailFinalize(job: WorkflowStepJob) {
   return { status: "complete", runId, historyCursor: gmailProfile.historyId };
 }
 
-async function runMailClassification(job: WorkflowStepJob) {
-  if (!job.accountId) throw new Error("The classification job has no connected account.");
-  if (!isAiConfigured()) throw new AiConfigurationError();
-
-  const account = await getWorkerAccount(job.accountId);
-  if (!account) throw new Error("The connected Gmail account was not found.");
-
-  let classifiedCount = 0;
-  while (true) {
-    const candidates = await getThreadsForClassification(
-      account.id,
-      MAIL_CLASSIFICATION_VERSION,
-      classificationBatchSize,
-    );
-    if (candidates.length === 0) break;
-
-    const analysis = await classifyThreads(candidates);
-    const expectedIds = new Set(candidates.map((thread) => thread.id));
-    const returnedIds = new Set(analysis.threads.map((thread) => thread.threadId));
-    if (
-      returnedIds.size !== expectedIds.size ||
-      analysis.threads.some((thread) => !expectedIds.has(thread.threadId))
-    ) {
-      throw new Error("The label model did not return every requested thread exactly once.");
-    }
-
-    await saveThreadClassifications({
-      userId: account.userId,
-      accountId: account.id,
-      modelId: analysis.modelId,
-      threads: analysis.threads,
-    });
-    classifiedCount += candidates.length;
-  }
-
-  return { classifiedCount, analysisVersion: MAIL_CLASSIFICATION_VERSION };
-}
-
-type EmbeddingSubmissionResult = {
-  provider: "openai";
-  providerBatchId: string;
-  inputFileId: string;
-  modelId: string;
-  dimensions: number;
-  requestCount: number;
-  manifest: EmbeddingBatchManifestEntry[];
-  indexVersion: number;
-  hasMore: boolean;
-  batchAttempt: number;
-};
-
-function parseEmbeddingManifest(value: unknown): EmbeddingBatchManifestEntry[] {
-  if (!Array.isArray(value)) {
-    throw new Error("The embedding batch manifest is missing.");
-  }
-  return value.map((entry) => {
-    if (!entry || typeof entry !== "object") {
-      throw new Error("The embedding batch manifest is invalid.");
-    }
-    const key = "key" in entry ? entry.key : undefined;
-    const messageId = "messageId" in entry ? entry.messageId : undefined;
-    const contentHash = "contentHash" in entry ? entry.contentHash : undefined;
-    if (
-      typeof key !== "string" ||
-      typeof messageId !== "string" ||
-      typeof contentHash !== "string" ||
-      key !== messageId
-    ) {
-      throw new Error("The embedding batch manifest is invalid.");
-    }
-    return { key, messageId, contentHash };
-  });
-}
-
-function parseEmbeddingSubmissionResult(value: unknown): EmbeddingSubmissionResult {
-  if (!value || typeof value !== "object") {
-    throw new Error("The embedding batch submission result is missing.");
-  }
-  const result = value as Record<string, unknown>;
-  const manifest = parseEmbeddingManifest(result.manifest);
-  const requestCount = requiredInteger(
-    result.requestCount,
-    "Embedding batch request count",
-  );
-  if (
-    manifest.length !== requestCount ||
-    new Set(manifest.map((entry) => entry.key)).size !== manifest.length
-  ) {
-    throw new Error("The embedding batch manifest does not match its request count.");
-  }
-  if (result.provider !== "openai" || typeof result.hasMore !== "boolean") {
-    throw new Error("The embedding batch provider details are invalid.");
-  }
-  return {
-    provider: "openai",
-    providerBatchId: requiredString(result.providerBatchId, "provider batch ID"),
-    inputFileId: requiredString(result.inputFileId, "provider input file"),
-    modelId: requiredString(result.modelId, "embedding model"),
-    dimensions: requiredInteger(result.dimensions, "embedding dimensions"),
-    requestCount,
-    manifest,
-    indexVersion: requiredInteger(result.indexVersion, "embedding index version"),
-    hasMore: result.hasMore,
-    batchAttempt:
-      result.batchAttempt === undefined
-        ? 1
-        : requiredInteger(result.batchAttempt, "embedding batch attempt"),
-  };
-}
-
 async function runEmbeddingBackfill(job: WorkflowStepJob) {
   if (!job.accountId || !job.userId) {
     throw new Error("The embedding backfill has no connected account.");
@@ -416,64 +310,164 @@ async function runEmbeddingBackfill(job: WorkflowStepJob) {
       ? 1
       : requiredInteger(job.payload.batchAttempt, "embedding batch attempt");
   await setIndexingSyncStage(job.accountId, "running");
-  const candidates = await getEmbeddingCandidates({
-    accountId: job.accountId,
-    modelId: config.modelId,
-    indexVersion: MAIL_INDEX_VERSION,
-    limit: embeddingBatchRequestLimit + 1,
-    includeFailed: job.payload.includeFailed !== false,
-  });
-  if (candidates.length === 0) {
-    const incompleteCount = await countIncompleteEmbeddings({
+  let submission = await getEmbeddingBatchSubmissionForStep(job.id);
+  let preparedBatch: Awaited<ReturnType<typeof prepareEmbeddingBatch>> = null;
+
+  if (!submission) {
+    const activeSubmission = await getActiveEmbeddingBatchSubmissionForAccount(
+      job.accountId,
+    );
+    if (activeSubmission) {
+      return {
+        status: "deferred",
+        activeSubmissionId: activeSubmission.id,
+        activeProviderBatchId: activeSubmission.providerBatchId,
+      };
+    }
+  }
+
+  if (!submission?.inputFileId && !submission?.providerBatchId) {
+    const candidates = await getEmbeddingCandidates({
       accountId: job.accountId,
       modelId: config.modelId,
       indexVersion: MAIL_INDEX_VERSION,
+      limit: embeddingBatchRequestLimit + 1,
+      includeFailed: job.payload.includeFailed !== false,
     });
-    await setIndexingSyncStage(
+    if (candidates.length === 0) {
+      const incompleteCount = await countIncompleteEmbeddings({
+        accountId: job.accountId,
+        modelId: config.modelId,
+        indexVersion: MAIL_INDEX_VERSION,
+      });
+      if (submission) {
+        await completeEmbeddingBatchSubmission({
+          submissionId: submission.id,
+          providerState: "not_submitted",
+          error: null,
+        });
+      }
+      await setIndexingSyncStage(
+        job.accountId,
+        incompleteCount === 0 ? "complete" : "failed",
+      );
+      return {
+        status: incompleteCount === 0 ? "complete" : "failed",
+        incompleteCount,
+      };
+    }
+
+    const batchCandidates = candidates.slice(0, embeddingBatchRequestLimit);
+    preparedBatch = await prepareEmbeddingBatch({ messages: batchCandidates });
+    if (!preparedBatch) {
+      await setIndexingSyncStage(job.accountId, "complete");
+      return { status: "complete", requestCount: 0 };
+    }
+    const hasMore =
+      candidates.length > embeddingBatchRequestLimit ||
+      preparedBatch.requestCount < batchCandidates.length;
+    submission = submission
+      ? await refreshPreparingEmbeddingBatchSubmission({
+          submissionId: submission.id,
+          modelId: preparedBatch.modelId,
+          dimensions: preparedBatch.dimensions,
+          indexVersion: MAIL_INDEX_VERSION,
+          batchAttempt,
+          hasMore,
+          manifest: preparedBatch.manifest,
+        })
+      : await prepareEmbeddingBatchSubmission({
+          workflowStepId: job.id,
+          userId: job.userId,
+          accountId: job.accountId,
+          modelId: preparedBatch.modelId,
+          dimensions: preparedBatch.dimensions,
+          indexVersion: MAIL_INDEX_VERSION,
+          batchAttempt,
+          hasMore,
+          manifest: preparedBatch.manifest,
+        });
+  }
+  if (!submission) {
+    const activeSubmission = await getActiveEmbeddingBatchSubmissionForAccount(
       job.accountId,
-      incompleteCount === 0 ? "complete" : "failed",
     );
-    return { status: incompleteCount === 0 ? "complete" : "failed", incompleteCount };
+    if (activeSubmission) {
+      return {
+        status: "deferred",
+        activeSubmissionId: activeSubmission.id,
+        activeProviderBatchId: activeSubmission.providerBatchId,
+      };
+    }
+    throw new Error("The embedding batch submission is unavailable.");
+  }
+  if (submission.status === "failed") {
+    throw new Error(submission.lastError ?? "The embedding batch submission failed.");
   }
 
-  const batchCandidates = candidates.slice(0, embeddingBatchRequestLimit);
-  const submission = await submitEmbeddingBatch({
-    submissionId: job.id,
-    messages: batchCandidates,
-  });
-  if (!submission) {
-    await setIndexingSyncStage(job.accountId, "complete");
-    return { status: "complete", requestCount: 0 };
+  const hadRecordedInputFile = Boolean(submission.inputFileId);
+  let inputFileId = submission.inputFileId;
+  if (!inputFileId) {
+    if (!preparedBatch) {
+      throw new Error("The prepared embedding batch input is unavailable.");
+    }
+    const uploadedInputFileId = await uploadEmbeddingBatchInput({
+      submissionId: submission.id,
+      jsonl: preparedBatch.jsonl,
+    });
+    inputFileId = await recordEmbeddingBatchInputFile({
+      submissionId: submission.id,
+      inputFileId: uploadedInputFileId,
+    });
   }
-  const candidatesById = new Map(
-    batchCandidates.map((candidate) => [candidate.messageId, candidate]),
-  );
+
+  let providerBatchId = submission.providerBatchId;
+  if (!providerBatchId) {
+    const recovered = hadRecordedInputFile
+      ? await findEmbeddingBatchBySubmissionId(submission.id)
+      : null;
+    const providerBatch =
+      recovered ??
+      (await createEmbeddingBatch({
+        submissionId: submission.id,
+        inputFileId,
+      }));
+    submission = await recordEmbeddingProviderBatch({
+      submissionId: submission.id,
+      providerBatchId: providerBatch.providerBatchId,
+      inputFileId: providerBatch.inputFileId,
+    });
+    providerBatchId = submission.providerBatchId;
+  }
+  if (!providerBatchId || !submission.inputFileId) {
+    throw new Error("The OpenAI embedding batch is missing its provider identity.");
+  }
+
   await markEmbeddingBatchSubmitted({
     accountId: job.accountId,
     modelId: submission.modelId,
     dimensions: submission.dimensions,
     indexVersion: MAIL_INDEX_VERSION,
-    providerBatchId: submission.providerBatchId,
-    messages: submission.manifest.map((entry) => {
-      const candidate = candidatesById.get(entry.messageId);
-      if (!candidate) throw new Error("An embedding batch candidate is missing.");
-      return {
-        messageId: entry.messageId,
-        userId: candidate.userId,
-        contentHash: entry.contentHash,
-      };
-    }),
+    providerBatchId,
+    messages: submission.manifest.map((entry) => ({
+      messageId: entry.messageId,
+      userId: job.userId!,
+      contentHash: entry.contentHash,
+    })),
   });
-  const hasMore =
-    candidates.length > embeddingBatchRequestLimit ||
-    submission.requestCount < batchCandidates.length;
   return {
     status: "submitted",
     batchPurpose: "embedding",
-    ...submission,
+    provider: submission.provider,
+    providerBatchId,
+    inputFileId: submission.inputFileId,
+    modelId: submission.modelId,
+    dimensions: submission.dimensions,
+    requestCount: submission.requestCount,
+    manifest: submission.manifest,
     indexVersion: MAIL_INDEX_VERSION,
-    hasMore,
-    batchAttempt,
+    hasMore: submission.hasMore,
+    batchAttempt: submission.batchAttempt,
   };
 }
 
@@ -521,26 +515,27 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
     job.payload.submissionJobId,
     "embedding submission job ID",
   );
-  const submission = await getBatchSubmission(submissionJobId);
+  const submission = await getEmbeddingBatchSubmissionForStep(submissionJobId);
   if (
-    !submission?.accountId ||
-    !submission.userId ||
+    !submission ||
     submission.accountId !== job.accountId ||
-    submission.jobType !== "embedding.backfill"
+    !["submitted", "complete"].includes(submission.status)
   ) {
     throw new Error("The embedding batch submission could not be matched.");
   }
-  const details = parseEmbeddingSubmissionResult(submission.result);
   if (
-    job.payload.provider !== details.provider ||
-    job.payload.providerBatchId !== details.providerBatchId
+    job.payload.provider !== submission.provider ||
+    job.payload.providerBatchId !== submission.providerBatchId
   ) {
     throw new Error("The provider event does not match its embedding submission.");
   }
+  if (!submission.providerBatchId || !submission.inputFileId) {
+    throw new Error("The embedding batch submission is missing provider files.");
+  }
   const batch = await readEmbeddingBatch({
-    providerBatchId: details.providerBatchId,
-    expectedKeys: details.manifest.map((entry) => entry.key),
-    expectedDimensions: details.dimensions,
+    providerBatchId: submission.providerBatchId,
+    expectedKeys: submission.manifest.map((entry) => entry.key),
+    expectedDimensions: submission.dimensions,
   });
   const terminalState = ["completed", "failed", "cancelled", "expired"].includes(
     batch.state,
@@ -551,18 +546,20 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
     );
   }
 
-  const manifestByKey = new Map(details.manifest.map((entry) => [entry.key, entry]));
+  const manifestByKey = new Map(
+    submission.manifest.map((entry) => [entry.key, entry]),
+  );
   const savedCount = await saveMessageEmbeddings({
     accountId: submission.accountId,
-    modelId: details.modelId,
-    dimensions: details.dimensions,
-    indexVersion: details.indexVersion,
+    modelId: submission.modelId,
+    dimensions: submission.dimensions,
+    indexVersion: submission.indexVersion,
     values: [...batch.embeddingsByKey].flatMap(([key, embedding]) => {
       const entry = manifestByKey.get(key);
       return entry
         ? [{
             messageId: entry.messageId,
-            userId: submission.userId!,
+            userId: submission.userId,
             contentHash: entry.contentHash,
             embedding,
           }]
@@ -575,25 +572,31 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
   });
   if (failedEntries.length > 0) {
     await markMessageEmbeddingsFailed({
-      modelId: details.modelId,
-      indexVersion: details.indexVersion,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
       values: failedEntries,
       error: batch.providerError ?? `OpenAI embedding batch ended as ${batch.state}.`,
     });
   }
 
+  await completeEmbeddingBatchSubmission({
+    submissionId: submission.id,
+    providerState: batch.state,
+    error: batch.providerError,
+  });
+
   const [incompleteCount, failedCount, submittedBatchIds] = await Promise.all([
     countIncompleteEmbeddings({
       accountId: submission.accountId,
-      modelId: details.modelId,
-      indexVersion: details.indexVersion,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
     }),
     countFailedEmbeddings({
       accountId: submission.accountId,
-      modelId: details.modelId,
-      indexVersion: details.indexVersion,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
     }),
-    listSubmittedEmbeddingBatchIds(),
+    listSubmittedEmbeddingBatchIds({ accountId: submission.accountId }),
   ]);
   const continuationJobIds: string[] = [];
   const providerCapacityAvailable = submittedBatchIds.length === 0;
@@ -601,17 +604,17 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
     providerCapacityAvailable &&
     failedCount > 0 &&
     (failedEntries.length === 0 ||
-      details.batchAttempt < embeddingBatchAttemptLimit);
+      submission.batchAttempt < embeddingBatchAttemptLimit);
   if (continueFailedEmbeddings) {
     const retryJobId = await enqueueEmbeddingBackfillContinuation({
       userId: submission.userId,
       accountId: submission.accountId,
-      modelId: details.modelId,
-      indexVersion: details.indexVersion,
-      predecessorBatchId: details.providerBatchId,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
+      predecessorBatchId: submission.providerBatchId,
       includeFailed: true,
       batchAttempt:
-        failedEntries.length > 0 ? details.batchAttempt + 1 : 1,
+        failedEntries.length > 0 ? submission.batchAttempt + 1 : 1,
       reason: "retry",
     });
     if (retryJobId) continuationJobIds.push(retryJobId);
@@ -619,9 +622,9 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
     const nextJobId = await enqueueEmbeddingBackfillContinuation({
       userId: submission.userId,
       accountId: submission.accountId,
-      modelId: details.modelId,
-      indexVersion: details.indexVersion,
-      predecessorBatchId: details.providerBatchId,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
+      predecessorBatchId: submission.providerBatchId,
       includeFailed: false,
       batchAttempt: 1,
       reason: "next",
@@ -637,7 +640,7 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
   await setIndexingSyncStage(submission.accountId, indexingStage);
 
   const inputFileDeleted = await deleteEmbeddingBatchInputFile(
-    details.inputFileId,
+    submission.inputFileId,
   );
   if (!inputFileDeleted) {
     console.error("worker: embedding batch input file could not be deleted", {
@@ -655,7 +658,7 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
     providerError: batch.providerError,
     outputFileId: batch.outputFileId,
     errorFileId: batch.errorFileId,
-    batchAttempt: details.batchAttempt,
+    batchAttempt: submission.batchAttempt,
     savedCount,
     failedRequestCount: failedEntries.length,
     incompleteCount,
@@ -1303,10 +1306,6 @@ function processGmailMessage(bullJob: WorkflowJob) {
   return executeWorkflowJob(bullJob, runGmailMessage);
 }
 
-function processClassification(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, runMailClassification);
-}
-
 function processIndexingBatch(bullJob: WorkflowJob) {
   return executeWorkflowJob(bullJob, async (job) => {
     if (job.stepType === "embedding.backfill") return runEmbeddingBackfill(job);
@@ -1345,11 +1344,6 @@ function startBullWorkers(runtime: BullQueueRuntime) {
     concurrency: 5,
   });
   if (isAiConfigured()) {
-    runtime.createWorker(
-      "mail-classification",
-      processClassification,
-      withFailureReconciliation,
-    );
     runtime.createWorker(
       "mail-memory-feedback",
       processMemoryFeedback,

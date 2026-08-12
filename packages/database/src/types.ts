@@ -20,7 +20,6 @@ export type WorkflowStepJob = {
 export type QueueName =
   | "gmail-pages"
   | "gmail-messages"
-  | "mail-classification"
   | "mail-indexing-batch"
   | "mail-indexing-live"
   | "mail-memory-submit"

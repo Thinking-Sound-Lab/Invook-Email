@@ -13,6 +13,7 @@ import {
 import { getDatabase, type Database } from "./client";
 import {
   connectedAccounts,
+  embeddingBatchSubmissions,
   gmailSyncItems,
   gmailSyncPages,
   mailSyncRuns,
@@ -21,7 +22,6 @@ import {
 } from "./schema";
 import type { QueueName, WorkflowStepJob } from "./types";
 import {
-  MAIL_CLASSIFICATION_VERSION,
   MAIL_INDEX_VERSION,
   MEMORY_SCHEMA_VERSION,
 } from "./versions";
@@ -47,8 +47,6 @@ function queueNameForStepType(stepType: string): QueueName {
       return "gmail-pages";
     case "gmail.sync.message":
       return "gmail-messages";
-    case "mail.classify":
-      return "mail-classification";
     case "embedding.backfill":
     case "embedding.batch.event":
       return "mail-indexing-batch";
@@ -345,6 +343,22 @@ export async function failWorkflowStep(
       .returning({ id: workflowSteps.id });
 
     if (!updatedStep) return false;
+    if (input.terminal && input.step.stepType === "embedding.backfill") {
+      await transaction
+        .update(embeddingBatchSubmissions)
+        .set({
+          status: "failed",
+          lastError: input.message,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(embeddingBatchSubmissions.workflowStepId, input.step.id),
+            eq(embeddingBatchSubmissions.status, "preparing"),
+          ),
+        );
+    }
     if (!input.terminal || !input.step.accountId) return true;
     if (
       ["memory.extract", "memory.batch.retry", "memory.batch.event"].includes(
@@ -783,13 +797,6 @@ export async function completeMailSyncRun(
         {
           userId: run.userId,
           accountId: run.accountId,
-          stepType: "mail.classify",
-          payload: { analysisVersion: MAIL_CLASSIFICATION_VERSION },
-          idempotencyKey: `mail.classify:${run.accountId}:${MAIL_CLASSIFICATION_VERSION}:${input.finalHistoryCursor}`,
-        },
-        {
-          userId: run.userId,
-          accountId: run.accountId,
           stepType: "memory.extract",
           payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
           idempotencyKey: `memory.extract:${run.accountId}:${MEMORY_SCHEMA_VERSION}:${input.finalHistoryCursor}`,
@@ -817,13 +824,6 @@ export async function enqueuePostSyncWorkflowSteps(
     if (account.syncState.mailSync !== "complete" || !account.historyCursor) continue;
     const steps = await enqueueWorkflowStepsWithExecutor(
       [
-        {
-          userId: account.userId,
-          accountId: account.id,
-          stepType: "mail.classify",
-          payload: { analysisVersion: MAIL_CLASSIFICATION_VERSION },
-          idempotencyKey: `mail.classify:${account.id}:${MAIL_CLASSIFICATION_VERSION}:${account.historyCursor}`,
-        },
         {
           userId: account.userId,
           accountId: account.id,
