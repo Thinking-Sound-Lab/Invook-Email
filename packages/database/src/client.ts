@@ -43,14 +43,21 @@ export function getDatabase(): Database {
   return database;
 }
 
-export async function listenForOutboxNotifications(onEntryAvailable: () => void) {
+async function listenForDatabaseNotifications(
+  channel:
+    | "invook_jobs"
+    | "invook_job_status"
+    | "invook_queue_outbox"
+    | "invook_account_sync",
+  onNotification: (payload: string) => void,
+) {
   const databaseUrl = process.env.DATABASE_URL ?? "";
   if (!databaseUrl) {
-    throw new Error("DATABASE_URL is required for queue outbox notifications.");
+    throw new Error("DATABASE_URL is required for database notifications.");
   }
 
   const client = postgres(databaseUrl, { max: 1, prepare: false });
-  const listener = await client.listen("invook_queue_outbox", onEntryAvailable);
+  const listener = await client.listen(channel, onNotification);
 
   return async () => {
     await listener.unlisten();
@@ -58,22 +65,22 @@ export async function listenForOutboxNotifications(onEntryAvailable: () => void)
   };
 }
 
-export async function listenForAccountSyncNotifications(
+export function listenForOutboxNotifications(onEntryAvailable: () => void) {
+  return listenForDatabaseNotifications("invook_queue_outbox", onEntryAvailable);
+}
+
+export function listenForAccountSyncNotifications(
   onAccountSyncChanged: (payload: string) => void,
 ) {
-  const databaseUrl = process.env.DATABASE_URL ?? "";
-  if (!databaseUrl) {
-    throw new Error("DATABASE_URL is required for account sync notifications.");
-  }
+  return listenForDatabaseNotifications("invook_account_sync", onAccountSyncChanged);
+}
 
-  const client = postgres(databaseUrl, { max: 1, prepare: false });
-  const listener = await client.listen(
-    "invook_account_sync",
-    onAccountSyncChanged,
-  );
+export function listenForJobNotifications(onJobAvailable: () => void) {
+  return listenForDatabaseNotifications("invook_jobs", onJobAvailable);
+}
 
-  return async () => {
-    await listener.unlisten();
-    await client.end();
-  };
+export function listenForJobStatusNotifications(
+  onStatusChanged: (jobId: string) => void,
+) {
+  return listenForDatabaseNotifications("invook_job_status", onStatusChanged);
 }

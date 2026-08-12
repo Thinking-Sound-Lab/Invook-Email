@@ -1,6 +1,6 @@
 # Invook
 
-Invook is an open-source, AI-native Gmail client. It synchronizes and indexes the connected mailbox, applies an opinionated set of labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
+Invook is an open-source, AI-native Gmail client. It indexes the connected mailbox, applies built-in and user-defined labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
 
 The application starts with one Google sign-in action. Until a real Gmail account is connected, it shows an honest setup or empty state and never manufactures mailbox data.
 
@@ -8,9 +8,9 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 
 1. Direct Google OAuth authenticates the user and grants Gmail access.
 2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and transactionally records a Gmail synchronization run plus its first BullMQ step.
-3. A sequential page worker follows Gmail's opaque page tokens while parallel message workers store the discovered messages. PostgreSQL retains the run, page, message, and outbox checkpoints; Redis coordinates BullMQ execution and retries. Mail synchronization, search indexing, and writing-memory extraction have independent state.
-4. A configured model applies Invook's predefined Important, Travel, Pitch, and Newsletter labels. A user's label changes take precedence over later model runs.
-5. The worker sends full eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
+3. A sequential page worker follows Gmail's opaque page tokens while parallel message workers store the discovered messages. PostgreSQL retains the run, page, message, and outbox checkpoints; Redis coordinates BullMQ execution and retries. After the initial crawl, Refresh resumes from the stored Gmail history cursor and applies only message additions, deletions, and Gmail label changes. If Gmail expires the cursor, the worker reconciles a fresh mailbox snapshot with change-aware upserts and deletion handling.
+4. The selected native Batch provider checks every indexed thread against Invook's Important, Travel, Pitch, and Newsletter definitions. Settings can add a new label and description, which always queues a full analysis of the already-indexed mailbox for that label. Later Gmail changes queue analysis only for affected threads. Every label, including a built-in label, can be deleted. A user's thread-level label changes take precedence over later model runs.
+5. Initial Memory analysis sends all eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Later eligible owner-sent messages accumulate as targeted global and contact evidence without rescanning the original mailbox. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
    - **Preferences:** repeated behavior that applies across contacts and should shape every draft.
    - **Contacts:** repeated communication behavior for one normalized email address.
    - **Scheduling:** repeated behavior used when coordinating meetings or times.
@@ -21,7 +21,9 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 10. Search combines PostgreSQL full text, sender/recipient metadata, attachment filenames, and available vector similarity. Attachment contents are not downloaded or embedded.
 11. The right sidebar runs a tool-using agent that can search mail, inspect a thread, list attachment metadata, and generate a saved reply draft with cited thread and message IDs.
 
-Memory v3 does not depend on indexing or embeddings. Native Batch analysis discovers repeated writing behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting.
+Initial Gmail synchronization, search indexing, and initial Memory extraction use BullMQ with a transactional PostgreSQL outbox. Dynamic-label backfills, Gmail history refreshes, and targeted incremental Memory use the PostgreSQL job table and database notifications. Neither path uses timer-based polling.
+
+Memory v3 does not depend on search embeddings. Native Batch analysis discovers repeated writing behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting.
 
 The right panel supports mailbox finding and reply drafting. Sending mail and autonomous inbox automations are not claimed as complete.
 
@@ -30,7 +32,7 @@ The right panel supports mailbox finding and reply drafting. Sending mail and au
 ```text
 apps/
   web/                 Next.js App Router UI
-  api/                 Native Node.js HTTP API, OAuth, sessions, and product endpoints
+  api/                 Fastify API, OAuth, sessions, and product endpoints
   worker/              Gmail sync, search indexing, labeling, Memory, and feedback jobs
 packages/
   ai/                  Mail agent, OpenAI embeddings, Batch Memory, labels, feedback, and drafts
@@ -43,7 +45,6 @@ docker/
   dev-local.sh         Local Docker startup
 docs/
   product-requirements.md
-  competitive-research.md
 ```
 
 The frontend uses shadcn/ui source components, the free Hugeicons package, Plus Jakarta Sans, and a Notion-inspired dark palette.
@@ -66,9 +67,9 @@ Put the generated value in `TOKEN_ENCRYPTION_KEY`. Invook uses the official Goog
 
 ## Model setup
 
-Labeling, feedback analysis, and drafting use an OpenAI-compatible HTTP endpoint. Set `AI_BASE_URL` and `AI_MODEL`; `AI_API_KEY` is optional for a local model. When the worker runs in Docker and a local model runs on the host, use a host-reachable URL such as `http://host.docker.internal:11434/v1`.
+Feedback analysis and drafting use an OpenAI-compatible HTTP endpoint. Set `AI_BASE_URL` and `AI_MODEL`; `AI_API_KEY` is optional for a local model. When the worker runs in Docker and a local model runs on the host, use a host-reachable URL such as `http://host.docker.internal:11434/v1`.
 
-Initial Preferences, Contacts, and Scheduling analysis uses one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Invook creates one global request and one request per qualifying contact, then splits a scope only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure. This Memory domain is separate from search indexing.
+Mailbox label backfills and Preferences, Contacts, and Scheduling analysis use one native Batch provider selected by `MEMORY_BATCH_PROVIDER`. Label analysis creates one request per selected indexed thread and continues in another job when a provider file limit is reached. Initial Memory analysis creates one global request and one request per qualifying contact; later Memory jobs contain only accumulated post-indexing evidence for the qualifying scope. A scope is split only when the model input limit requires it. OpenAI requests use the Responses input-token endpoint for an exact count. Azure OpenAI does not expose that endpoint, so Invook uses the complete request's UTF-8 byte length as a conservative token-count upper bound against the deployment limit you configure.
 
 Search embeddings currently use OpenAI. Set `OPENAI_API_KEY` and `OPENAI_EMBEDDING_MODEL`; `OPENAI_EMBEDDING_DIMENSIONS` must remain `1536` for the indexed pgvector column. Historical mail additionally requires `OPENAI_WEBHOOK_SECRET`. Registering the OpenAI Batch events below serves both Memory batches and embedding batches. The database stores one HNSW-indexed vector per message subject/body and keeps attachment metadata outside the embedding input.
 
@@ -143,15 +144,15 @@ docker compose -f docker/compose.yml config --quiet
 - Database credentials and account secrets are server-only.
 - Google identities are validated server-side and mapped to stable Invook user IDs.
 - Session cookies are signed, HTTP-only, and contain no provider token.
-- Next.js contains UI only. It reaches the native Node API through `/v1`; only the API and worker import database and Gmail packages.
+- Next.js contains UI only. It reaches the Fastify API through `/v1`; only the API and worker import database and Gmail packages.
 - Product reads are scoped by user ID. Worker operations use explicit account, synchronization-run, and workflow-step IDs.
 - Email content is treated as untrusted input in every model prompt.
 - Inferred Memory requires evidence from at least three messages; global preferences additionally require evidence across at least three contacts.
 - User-written memory wins over inferred memory.
+- A user's applied or dismissed thread label wins over automatic label analysis.
 
 ## Project documents
 
 - [Product requirements](./docs/product-requirements.md)
-- [Competitive research](./docs/competitive-research.md)
 
 The project license has not been selected yet. Do not assume reuse rights until a license is added.

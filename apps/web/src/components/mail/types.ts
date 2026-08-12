@@ -6,7 +6,18 @@ import type {
   MailboxView as ContractMailboxView,
 } from "@invook/contracts";
 
-export type MailboxView = ContractMailboxView;
+export type StaticMailboxView =
+  | "all"
+  | "starred"
+  | "shared"
+  | "reminders"
+  | "scheduled"
+  | "drafts"
+  | "done"
+  | "sent"
+  | "trash";
+
+export type MailboxView = ContractMailboxView | `label:${string}`;
 
 export type MailSurface = "mail" | "compose" | "search" | "settings" | "automations";
 

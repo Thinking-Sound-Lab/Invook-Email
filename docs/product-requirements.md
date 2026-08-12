@@ -1,7 +1,7 @@
 # Invook product requirements
 
 **Status:** Memory-first implementation  
-**Updated:** August 9, 2026
+**Updated:** August 11, 2026
 
 ## Product statement
 
@@ -26,7 +26,7 @@ Invook never ships dummy mailbox, contact, memory, label, or draft data. If Gmai
 
 ### Opinionated defaults, user authority
 
-Invook provides predefined Important, Travel, Pitch, and Newsletter labels. Users may change a label, and their decision wins over later model runs.
+Invook provides built-in Important, Travel, Pitch, and Newsletter labels. A user may add an account-owned label with an explicit description, which becomes the complete classification rule for a full indexed-mailbox scan. A user's thread-level label decision wins over later model runs.
 
 User-written Memory is authoritative. Automatic inference must not silently overwrite it.
 
@@ -57,19 +57,25 @@ Google OAuth must:
 - encrypt refresh and access credentials before persistence;
 - queue full-mailbox indexing without blocking the callback.
 
-Indexing stores real normalized messages and thread metadata in PostgreSQL and follows every Gmail result page.
+The first connection stores real normalized messages and thread metadata in PostgreSQL by following every Gmail result page, including Spam and Trash. After that one-time crawl, the mailbox Refresh action and account reconnects use the saved Gmail history cursor to apply message additions, deletions, and Gmail label changes. Only threads whose indexed content changed are relabeled, and only new eligible owner-sent evidence is considered for incremental Memory. An expired history cursor triggers a full snapshot reconciliation with change-aware upserts and deletion handling, so unchanged stored mail does not become new evidence or lose its labels.
 
 ### Mail workspace
 
 The left sidebar contains:
 
 - Compose, Search, Settings, Automations;
-- predefined labels: All, Travel, Important, Pitch, Newsletter;
+- All plus every built-in or user-created label owned by the connected account;
 - mail views: Starred, Shared, Reminders, Scheduled, Drafts, Done, Sent, Trash.
 
 The center pane shows Important mail first, then a divider, then the remaining mail. Selecting a thread replaces the list with the real thread.
 
 The right pane is the future action agent for Find, Write, and Automate. It must not claim an action is available until its API and approval behavior exist.
+
+### Label settings
+
+Settings lists each label, its classification description, real analysis progress, and a delete control. Every label, including a built-in label, can be deleted. Deletion also removes that label's automatic and manual thread decisions and analysis history. Creating a label requires both a name and description. If native Batch is configured and Gmail indexing is complete, creation queues a durable PostgreSQL backfill job that checks every indexed thread. If Batch is unavailable, the label remains in an honest pending state.
+
+Creating a label is deliberately different from processing new mail: a new definition has no prior decisions, so it scans every indexed thread once. After that backfill, newly indexed mail invalidates and recomputes label decisions only for the affected threads.
 
 ### Memory settings
 
@@ -104,7 +110,9 @@ Deleting removes the active record and its text. A non-reversible fingerprint to
 
 ## Batch analysis
 
-Embeddings are not required for Memory v3. The worker uses the selected OpenAI or Azure OpenAI native Batch API as follows:
+Embeddings are not required for Memory v3 or labels. For each label, the worker creates one Batch request per indexed thread, records both matched and non-matched decisions, retries failed requests, and queues continuation jobs when a provider file limit is reached.
+
+For initial Memory, the worker uses the selected OpenAI or Azure OpenAI native Batch API as follows:
 
 1. Select real threads containing at least one eligible owner-sent message. Include incoming messages as context, but allow only eligible owner-sent messages to become evidence.
 2. Normalize external email addresses and remove the mailbox owner's address.
@@ -117,6 +125,8 @@ Embeddings are not required for Memory v3. The worker uses the selected OpenAI o
 9. Merge exact duplicates in application code. There is no mandatory second model batch.
 10. Preserve user-authored Memory and deletion fingerprints. Retry only failed JSONL requests, up to the existing job-attempt limit.
 11. Replace the prior inferred snapshot on the first successful result, merge any retry results, and mark Memory complete only after every request has succeeded.
+
+After initial Memory is complete, newly indexed eligible owner-sent messages are recorded as pending global and exact-contact evidence. When a scope reaches the existing three-message threshold, the worker submits only that scope and merges validated results into the existing inferred Memory. Incremental jobs never replace user-authored Memory or the complete inferred snapshot. Incoming mail may be included as thread context but never becomes evidence.
 
 Email bodies, candidate text, and thread content are always untrusted model input. The prompt must explicitly prohibit following instructions found inside them.
 
@@ -169,7 +179,7 @@ Every classification stores source, confidence, model ID, and analysis version. 
 Browser
   -> Next.js UI
   -> /v1 reverse proxy
-  -> native Node.js HTTP API
+  -> Fastify API
        -> Google OAuth and Gmail API
        -> Drizzle repositories
        -> PostgreSQL
@@ -177,9 +187,10 @@ Browser
 Worker
   -> PostgreSQL workflow runs, checkpoints, and transactional outbox
   -> BullMQ queues in persistent Redis
-  -> Gmail indexing
-  -> selected OpenAI or Azure OpenAI Batch provider for initial Memory
-  -> configured model endpoint for labels, feedback, and drafts
+  -> initial Gmail indexing, search indexing, and initial Memory
+  -> PostgreSQL jobs for Gmail history sync, label backfills, and incremental Memory
+  -> selected OpenAI or Azure OpenAI Batch provider for labels and Memory
+  -> configured model endpoint for feedback and drafts
   -> validated results in PostgreSQL
 ```
 
@@ -194,9 +205,12 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `account_secrets`
 - `threads`
 - `messages`
+- `labels`
 - `thread_labels`
+- `thread_label_analyses`
 - `memory_entries`
 - `memory_deletions`
+- `memory_pending_evidence`
 - `drafts`
 - `message_attachments`
 - `message_embeddings`
@@ -211,10 +225,14 @@ BullMQ owns queue locks, retries, and stalled-job recovery in Redis. PostgreSQL 
 
 ## API requirements
 
-Current Memory and draft endpoints:
+Current mailbox, label, Memory, and draft endpoints include:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `GET` | `/v1/mailbox` | Return the connected mailbox workspace |
+| `POST` | `/v1/mailbox/sync` | Run a worker-backed Gmail history sync from the saved cursor and return after its database job completes |
+| `POST` | `/v1/labels` | Create a label and queue its full indexed-mailbox backfill |
+| `DELETE` | `/v1/labels/:labelId` | Delete any account-owned label and its decisions |
 | `GET` | `/v1/memories` | Return the connected account's real Memory and status |
 | `POST` | `/v1/memories` | Add a user-authored item |
 | `PATCH` | `/v1/memories/:id` | Correct an item and make it user-authored |
@@ -254,7 +272,7 @@ The Memory-first slice is successful when:
 After the Memory loop is measured with real use:
 
 1. add conversational right-panel actions with explicit approvals and audit records;
-2. add Gmail incremental sync and reconciliation;
+2. add Gmail push-notification delivery so background sync does not depend on the current manual Refresh action or an account reconnect;
 3. evaluate semantic retrieval for mailbox finding or factual context, independently of Memory extraction;
 4. add sending, scheduling, reminders, and safe automations;
 5. choose an open-source license and add contribution governance.

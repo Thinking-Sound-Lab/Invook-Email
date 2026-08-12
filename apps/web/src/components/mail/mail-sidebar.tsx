@@ -18,10 +18,15 @@ import {
   Share01Icon,
   SparklesIcon,
   StarIcon,
+  Tag01Icon,
   WorkflowSquare01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { MemoryGenerationProgress } from "@invook/contracts";
+import type {
+  MailLabel,
+  MemoryGenerationProgress,
+  SystemLabelKey,
+} from "@invook/contracts";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
@@ -38,13 +43,12 @@ const workspaceItems = [
   { label: "Automations", icon: WorkflowSquare01Icon, surface: "automations" },
 ] as const;
 
-const labelItems = [
-  { label: "All", icon: InboxIcon, view: "all" },
-  { label: "Important", icon: HonourStarIcon, view: "important" },
-  { label: "Travel", icon: Airplane01Icon, view: "travel" },
-  { label: "Pitch", icon: Megaphone01Icon, view: "pitch" },
-  { label: "Newsletter", icon: News01Icon, view: "newsletter" },
-] as const;
+const labelIcons = {
+  important: HonourStarIcon,
+  travel: Airplane01Icon,
+  pitch: Megaphone01Icon,
+  newsletter: News01Icon,
+} satisfies Record<SystemLabelKey, typeof Tag01Icon>;
 
 const mailItems = [
   { label: "Starred", icon: StarIcon, view: "starred" },
@@ -156,11 +160,13 @@ export function MailSidebar({
   currentView,
   currentSurface,
   memoryProgress,
+  labels,
 }: {
   email: string;
   currentView: MailboxView;
   currentSurface: MailSurface;
   memoryProgress: MemoryGenerationProgress;
+  labels: MailLabel[];
 }) {
   return (
     <aside className="flex min-h-0 flex-col bg-sidebar px-2 py-3 lg:px-3" aria-label="Mailbox navigation">
@@ -202,15 +208,24 @@ export function MailSidebar({
           Labels
         </p>
         <nav className="space-y-0.5" aria-label="Labels">
-          {labelItems.map((item) => (
-            <NavLink
-              key={item.label}
-              label={item.label}
-              icon={item.icon}
-              active={currentSurface === "mail" && currentView === item.view}
-              href={`/mail?view=${item.view}`}
-            />
-          ))}
+          <NavLink
+            label="All"
+            icon={InboxIcon}
+            active={currentSurface === "mail" && currentView === "all"}
+            href="/mail?view=all"
+          />
+          {labels.map((label) => {
+            const view = `label:${label.id}` as const;
+            return (
+              <NavLink
+                key={label.id}
+                label={label.name}
+                icon={label.systemKey ? labelIcons[label.systemKey] : Tag01Icon}
+                active={currentSurface === "mail" && currentView === view}
+                href={`/mail?view=${view}`}
+              />
+            );
+          })}
         </nav>
 
         <p className="mb-1.5 mt-5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">

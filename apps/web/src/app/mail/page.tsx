@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { mailboxViews } from "@invook/contracts";
+import { validate as validateUuid } from "uuid";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
 import { MailList } from "@/components/mail/mail-list";
@@ -11,6 +12,7 @@ import type {
   MailSurface,
   MailThreadSummary,
   SelectedThread,
+  StaticMailboxView,
 } from "@/components/mail/types";
 import {
   ComposeSurface,
@@ -46,7 +48,12 @@ function firstValue(value: string | string[] | undefined): string | undefined {
 }
 
 function normalizeView(value: string | undefined): MailboxView {
-  return value && mailboxViewSet.has(value) ? (value as MailboxView) : "all";
+  if (value && mailboxViewSet.has(value)) return value as StaticMailboxView;
+  if (value?.startsWith("label:")) {
+    const labelId = value.slice("label:".length);
+    if (validateUuid(labelId)) return `label:${labelId}`;
+  }
+  return "all";
 }
 
 function normalizeSurface(value: string | undefined): MailSurface {
@@ -55,21 +62,21 @@ function normalizeSurface(value: string | undefined): MailSurface {
 
 function hasInvookLabel(
   thread: MailThreadSummary,
-  label: "important" | "travel" | "pitch" | "newsletter",
+  systemKey: "important" | "travel" | "pitch" | "newsletter",
 ): boolean {
-  return thread.invookLabels.some((threadLabel) => threadLabel.key === label);
+  return thread.invookLabels.some((label) => label.systemKey === systemKey);
 }
 
 export default async function MailPage({ searchParams }: MailPageProps) {
   await connection();
   const params = await searchParams;
 
-  const currentView = normalizeView(firstValue(params.view));
   const requestedThreadId = firstValue(params.thread);
   const requestedSurface = normalizeSurface(firstValue(params.surface));
   const currentSurface = requestedThreadId ? "mail" : requestedSurface;
   const query = firstValue(params.q)?.trim();
   const mailboxCursor = firstValue(params.cursor)?.trim() || undefined;
+  const currentView = normalizeView(firstValue(params.view));
 
   const workspace = await getMailboxWorkspace({
     cursor: mailboxCursor,
@@ -77,6 +84,9 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     view: currentView,
   });
   if (!workspace) redirect("/");
+  const currentLabel = currentView.startsWith("label:")
+    ? workspace.labels.find((label) => label.id === currentView.slice("label:".length))
+    : null;
 
   const mailboxThreads = workspace.threads as MailThreadSummary[];
   const selectedThread = workspace.selectedThread as SelectedThread | null;
@@ -100,6 +110,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         currentView={currentView}
         mailboxCursor={mailboxCursor}
         aiConfigured={workspace.aiConfigured}
+        availableLabels={workspace.labels}
       />
     );
   } else if (currentSurface === "compose") {
@@ -114,6 +125,8 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         memories={workspace.memories}
         syncState={workspace.account.syncState.memory}
         aiConfigured={workspace.aiConfigured}
+        labels={workspace.labels}
+        batchConfigured={workspace.batchConfigured}
       />
     );
   } else if (currentSurface === "automations") {
@@ -123,11 +136,13 @@ export default async function MailPage({ searchParams }: MailPageProps) {
       <MailList
         account={workspace.account}
         currentView={currentView}
+        title={currentLabel?.name}
         importantThreads={importantThreads}
         mailboxCursor={mailboxCursor}
         pagination={workspace.pagination}
         remainingThreads={remainingThreads}
         query={currentSurface === "search" ? query : undefined}
+        importantView={currentLabel?.systemKey === "important"}
       />
     );
   }
@@ -140,6 +155,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           currentView={currentView}
           currentSurface={currentSurface}
           memoryProgress={workspace.memoryProgress}
+          labels={workspace.labels}
         />
         {centerPane}
         <AgentPanel

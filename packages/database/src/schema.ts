@@ -15,6 +15,7 @@ import {
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
+import type { LabelAnalysisState, SystemLabelKey } from "@invook/contracts";
 
 import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 
@@ -99,6 +100,57 @@ export const accountSecrets = pgTable("account_secrets", {
     .$onUpdate(() => new Date()),
 });
 
+export const mailLabels = pgTable(
+  "labels",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    normalizedName: text("normalized_name").notNull(),
+    description: text("description").notNull(),
+    systemKey: text("system_key").$type<SystemLabelKey>(),
+    definitionVersion: integer("definition_version").notNull().default(1),
+    analysisState: text("analysis_state")
+      .$type<LabelAnalysisState>()
+      .notNull()
+      .default("pending"),
+    lastAnalyzedAt: timestampWithTimezone("last_analyzed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("labels_account_name_idx").on(table.accountId, table.normalizedName),
+    uniqueIndex("labels_account_system_key_idx").on(table.accountId, table.systemKey),
+    index("labels_account_created_idx").on(table.accountId, table.createdAt),
+    check("labels_name_check", sql`char_length(btrim(${table.name})) > 0`),
+    check(
+      "labels_normalized_name_check",
+      sql`char_length(btrim(${table.normalizedName})) > 0`,
+    ),
+    check(
+      "labels_description_check",
+      sql`char_length(btrim(${table.description})) > 0`,
+    ),
+    check(
+      "labels_system_key_check",
+      sql`${table.systemKey} is null or ${table.systemKey} in ('important', 'travel', 'pitch', 'newsletter')`,
+    ),
+    check("labels_definition_version_check", sql`${table.definitionVersion} > 0`),
+    check(
+      "labels_analysis_state_check",
+      sql`${table.analysisState} in ('pending', 'running', 'complete', 'failed')`,
+    ),
+  ],
+);
+
 export const threads = pgTable(
   "threads",
   {
@@ -114,10 +166,9 @@ export const threads = pgTable(
     snippet: text("snippet").notNull().default(""),
     participants: jsonb("participants").$type<string[]>().notNull().default([]),
     labelIds: text("label_ids").array().notNull().default(sql`ARRAY[]::text[]`),
-    classificationVersion: integer("classification_version").notNull().default(0),
-    classifiedAt: timestampWithTimezone("classified_at"),
     latestMessageAt: timestampWithTimezone("latest_message_at"),
     messageCount: integer("message_count").notNull().default(0),
+    contentVersion: integer("content_version").notNull().default(1),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -131,6 +182,7 @@ export const threads = pgTable(
     ),
     index("threads_user_latest_idx").on(table.userId, table.latestMessageAt),
     check("threads_message_count_check", sql`${table.messageCount} >= 0`),
+    check("threads_content_version_check", sql`${table.contentVersion} > 0`),
   ],
 );
 
@@ -147,9 +199,9 @@ export const threadLabels = pgTable(
     threadId: uuid("thread_id")
       .notNull()
       .references(() => threads.id, { onDelete: "cascade" }),
-    labelKey: text("label_key")
-      .$type<"important" | "travel" | "pitch" | "newsletter">()
-      .notNull(),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => mailLabels.id, { onDelete: "cascade" }),
     source: text("source").$type<"ai" | "user">().notNull(),
     state: text("state").$type<"applied" | "dismissed">().notNull(),
     confidence: numeric("confidence", { precision: 5, scale: 2 }),
@@ -162,21 +214,53 @@ export const threadLabels = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
-    uniqueIndex("thread_labels_thread_key_idx").on(table.threadId, table.labelKey),
-    index("thread_labels_account_key_state_idx").on(
+    uniqueIndex("thread_labels_thread_label_idx").on(table.threadId, table.labelId),
+    index("thread_labels_account_label_state_idx").on(
       table.accountId,
-      table.labelKey,
+      table.labelId,
       table.state,
-    ),
-    check(
-      "thread_labels_key_check",
-      sql`${table.labelKey} in ('important', 'travel', 'pitch', 'newsletter')`,
     ),
     check("thread_labels_source_check", sql`${table.source} in ('ai', 'user')`),
     check("thread_labels_state_check", sql`${table.state} in ('applied', 'dismissed')`),
     check(
       "thread_labels_confidence_check",
       sql`${table.confidence} is null or ${table.confidence} between 0 and 100`,
+    ),
+  ],
+);
+
+export const threadLabelAnalyses = pgTable(
+  "thread_label_analyses",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => mailLabels.id, { onDelete: "cascade" }),
+    definitionVersion: integer("definition_version").notNull(),
+    modelId: text("model_id"),
+    analyzedAt: timestampWithTimezone("analyzed_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("thread_label_analyses_thread_label_idx").on(
+      table.threadId,
+      table.labelId,
+    ),
+    index("thread_label_analyses_label_version_idx").on(
+      table.labelId,
+      table.definitionVersion,
+    ),
+    check(
+      "thread_label_analyses_definition_version_check",
+      sql`${table.definitionVersion} > 0`,
     ),
   ],
 );
@@ -199,6 +283,7 @@ export const messages = pgTable(
     recipients: jsonb("recipients").$type<string[]>().notNull().default([]),
     labelIds: text("label_ids").array().notNull().default(sql`ARRAY[]::text[]`),
     subject: text("subject").notNull().default(""),
+    snippet: text("snippet").notNull().default(""),
     bodyText: text("body_text").notNull().default(""),
     sentAt: timestampWithTimezone("sent_at").notNull(),
     isMemoryEligible: boolean("is_memory_eligible").notNull().default(false),
@@ -234,6 +319,55 @@ export const messages = pgTable(
         sql`${table.direction} = 'outgoing' and ${table.isMemoryEligible} and not ${table.excludedFromMemory}`,
       ),
     check("messages_direction_check", sql`${table.direction} in ('incoming', 'outgoing')`),
+  ],
+);
+
+export const memoryPendingEvidence = pgTable(
+  "memory_pending_evidence",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    scope: text("scope").$type<"global" | "contact">().notNull(),
+    contactEmail: text("contact_email").notNull().default(""),
+    schemaVersion: integer("schema_version").notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("memory_pending_evidence_message_scope_idx").on(
+      table.messageId,
+      table.scope,
+      table.contactEmail,
+    ),
+    index("memory_pending_evidence_account_scope_idx").on(
+      table.accountId,
+      table.schemaVersion,
+      table.scope,
+      table.contactEmail,
+      table.createdAt,
+    ),
+    check(
+      "memory_pending_evidence_scope_check",
+      sql`${table.scope} in ('global', 'contact')`,
+    ),
+    check(
+      "memory_pending_evidence_contact_check",
+      sql`(${table.scope} = 'global' and ${table.contactEmail} = '') or (${table.scope} = 'contact' and char_length(btrim(${table.contactEmail})) > 0)`,
+    ),
+    check(
+      "memory_pending_evidence_schema_version_check",
+      sql`${table.schemaVersion} > 0`,
+    ),
   ],
 );
 
@@ -480,6 +614,47 @@ export const drafts = pgTable(
       "drafts_status_check",
       sql`${table.status} in ('editing', 'sent', 'discarded', 'failed')`,
     ),
+  ],
+);
+
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").references(() => connectedAccounts.id, {
+      onDelete: "cascade",
+    }),
+    jobType: text("job_type").notNull(),
+    status: text("status")
+      .$type<"queued" | "running" | "retry" | "complete" | "failed">()
+      .notNull()
+      .default("queued"),
+    payload: jsonb("payload").$type<JsonObject>().notNull().default({}),
+    result: jsonb("result").$type<JsonObject>(),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    lockedAt: timestampWithTimezone("locked_at"),
+    lockedBy: text("locked_by"),
+    lastError: text("last_error"),
+    idempotencyKey: text("idempotency_key"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("jobs_idempotency_key_idx").on(table.idempotencyKey),
+    index("jobs_ready_idx")
+      .on(table.status, table.createdAt)
+      .where(sql`${table.status} in ('queued', 'retry')`),
+    check(
+      "jobs_status_check",
+      sql`${table.status} in ('queued', 'running', 'retry', 'complete', 'failed')`,
+    ),
+    check("jobs_attempts_check", sql`${table.attempts} >= 0`),
+    check("jobs_max_attempts_check", sql`${table.maxAttempts} > 0`),
   ],
 );
 

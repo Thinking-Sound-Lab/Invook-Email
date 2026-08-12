@@ -4,6 +4,7 @@ import {
   StarIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import type { MailLabel } from "@invook/contracts";
 import Link from "next/link";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -26,11 +27,13 @@ export function ThreadReader({
   currentView,
   mailboxCursor,
   aiConfigured,
+  availableLabels,
 }: {
   thread: SelectedThread;
   currentView: MailboxView;
   mailboxCursor?: string;
   aiConfigured: boolean;
+  availableLabels: MailLabel[];
 }) {
   const mailboxQuery = new URLSearchParams({ view: currentView });
   if (mailboxCursor) mailboxQuery.set("cursor", mailboxCursor);
@@ -66,6 +69,7 @@ export function ThreadReader({
             key={thread.id}
             threadId={thread.id}
             initialLabels={thread.invookLabels}
+            availableLabels={availableLabels}
           />
 
           <div className="mt-10 space-y-10">

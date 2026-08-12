@@ -1,4 +1,4 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { FastifyPluginAsync } from "fastify";
 
 import { createMailAgent, isAiConfigured } from "@invook/ai";
 import {
@@ -7,47 +7,20 @@ import {
 } from "@invook/database";
 import { pipeAgentUIStreamToResponse } from "ai";
 
-import { getCurrentSession } from "../auth/session";
-import { hasAllowedMutationOrigin, readJsonBody } from "../http/request";
-import { sendProblem } from "../http/responses";
+import { mutationAccessHooks, requireSession } from "../access";
+import { sendJson, sendProblem } from "../responses";
 import { generateDraftForUser } from "../services/drafts";
 import { searchMailForUser } from "../services/search";
 
-export async function handleMailAgent(
-  request: IncomingMessage,
-  response: ServerResponse,
-  requestId: string,
-) {
-  const session = getCurrentSession(request);
-  if (!session) {
-    sendProblem(response, requestId, 401, "Authentication required");
-    return;
-  }
-  if (!hasAllowedMutationOrigin(request)) {
-    sendProblem(response, requestId, 403, "Request origin is not allowed");
-    return;
-  }
-  if (!isAiConfigured()) {
-    sendProblem(response, requestId, 503, "AI model is not configured");
-    return;
-  }
+type SearchQuery = { q?: unknown };
 
-  let body: unknown;
-  try {
-    body = await readJsonBody(request, 10_000_000);
-  } catch {
-    sendProblem(response, requestId, 400, "Invalid JSON request body");
-    return;
-  }
+function parseMessages(body: unknown) {
   const suppliedMessages =
     body && typeof body === "object" && "messages" in body
       ? body.messages
       : undefined;
-  if (!Array.isArray(suppliedMessages)) {
-    sendProblem(response, requestId, 400, "Agent messages are required");
-    return;
-  }
-  const uiMessages = suppliedMessages.flatMap((message) => {
+  if (!Array.isArray(suppliedMessages)) return [];
+  return suppliedMessages.flatMap((message) => {
     if (
       !message ||
       typeof message !== "object" ||
@@ -74,77 +47,102 @@ export async function handleMailAgent(
       ? [{ id: message.id, role: message.role, parts }]
       : [];
   });
-  if (uiMessages.length === 0) {
-    sendProblem(response, requestId, 400, "A text agent message is required");
-    return;
-  }
+}
 
-  const requestedThreadId =
-    body &&
-    typeof body === "object" &&
-    "currentThreadId" in body &&
-    typeof body.currentThreadId === "string"
-      ? body.currentThreadId
-      : null;
-  const currentThread = requestedThreadId
-    ? await getMailboxThreadForAgent(session.userId, requestedThreadId)
-    : null;
-
-  const agent = createMailAgent({
-    searchMail: (query) =>
-      searchMailForUser({
+export const registerAgentRoutes: FastifyPluginAsync = async (api) => {
+  api.get<{ Querystring: SearchQuery }>(
+    "/v1/mail/search",
+    { onRequest: requireSession },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const query = typeof request.query.q === "string" ? request.query.q.trim() : "";
+      if (!query || query.length > 1_000) {
+        await sendProblem(request, reply, 400, "A valid mail search query is required");
+        return;
+      }
+      const results = await searchMailForUser({
         userId: session.userId,
         query,
         onSemanticError: (error) => {
-          console.error("api: agent semantic search unavailable", {
-            requestId,
+          console.error("api: semantic mail search unavailable", {
+            requestId: request.id,
             name: error instanceof Error ? error.name : "UnknownError",
           });
         },
-      }),
-    getThread: async (threadId) => {
-      const thread = await getMailboxThreadForAgent(session.userId, threadId);
-      return thread
-        ? {
-            ...thread,
-            messages: thread.messages.map((message) => ({
-              ...message,
-              sentAt: message.sentAt.toISOString(),
-            })),
-          }
-        : null;
-    },
-    listAttachments: (threadId) =>
-      listMailboxThreadAttachments(session.userId, threadId),
-    draftReply: async (threadId, instruction) => {
-      const draft = await generateDraftForUser({
-        userId: session.userId,
-        threadId,
-        instruction,
       });
-      if (!draft) throw new Error("The email thread was not found.");
-      return {
-        draftId: draft.id,
-        threadId: draft.threadId,
-        text: draft.currentText,
-      };
+      await sendJson(reply, 200, { results });
     },
-  }, currentThread
-    ? {
-        currentThreadId: currentThread.id,
-      }
-    : undefined);
+  );
 
-  const controller = new AbortController();
-  request.once("aborted", () => controller.abort());
-  response.once("close", () => {
-    if (!response.writableEnded) controller.abort();
-  });
-  await pipeAgentUIStreamToResponse({
-    response,
-    agent,
-    uiMessages,
-    abortSignal: controller.signal,
-    headers: { "x-request-id": requestId },
-  });
-}
+  api.post<{ Body: unknown }>(
+    "/v1/agent",
+    { onRequest: mutationAccessHooks, bodyLimit: 10_000_000 },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      if (!isAiConfigured()) {
+        await sendProblem(request, reply, 503, "AI model is not configured");
+        return;
+      }
+      const uiMessages = parseMessages(request.body);
+      if (uiMessages.length === 0) {
+        await sendProblem(request, reply, 400, "A text agent message is required");
+        return;
+      }
+      const requestedThreadId =
+        request.body &&
+        typeof request.body === "object" &&
+        "currentThreadId" in request.body &&
+        typeof request.body.currentThreadId === "string"
+          ? request.body.currentThreadId
+          : null;
+      const currentThread = requestedThreadId
+        ? await getMailboxThreadForAgent(session.userId, requestedThreadId)
+        : null;
+      const agent = createMailAgent(
+        {
+          searchMail: (query) =>
+            searchMailForUser({ userId: session.userId, query }),
+          getThread: async (threadId) => {
+            const thread = await getMailboxThreadForAgent(session.userId, threadId);
+            return thread
+              ? {
+                  ...thread,
+                  messages: thread.messages.map((message) => ({
+                    ...message,
+                    sentAt: message.sentAt.toISOString(),
+                  })),
+                }
+              : null;
+          },
+          listAttachments: (threadId) =>
+            listMailboxThreadAttachments(session.userId, threadId),
+          draftReply: async (threadId, instruction) => {
+            const draft = await generateDraftForUser({
+              userId: session.userId,
+              threadId,
+              instruction,
+            });
+            if (!draft) throw new Error("The email thread was not found.");
+            return { draftId: draft.id, threadId: draft.threadId, text: draft.currentText };
+          },
+        },
+        currentThread ? { currentThreadId: currentThread.id } : undefined,
+      );
+      const controller = new AbortController();
+      request.raw.once("aborted", () => controller.abort());
+      reply.raw.once("close", () => {
+        if (!reply.raw.writableEnded) controller.abort();
+      });
+      reply.hijack();
+      await pipeAgentUIStreamToResponse({
+        response: reply.raw,
+        agent,
+        uiMessages,
+        abortSignal: controller.signal,
+        headers: { "x-request-id": request.id },
+      });
+    },
+  );
+};

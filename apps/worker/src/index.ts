@@ -1,5 +1,6 @@
 import {
   AiConfigurationError,
+  deleteBatchFiles,
   buildEmbeddingInput,
   createEmbeddingBatch,
   deleteEmbeddingBatchInputFile,
@@ -17,18 +18,27 @@ import {
   isMemoryBatchProviderConfigured,
   batchProviders,
   MemoryBatchConfigurationError,
+  readLabelBatch,
+  submitLabelBatch,
   readEmbeddingBatch,
   readMemoryBatch,
   prepareEmbeddingBatch,
   submitMemoryBatch,
   uploadEmbeddingBatchInput,
   type FeedbackMemoryCandidate,
+  type LabelAnalysisThread,
+  type LabelBatchManifestEntry,
   type MemoryAnalysisThread,
   type MemoryBatchManifestEntry,
   type BatchProvider,
   type MessageMemoryCandidate,
 } from "@invook/ai";
 import {
+  claimNextJob,
+  clearPendingMemoryEvidence,
+  completeIncrementalSync,
+  completeJob,
+  deleteIndexedMessage,
   completeMailSyncItem,
   completeMailSyncRun,
   completeEmbeddingBatchSubmission,
@@ -37,12 +47,18 @@ import {
   decryptGoogleCredential,
   DRAFT_FEEDBACK_VERSION,
   encryptGoogleCredential,
+  enqueueAnalysisJobsForIndexedAccounts,
+  enqueueLabelBackfillContinuation,
+  enqueueLabelBatchRetry,
   enqueueBatchEvent,
   enqueueEmbeddingBackfillContinuation,
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
+  deferJobWithoutAttempt,
+  failAnalysisJob,
+  failJobAndAccount,
   failMailSyncItem,
   failMailSyncRun,
   failWorkflowStep,
@@ -50,10 +66,19 @@ import {
   getEmbeddingCandidates,
   getEmbeddingBatchSubmissionForStep,
   getDraftFeedbackSamples,
+  getIndexedMessageIds,
+  getLabelBatchSubmission,
+  getLabelForAnalysis,
   getMemoryAnalysisThreads,
-  getBatchSubmission,
+  getThreadsForLabelBackfill,
+  getThreadsForLabelRetry,
   getUserAuthoredMemories,
   getWorkerAccount,
+  listenForJobNotifications,
+  saveLabelBatchResults,
+  setAccountSyncState,
+  setLabelAnalysisState,
+  getBatchSubmission,
   hasCompletedMailSyncPage,
   listenForOutboxNotifications,
   MAIL_INDEX_VERSION,
@@ -78,16 +103,19 @@ import {
   startMailSyncRun,
   updateStoredCredential,
   upsertMailboxMessage,
+  type ClaimedJob,
   type GoogleCredential,
   type MemoryType,
   type WorkflowStepJob,
 } from "@invook/database";
 import {
   extractEmailAddress,
+  gmailHistoryChanges,
   getGmailMessage,
   getGmailProfile,
   GmailApiError,
   isMemoryEligible,
+  listGmailHistory,
   listGmailMessages,
   parseGmailMessage,
   refreshGoogleAccessToken,
@@ -99,6 +127,7 @@ import { BullQueueRuntime, type WorkflowJob } from "./queue";
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
+const workerId = `worker-${process.pid}`;
 const feedbackBatchSize = 24;
 const embeddingBatchRequestLimit = 2_000;
 const embeddingBatchAttemptLimit = 3;
@@ -186,15 +215,16 @@ async function storeMessage(options: {
   accountId: string;
   accountEmail: string;
   message: ParsedGmailMessage;
+  ingestionMode: "initial" | "incremental";
 }) {
-  const { userId, accountId, accountEmail, message } = options;
+  const { userId, accountId, accountEmail, message, ingestionMode } = options;
   const direction =
     message.labelIds.includes("SENT") ||
     extractEmailAddress(message.from) === accountEmail.toLowerCase()
       ? "outgoing"
       : "incoming";
 
-  await upsertMailboxMessage({
+  return upsertMailboxMessage({
     userId,
     accountId,
     providerThreadId: message.providerThreadId,
@@ -209,8 +239,158 @@ async function storeMessage(options: {
     recipients: [...message.to, ...message.cc],
     bodyText: message.bodyText,
     isMemoryEligible: direction === "outgoing" && isMemoryEligible(message),
+    ingestionMode,
+    memoryContactEmails: normalizedEmails(
+      [message.from, ...message.to, ...message.cc],
+      accountEmail,
+    ),
     attachments: message.attachments,
   });
+}
+
+async function syncMailbox(options: {
+  accessToken: string;
+  userId: string;
+  accountId: string;
+  accountEmail: string;
+  ingestionMode: "initial" | "incremental";
+}) {
+  let pageToken: string | undefined;
+  const changedThreadIds = new Set<string>();
+  const providerMessageIds = new Set<string>();
+
+  do {
+    const page = await listGmailMessages(options.accessToken, {
+      maxResults: 100,
+      pageToken,
+    });
+    const references = page.messages ?? [];
+
+    for (let start = 0; start < references.length; start += 5) {
+      const batch = references.slice(start, start + 5);
+      const gmailMessages = await Promise.all(
+        batch.map(async (reference) => {
+          try {
+            return await getGmailMessage(options.accessToken, reference.id);
+          } catch (error) {
+            if (error instanceof GmailApiError && error.status === 404) return null;
+            throw error;
+          }
+        }),
+      );
+      for (const gmailMessage of gmailMessages) {
+        if (!gmailMessage) continue;
+        providerMessageIds.add(gmailMessage.id);
+        const stored = await storeMessage({
+          userId: options.userId,
+          accountId: options.accountId,
+          accountEmail: options.accountEmail,
+          message: parseGmailMessage(gmailMessage),
+          ingestionMode: options.ingestionMode,
+        });
+        if (stored.changed) changedThreadIds.add(stored.threadId);
+      }
+    }
+
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  const indexedMessageIds = await getIndexedMessageIds(options.accountId);
+  for (const messageId of indexedMessageIds) {
+    if (providerMessageIds.has(messageId)) continue;
+    const deleted = await deleteIndexedMessage({
+      accountId: options.accountId,
+      providerMessageId: messageId,
+    });
+    if (deleted.changed && deleted.threadId) {
+      changedThreadIds.add(deleted.threadId);
+    }
+  }
+
+  return changedThreadIds;
+}
+
+async function syncMailboxHistory(options: {
+  accessToken: string;
+  userId: string;
+  accountId: string;
+  accountEmail: string;
+  startHistoryId: string;
+}) {
+  let pageToken: string | undefined;
+  let historyId = options.startHistoryId;
+  const messageActions = new Map<string, "upsert" | "delete">();
+
+  do {
+    const page = await listGmailHistory(options.accessToken, {
+      startHistoryId: options.startHistoryId,
+      maxResults: 500,
+      pageToken,
+    });
+    for (const history of page.history ?? []) {
+      for (const change of gmailHistoryChanges(history)) {
+        messageActions.set(change.messageId, change.action);
+      }
+    }
+    if (page.historyId) historyId = page.historyId;
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+
+  const changedThreadIds = new Set<string>();
+  for (const [messageId, action] of messageActions) {
+    if (action !== "delete") continue;
+    const deleted = await deleteIndexedMessage({
+      accountId: options.accountId,
+      providerMessageId: messageId,
+    });
+    if (deleted.changed && deleted.threadId) {
+      changedThreadIds.add(deleted.threadId);
+    }
+  }
+
+  const ids = Array.from(messageActions)
+    .filter(([, action]) => action === "upsert")
+    .map(([messageId]) => messageId);
+  for (let start = 0; start < ids.length; start += 5) {
+    const batch = ids.slice(start, start + 5);
+    const gmailMessages = await Promise.all(
+      batch.map(async (messageId) => {
+        try {
+          return {
+            messageId,
+            message: await getGmailMessage(options.accessToken, messageId),
+          };
+        } catch (error) {
+          if (error instanceof GmailApiError && error.status === 404) {
+            return { messageId, message: null };
+          }
+          throw error;
+        }
+      }),
+    );
+    for (const gmailMessage of gmailMessages) {
+      if (!gmailMessage.message) {
+        const deleted = await deleteIndexedMessage({
+          accountId: options.accountId,
+          providerMessageId: gmailMessage.messageId,
+        });
+        if (deleted.changed && deleted.threadId) {
+          changedThreadIds.add(deleted.threadId);
+        }
+        continue;
+      }
+      const stored = await storeMessage({
+        userId: options.userId,
+        accountId: options.accountId,
+        accountEmail: options.accountEmail,
+        message: parseGmailMessage(gmailMessage.message),
+        ingestionMode: "incremental",
+      });
+      if (stored.changed) changedThreadIds.add(stored.threadId);
+    }
+  }
+
+  return { changedThreadIds, historyId };
 }
 
 async function getMailSyncContext(accountId: string) {
@@ -283,10 +463,75 @@ async function runGmailMessage(job: WorkflowStepJob) {
     userId: account.userId,
     accountId: account.id,
     accountEmail: account.email,
+    ingestionMode: "initial",
     message: parseGmailMessage(gmailMessage),
   });
   await completeMailSyncItem(runId, providerMessageId);
   return { status: "complete", runId, providerMessageId };
+}
+
+async function runIncrementalSync(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The Gmail sync job has no connected account.");
+  const account = await getWorkerAccount(job.accountId);
+  if (!account) throw new Error("The connected Gmail account or credential was not found.");
+
+  const storedCredential = decryptGoogleCredential(account.tokenCiphertext, encryptionKey);
+  const credential = await refreshCredentialIfRequired(job.accountId, storedCredential);
+  await setAccountSyncState(job.accountId, {
+    ...account.syncState,
+    mailSync: "running",
+  });
+
+  const requestedHistoryId =
+    typeof job.payload.historyId === "string" && job.payload.historyId
+      ? job.payload.historyId
+      : account.historyCursor;
+  let changedThreadIds = new Set<string>();
+  let historyId = requestedHistoryId;
+  if (requestedHistoryId) {
+    try {
+      const incremental = await syncMailboxHistory({
+        accessToken: credential.accessToken,
+        userId: account.userId,
+        accountId: account.id,
+        accountEmail: account.email,
+        startHistoryId: requestedHistoryId,
+      });
+      changedThreadIds = incremental.changedThreadIds;
+      historyId = incremental.historyId;
+    } catch (error) {
+      if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+      const baseline = await getGmailProfile(credential.accessToken);
+      historyId = baseline.historyId;
+      changedThreadIds = await syncMailbox({
+        accessToken: credential.accessToken,
+        userId: account.userId,
+        accountId: account.id,
+        accountEmail: account.email,
+        ingestionMode: "incremental",
+      });
+    }
+  } else {
+    const baseline = await getGmailProfile(credential.accessToken);
+    historyId = baseline.historyId;
+    changedThreadIds = await syncMailbox({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      ingestionMode: "incremental",
+    });
+  }
+
+  await completeIncrementalSync({
+    accountId: account.id,
+    historyCursor: historyId,
+    changedThreadIds: Array.from(changedThreadIds),
+  });
+  return {
+    changedThreadCount: changedThreadIds.size,
+    historyCursor: historyId,
+  };
 }
 
 async function runGmailFinalize(job: WorkflowStepJob) {
@@ -297,6 +542,7 @@ async function runGmailFinalize(job: WorkflowStepJob) {
   const { credential } = await getMailSyncContext(job.accountId);
   const gmailProfile = await getGmailProfile(credential.accessToken);
   await completeMailSyncRun({ runId, finalHistoryCursor: gmailProfile.historyId });
+  await enqueueAnalysisJobsForIndexedAccounts();
   return { status: "complete", runId, historyCursor: gmailProfile.historyId };
 }
 
@@ -678,6 +924,10 @@ type MemorySubmissionResult = {
   batchAttempt: number;
   rootSubmissionJobId: string;
   replaceExisting: boolean;
+  pendingScope: {
+    mode: "global" | "contact";
+    contactEmail: string | null;
+  } | null;
 };
 
 function toMemoryAnalysisThreads(
@@ -730,14 +980,14 @@ function parseManifest(value: unknown): MemoryBatchManifestEntry[] {
 
 function requiredString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${name} is missing from the Memory batch job.`);
+    throw new Error(`${name} is missing from the batch job.`);
   }
   return value;
 }
 
 function requiredInteger(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
-    throw new Error(`${name} is invalid in the Memory batch job.`);
+    throw new Error(`${name} is invalid in the batch job.`);
   }
   return value;
 }
@@ -753,6 +1003,29 @@ function parseSubmissionResult(value: unknown): MemorySubmissionResult | null {
   const provider = result.provider as BatchProvider;
   if (typeof result.replaceExisting !== "boolean") {
     throw new Error("The Memory Batch replacement state is missing.");
+  }
+  let pendingScope: MemorySubmissionResult["pendingScope"] = null;
+  if (result.pendingScope !== null && result.pendingScope !== undefined) {
+    if (!result.pendingScope || typeof result.pendingScope !== "object") {
+      throw new Error("The incremental Memory scope is invalid.");
+    }
+    const mode = "mode" in result.pendingScope ? result.pendingScope.mode : undefined;
+    const contactEmail =
+      "contactEmail" in result.pendingScope
+        ? result.pendingScope.contactEmail
+        : undefined;
+    if (
+      (mode !== "global" && mode !== "contact") ||
+      (mode === "global" && contactEmail !== null) ||
+      (mode === "contact" &&
+        (typeof contactEmail !== "string" || !contactEmail.trim()))
+    ) {
+      throw new Error("The incremental Memory scope is invalid.");
+    }
+    pendingScope = {
+      mode,
+      contactEmail: mode === "contact" ? String(contactEmail) : null,
+    };
   }
   const manifest = parseManifest(result.manifest);
   const requestCount = requiredInteger(
@@ -786,6 +1059,7 @@ function parseSubmissionResult(value: unknown): MemorySubmissionResult | null {
       "Root Memory submission job ID",
     ),
     replaceExisting: result.replaceExisting,
+    pendingScope,
   };
 }
 
@@ -863,6 +1137,46 @@ function validateBatchCandidates(input: {
   return valid;
 }
 
+async function clearMemoryEvidenceUsedByCandidates(
+  accountId: string,
+  memories: MessageMemoryCandidate[],
+) {
+  const evidenceByScope = new Map<
+    string,
+    {
+      mode: "global" | "contact";
+      contactEmail: string | null;
+      messageIds: Set<string>;
+    }
+  >();
+  for (const memory of memories) {
+    const mode = memory.type === "contact" ? "contact" : "global";
+    const contactEmail = mode === "contact" ? memory.contactEmail : null;
+    if (mode === "contact" && !contactEmail) continue;
+    const key = `${mode}:${contactEmail ?? ""}`;
+    const scope = evidenceByScope.get(key) ?? {
+      mode,
+      contactEmail,
+      messageIds: new Set<string>(),
+    };
+    for (const messageId of memory.evidenceMessageIds) {
+      scope.messageIds.add(messageId);
+    }
+    evidenceByScope.set(key, scope);
+  }
+
+  await Promise.all(
+    Array.from(evidenceByScope.values()).map((scope) =>
+      clearPendingMemoryEvidence({
+        accountId,
+        mode: scope.mode,
+        contactEmail: scope.contactEmail,
+        messageIds: Array.from(scope.messageIds),
+      }),
+    ),
+  );
+}
+
 async function runMemoryExtraction(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The memory job has no connected account.");
   if (job.payload.schemaVersion !== MEMORY_SCHEMA_VERSION) {
@@ -890,6 +1204,7 @@ async function runMemoryExtraction(job: WorkflowStepJob) {
       modelId: null,
       memories: [],
     });
+    await enqueueAnalysisJobsForIndexedAccounts();
     return {
       status: "complete",
       threadCount: threads.length,
@@ -914,6 +1229,7 @@ async function runMemoryExtraction(job: WorkflowStepJob) {
       modelId: null,
       memories: [],
     });
+    await enqueueAnalysisJobsForIndexedAccounts();
     return {
       status: "complete",
       threadCount: threads.length,
@@ -928,12 +1244,88 @@ async function runMemoryExtraction(job: WorkflowStepJob) {
     batchAttempt: 1,
     rootSubmissionJobId: job.id,
     replaceExisting: true,
+    pendingScope: null,
     threadCount: threads.length,
     evidenceMessageCount,
   };
 }
 
-async function runMemoryBatchRetry(job: WorkflowStepJob) {
+async function runIncrementalMemoryExtraction(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The incremental Memory job has no account.");
+  if (job.payload.schemaVersion !== MEMORY_SCHEMA_VERSION) {
+    return {
+      status: "superseded",
+      requestedSchemaVersion: job.payload.schemaVersion ?? null,
+      currentSchemaVersion: MEMORY_SCHEMA_VERSION,
+    };
+  }
+  const mode = job.payload.mode;
+  const contactEmail = job.payload.contactEmail;
+  const evidenceMessageIds = job.payload.evidenceMessageIds;
+  if (
+    (mode !== "global" && mode !== "contact") ||
+    (mode === "global" && contactEmail !== null) ||
+    (mode === "contact" &&
+      (typeof contactEmail !== "string" || !contactEmail.trim())) ||
+    !Array.isArray(evidenceMessageIds) ||
+    evidenceMessageIds.some((id) => typeof id !== "string")
+  ) {
+    throw new Error("The incremental Memory evidence scope is invalid.");
+  }
+  const normalizedContactEmail =
+    mode === "contact" ? String(contactEmail).trim().toLowerCase() : null;
+
+  const account = await getWorkerAccount(job.accountId);
+  if (!account) throw new Error("The connected Gmail account was not found.");
+  const threads = toMemoryAnalysisThreads(
+    await getMemoryAnalysisThreads(account.id, evidenceMessageIds),
+    account.email,
+  );
+  const availableEvidenceIds = new Set(
+    threads.flatMap((thread) =>
+      thread.messages
+        .filter((message) => message.ownerEvidence)
+        .map((message) => message.id),
+    ),
+  );
+  const currentEvidenceMessageIds = evidenceMessageIds.filter((id) =>
+    availableEvidenceIds.has(id),
+  );
+  if (currentEvidenceMessageIds.length < 3) {
+    return {
+      status: "waiting_for_repetition",
+      evidenceMessageCount: currentEvidenceMessageIds.length,
+    };
+  }
+  if (!isMemoryBatchConfigured()) throw new MemoryBatchConfigurationError();
+
+  const submission = await submitMemoryBatch({
+    submissionId: job.id,
+    batchAttempt: 1,
+    threads,
+    protectedMemories: await getUserAuthoredMemories(account.id),
+    scopeSelection: {
+      mode,
+      contactEmail: normalizedContactEmail,
+    },
+  });
+  if (!submission) {
+    throw new Error("The incremental Memory Batch produced no requests.");
+  }
+  return {
+    status: "submitted",
+    ...submission,
+    batchAttempt: 1,
+    rootSubmissionJobId: job.id,
+    replaceExisting: false,
+    pendingScope: {
+      mode,
+      contactEmail: normalizedContactEmail,
+    },
+  };
+}
+
+async function runMemoryBatchRetry(job: ClaimedJob | WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Memory retry has no connected account.");
   const parentSubmissionJobId = requiredString(
     job.payload.parentSubmissionJobId,
@@ -990,10 +1382,11 @@ async function runMemoryBatchRetry(job: WorkflowStepJob) {
     batchAttempt,
     rootSubmissionJobId,
     replaceExisting: job.payload.replaceExisting,
+    pendingScope: parentDetails.pendingScope,
   };
 }
 
-async function runMemoryBatchEvent(job: WorkflowStepJob) {
+async function runMemoryBatchEvent(job: ClaimedJob | WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Memory batch event has no account.");
   const submissionJobId = requiredString(
     job.payload.submissionJobId,
@@ -1070,8 +1463,14 @@ async function runMemoryBatchEvent(job: WorkflowStepJob) {
       modelId: batch.modelId,
       memories,
       replaceExisting: details.replaceExisting,
-      markComplete: failedManifest.length === 0,
+      markComplete:
+        details.pendingScope === null && failedManifest.length === 0,
     });
+    await clearMemoryEvidenceUsedByCandidates(submission.accountId, memories);
+
+    if (details.pendingScope === null && failedManifest.length === 0) {
+      await enqueueAnalysisJobsForIndexedAccounts();
+    }
   }
 
   let retryJobId: string | null = null;
@@ -1087,11 +1486,11 @@ async function runMemoryBatchEvent(job: WorkflowStepJob) {
     });
   } else if (failedManifest.length > 0) {
     await setMemorySyncStage(submission.accountId, "failed");
-  } else if (!hasSuccessfulRequests) {
+  } else if (!hasSuccessfulRequests && details.pendingScope === null) {
     await setMemorySyncStage(submission.accountId, "complete");
   }
 
-  const cleanupFailures = await deleteMemoryBatchFiles({
+  const cleanupFailures = await deleteBatchFiles({
     provider: details.provider,
     inputFileId: details.inputFileId,
     outputFileId: batch.outputFileId,
@@ -1119,6 +1518,420 @@ async function runMemoryBatchEvent(job: WorkflowStepJob) {
     memoryCount: memories.length,
     failedRequestCount: failedManifest.length,
     retryJobId,
+  };
+}
+
+type LabelSubmissionResult = {
+  provider: BatchProvider;
+  providerBatchId: string;
+  inputFileId: string;
+  modelId: string;
+  requestCount: number;
+  manifest: LabelBatchManifestEntry[];
+  batchAttempt: number;
+  rootSubmissionJobId: string;
+  labelId: string;
+  definitionVersion: number;
+  continueBackfill: boolean;
+};
+
+function parseLabelManifest(value: unknown): LabelBatchManifestEntry[] {
+  if (!Array.isArray(value)) throw new Error("The label Batch manifest is missing.");
+  return value.map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error("The label Batch manifest is invalid.");
+    }
+    const key = "key" in entry ? entry.key : undefined;
+    const labelId = "labelId" in entry ? entry.labelId : undefined;
+    const definitionVersion =
+      "definitionVersion" in entry ? entry.definitionVersion : undefined;
+    const threadId = "threadId" in entry ? entry.threadId : undefined;
+    const threadVersion = "threadVersion" in entry ? entry.threadVersion : undefined;
+    if (
+      typeof key !== "string" ||
+      typeof labelId !== "string" ||
+      typeof definitionVersion !== "number" ||
+      !Number.isInteger(definitionVersion) ||
+      definitionVersion < 1 ||
+      typeof threadId !== "string" ||
+      typeof threadVersion !== "number" ||
+      !Number.isInteger(threadVersion) ||
+      threadVersion < 1
+    ) {
+      throw new Error("The label Batch manifest is invalid.");
+    }
+    return { key, labelId, definitionVersion, threadId, threadVersion };
+  });
+}
+
+function parseLabelSubmissionResult(value: unknown): LabelSubmissionResult | null {
+  if (!value || typeof value !== "object") {
+    throw new Error("The label Batch submission result is missing.");
+  }
+  const result = value as Record<string, unknown>;
+  if (!batchProviders.includes(result.provider as BatchProvider)) {
+    return null;
+  }
+  if (typeof result.continueBackfill !== "boolean") {
+    throw new Error("The label Batch continuation state is missing.");
+  }
+  const manifest = parseLabelManifest(result.manifest);
+  const requestCount = requiredInteger(result.requestCount, "Label Batch request count");
+  const labelId = requiredString(result.labelId, "Label ID");
+  const definitionVersion = requiredInteger(
+    result.definitionVersion,
+    "Label definition version",
+  );
+  if (
+    manifest.length !== requestCount ||
+    new Set(manifest.map((entry) => entry.key)).size !== manifest.length ||
+    manifest.some(
+      (entry) =>
+        entry.labelId !== labelId || entry.definitionVersion !== definitionVersion,
+    )
+  ) {
+    throw new Error("The label Batch manifest does not match its request count or label.");
+  }
+  return {
+    provider: result.provider as BatchProvider,
+    providerBatchId: requiredString(result.providerBatchId, "Provider batch ID"),
+    inputFileId: requiredString(result.inputFileId, "Provider input file"),
+    modelId: requiredString(result.modelId, "Label Batch model"),
+    requestCount,
+    manifest,
+    batchAttempt: requiredInteger(result.batchAttempt, "Label Batch attempt"),
+    rootSubmissionJobId: requiredString(
+      result.rootSubmissionJobId,
+      "Root label submission job ID",
+    ),
+    labelId,
+    definitionVersion,
+    continueBackfill: result.continueBackfill,
+  };
+}
+
+async function cleanupLabelBatchFiles(input: {
+  provider: BatchProvider;
+  inputFileId: string;
+  outputFileId: string | null;
+  errorFileId: string | null;
+  submissionJobId: string;
+}) {
+  const failures = await deleteBatchFiles({
+    provider: input.provider,
+    inputFileId: input.inputFileId,
+    outputFileId: input.outputFileId,
+    errorFileId: input.errorFileId,
+  });
+  if (failures.length > 0) {
+    console.error("worker: label Batch files could not be deleted", {
+      provider: input.provider,
+      submissionJobId: input.submissionJobId,
+      fileCount: failures.length,
+    });
+  }
+}
+
+async function runLabelBackfill(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The label backfill has no connected account.");
+  const labelId = requiredString(job.payload.labelId, "Label ID");
+  const definitionVersion = requiredInteger(
+    job.payload.definitionVersion,
+    "Label definition version",
+  );
+  const label = await getLabelForAnalysis(job.accountId, labelId);
+  if (!label || label.definitionVersion !== definitionVersion) {
+    return { status: "superseded", labelId, definitionVersion };
+  }
+  const threads = await getThreadsForLabelBackfill({
+    accountId: job.accountId,
+    labelId,
+    definitionVersion,
+  });
+  if (threads.length === 0) {
+    await setLabelAnalysisState({
+      accountId: job.accountId,
+      labelId,
+      definitionVersion,
+      state: "complete",
+    });
+    return { status: "complete", labelId, definitionVersion, threadCount: 0 };
+  }
+  if (!isMemoryBatchConfigured()) throw new MemoryBatchConfigurationError();
+
+  await setLabelAnalysisState({
+    accountId: job.accountId,
+    labelId,
+    definitionVersion,
+    state: "running",
+  });
+  const submission = await submitLabelBatch({
+    submissionId: job.id,
+    batchAttempt: 1,
+    label,
+    threads: threads satisfies LabelAnalysisThread[],
+  });
+  if (!submission) throw new Error("The label Batch produced no requests.");
+
+  return {
+    status: "submitted",
+    ...submission,
+    batchAttempt: 1,
+    rootSubmissionJobId: job.id,
+    labelId,
+    definitionVersion,
+    continueBackfill: true,
+  };
+}
+
+async function runLabelBatchRetry(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The label Batch retry has no connected account.");
+  const parentSubmissionJobId = requiredString(
+    job.payload.parentSubmissionJobId,
+    "Parent label submission job ID",
+  );
+  const parentSubmission = await getLabelBatchSubmission(parentSubmissionJobId);
+  if (parentSubmission?.accountId !== job.accountId) {
+    throw new Error("The parent label submission could not be matched to this account.");
+  }
+  const parentDetails = parseLabelSubmissionResult(parentSubmission.result);
+  if (!parentDetails) return { status: "superseded", provider: "unsupported" };
+  if (!isMemoryBatchProviderConfigured(parentDetails.provider)) {
+    throw new MemoryBatchConfigurationError(
+      `The ${parentDetails.provider} provider used by this label Batch retry is not configured.`,
+    );
+  }
+
+  const labelId = requiredString(job.payload.labelId, "Label ID");
+  const definitionVersion = requiredInteger(
+    job.payload.definitionVersion,
+    "Label definition version",
+  );
+  const label = await getLabelForAnalysis(job.accountId, labelId);
+  if (!label || label.definitionVersion !== definitionVersion) {
+    return { status: "superseded", labelId, definitionVersion };
+  }
+  const manifest = parseLabelManifest(job.payload.manifest);
+  const threads = await getThreadsForLabelRetry(
+    job.accountId,
+    manifest.map((entry) => entry.threadId),
+  );
+  const batchAttempt = requiredInteger(job.payload.batchAttempt, "Label Batch attempt");
+  const rootSubmissionJobId = requiredString(
+    job.payload.rootSubmissionJobId,
+    "Root label submission job ID",
+  );
+  if (typeof job.payload.continueBackfill !== "boolean") {
+    throw new Error("The label Batch continuation state is missing.");
+  }
+  const submission = await submitLabelBatch({
+    provider: parentDetails.provider,
+    submissionId: job.id,
+    batchAttempt,
+    label,
+    threads: threads satisfies LabelAnalysisThread[],
+    retryManifest: manifest,
+  });
+  if (!submission) throw new Error("The label Batch retry produced no requests.");
+
+  return {
+    status: "submitted",
+    ...submission,
+    batchAttempt,
+    rootSubmissionJobId,
+    labelId,
+    definitionVersion,
+    continueBackfill: job.payload.continueBackfill,
+  };
+}
+
+async function runLabelBatchEvent(job: ClaimedJob) {
+  if (!job.accountId) throw new Error("The label Batch event has no account.");
+  const submissionJobId = requiredString(
+    job.payload.submissionJobId,
+    "Label submission job ID",
+  );
+  const submission = await getLabelBatchSubmission(submissionJobId);
+  if (!submission?.accountId || !submission.userId || submission.accountId !== job.accountId) {
+    throw new Error("The label Batch submission could not be matched to this account.");
+  }
+  const details = parseLabelSubmissionResult(submission.result);
+  if (!details) return { status: "superseded", provider: "unsupported" };
+  const providerBatchId = requiredString(
+    job.payload.providerBatchId,
+    "Provider event batch ID",
+  );
+  if (
+    job.payload.provider !== details.provider ||
+    providerBatchId !== details.providerBatchId
+  ) {
+    throw new Error("The provider event does not match its label submission.");
+  }
+
+  const batch = await readLabelBatch({
+    provider: details.provider,
+    providerBatchId: details.providerBatchId,
+    modelId: details.modelId,
+    expectedKeys: details.manifest.map((entry) => entry.key),
+  });
+  const terminalState =
+    batch.state === "completed" ||
+    batch.state === "failed" ||
+    batch.state === "cancelled" ||
+    batch.state === "expired";
+  if (!terminalState) {
+    throw new Error(
+      `${details.provider} emitted a terminal event while the label Batch is ${batch.state}.`,
+    );
+  }
+
+  const currentLabel = await getLabelForAnalysis(
+    submission.accountId,
+    details.labelId,
+  );
+  if (!currentLabel || currentLabel.definitionVersion !== details.definitionVersion) {
+    await cleanupLabelBatchFiles({
+      provider: details.provider,
+      inputFileId: details.inputFileId,
+      outputFileId: batch.outputFileId,
+      errorFileId: batch.errorFileId,
+      submissionJobId: submission.id,
+    });
+    return { status: "superseded", reason: "label_deleted" };
+  }
+
+  const currentThreads = await getThreadsForLabelRetry(
+    submission.accountId,
+    details.manifest.map((entry) => entry.threadId),
+  );
+  const currentVersions = new Map(
+    currentThreads.map((thread) => [thread.id, thread.contentVersion]),
+  );
+  const staleKeys = new Set(
+    details.manifest
+      .filter(
+        (entry) =>
+          currentVersions.get(entry.threadId) !== entry.threadVersion,
+      )
+      .map((entry) => entry.key),
+  );
+  const failedKeys = new Set(batch.failedKeys);
+  const results: Array<{
+    threadId: string;
+    threadVersion: number;
+    matched: boolean;
+    confidence: number;
+  }> = [];
+  let savedThreadCount = 0;
+  for (const entry of details.manifest) {
+    if (staleKeys.has(entry.key)) continue;
+    if (failedKeys.has(entry.key)) continue;
+    const candidate = batch.candidatesByKey.get(entry.key);
+    if (
+      !candidate ||
+      candidate.threadId !== entry.threadId ||
+      candidate.labelId !== entry.labelId
+    ) {
+      failedKeys.add(entry.key);
+      continue;
+    }
+    results.push({
+      threadId: candidate.threadId,
+      threadVersion: entry.threadVersion,
+      matched: candidate.matched,
+      confidence: candidate.confidence,
+    });
+  }
+  if (results.length > 0) {
+    const saved = await saveLabelBatchResults({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      modelId: batch.modelId,
+      results,
+    });
+    if (!saved) {
+      await cleanupLabelBatchFiles({
+        provider: details.provider,
+        inputFileId: details.inputFileId,
+        outputFileId: batch.outputFileId,
+        errorFileId: batch.errorFileId,
+        submissionJobId: submission.id,
+      });
+      return { status: "superseded", reason: "label_deleted" };
+    }
+    for (const threadId of saved.staleThreadIds) {
+      const entry = details.manifest.find((candidate) => candidate.threadId === threadId);
+      if (entry) staleKeys.add(entry.key);
+    }
+    savedThreadCount = saved.savedThreadCount;
+  }
+
+  const failedManifest = details.manifest.filter(
+    (entry) => failedKeys.has(entry.key) && !staleKeys.has(entry.key),
+  );
+  let nextJobId: string | null = null;
+  if (failedManifest.length > 0 && details.batchAttempt < submission.maxAttempts) {
+    nextJobId = await enqueueLabelBatchRetry({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      parentSubmissionJobId: submission.id,
+      rootSubmissionJobId: details.rootSubmissionJobId,
+      batchAttempt: details.batchAttempt + 1,
+      continueBackfill: details.continueBackfill,
+      manifest: failedManifest,
+    });
+  } else if (failedManifest.length > 0) {
+    await setLabelAnalysisState({
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      state: "failed",
+    });
+  } else if (details.continueBackfill || staleKeys.size > 0) {
+    nextJobId = await enqueueLabelBackfillContinuation({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      parentSubmissionJobId: submission.id,
+    });
+  } else {
+    await setLabelAnalysisState({
+      accountId: submission.accountId,
+      labelId: details.labelId,
+      definitionVersion: details.definitionVersion,
+      state: "complete",
+    });
+  }
+
+  await cleanupLabelBatchFiles({
+    provider: details.provider,
+    inputFileId: details.inputFileId,
+    outputFileId: batch.outputFileId,
+    errorFileId: batch.errorFileId,
+    submissionJobId: submission.id,
+  });
+
+  return {
+    status:
+      failedManifest.length === 0
+        ? nextJobId
+          ? "continuation_queued"
+          : "complete"
+        : nextJobId
+          ? "retry_submitted"
+          : "failed",
+    providerState: batch.state,
+    provider: details.provider,
+    providerError: batch.providerError,
+    analyzedThreadCount: savedThreadCount,
+    staleThreadCount: staleKeys.size,
+    failedRequestCount: failedManifest.length,
+    nextJobId,
   };
 }
 
@@ -1222,6 +2035,91 @@ async function runMemoryFeedback(job: WorkflowStepJob) {
     memoryCount: savedCount,
   };
 }
+async function markPostgresJobFailed(job: ClaimedJob, error: unknown) {
+  const message = error instanceof Error ? error.message : "Unknown worker failure";
+  if (job.jobType !== "gmail.incremental_sync") {
+    await failAnalysisJob({ job, message });
+    return;
+  }
+  await failJobAndAccount({
+    job,
+    message,
+    reconnectRequired: error instanceof GmailApiError && error.status === 401,
+  });
+}
+
+async function processNextPostgresJob() {
+  const jobTypes = ["gmail.incremental_sync"];
+  if (isMemoryBatchConfigured()) {
+    jobTypes.push("memory.incremental", "label.backfill.submit");
+  }
+  if (isAnyMemoryBatchProviderConfigured()) {
+    jobTypes.push(
+      "memory.batch.retry",
+      "memory.batch.event",
+      "label.batch.retry",
+      "label.batch.event",
+    );
+  }
+  const job = await claimNextJob(workerId, jobTypes);
+  if (!job) return false;
+
+  try {
+    let result: Record<string, unknown>;
+    switch (job.jobType) {
+      case "gmail.incremental_sync":
+        result = await runIncrementalSync(job);
+        break;
+      case "memory.incremental":
+        result = await runIncrementalMemoryExtraction(job);
+        break;
+      case "memory.batch.retry":
+        result = await runMemoryBatchRetry(job);
+        break;
+      case "memory.batch.event":
+        result = await runMemoryBatchEvent(job);
+        break;
+      case "label.backfill.submit":
+        result = await runLabelBackfill(job);
+        break;
+      case "label.batch.retry":
+        result = await runLabelBatchRetry(job);
+        break;
+      case "label.batch.event":
+        result = await runLabelBatchEvent(job);
+        break;
+      default:
+        throw new Error(`Unsupported PostgreSQL job type: ${job.jobType}`);
+    }
+    await completeJob(job.id, result);
+  } catch (error) {
+    if (
+      error instanceof AiConfigurationError ||
+      error instanceof MemoryBatchConfigurationError
+    ) {
+      if (job.jobType === "label.backfill.submit" && job.accountId) {
+        const labelId = job.payload.labelId;
+        const definitionVersion = job.payload.definitionVersion;
+        if (typeof labelId === "string" && typeof definitionVersion === "number") {
+          await setLabelAnalysisState({
+            accountId: job.accountId,
+            labelId,
+            definitionVersion,
+            state: "pending",
+          });
+        }
+      }
+      await deferJobWithoutAttempt({
+        jobId: job.id,
+        message: error.message,
+      });
+      return false;
+    }
+    await markPostgresJobFailed(job, error);
+    throw error;
+  }
+  return true;
+}
 
 async function persistWorkflowFailure(
   job: WorkflowStepJob,
@@ -1234,7 +2132,10 @@ async function persistWorkflowFailure(
   if (job.stepType === "gmail.sync.message" && job.runId) {
     await failMailSyncItem({
       runId: job.runId,
-      providerMessageId: requiredString(job.payload.providerMessageId, "Gmail message ID"),
+      providerMessageId: requiredString(
+        job.payload.providerMessageId,
+        "Gmail message ID",
+      ),
       attempt: job.attempts,
       message,
       terminal,
@@ -1253,8 +2154,7 @@ function workflowStepFromBullJob(bullJob: WorkflowJob): WorkflowStepJob {
   return {
     ...bullJob.data,
     stepType: bullJob.name,
-    attempts:
-      bullJob.data.attempts + Math.max(bullJob.attemptsMade, 1),
+    attempts: bullJob.data.attempts + Math.max(bullJob.attemptsMade, 1),
     maxAttempts: bullJob.data.maxAttempts,
   };
 }
@@ -1351,14 +2251,10 @@ function startBullWorkers(runtime: BullQueueRuntime) {
     );
   }
   if (isEmbeddingBatchConfigured()) {
-    runtime.createWorker(
-      "mail-indexing-batch",
-      processIndexingBatch,
-      {
-        ...withFailureReconciliation,
-        lockDuration: batchWorkerLockDuration,
-      },
-    );
+    runtime.createWorker("mail-indexing-batch", processIndexingBatch, {
+      ...withFailureReconciliation,
+      lockDuration: batchWorkerLockDuration,
+    });
   }
   if (isEmbeddingConfigured()) {
     runtime.createWorker("mail-indexing-live", processIncrementalIndexing, {
@@ -1367,14 +2263,10 @@ function startBullWorkers(runtime: BullQueueRuntime) {
     });
   }
   if (isMemoryBatchConfigured()) {
-    runtime.createWorker(
-      "mail-memory-submit",
-      processMemorySubmission,
-      {
-        ...withFailureReconciliation,
-        lockDuration: batchWorkerLockDuration,
-      },
-    );
+    runtime.createWorker("mail-memory-submit", processMemorySubmission, {
+      ...withFailureReconciliation,
+      lockDuration: batchWorkerLockDuration,
+    });
   }
   if (isAnyMemoryBatchProviderConfigured()) {
     runtime.createWorker(
@@ -1387,7 +2279,6 @@ function startBullWorkers(runtime: BullQueueRuntime) {
 
 async function reconcileSubmittedEmbeddingBatches() {
   if (!isEmbeddingBatchConfigured()) return;
-
   const providerBatchIds = await listSubmittedEmbeddingBatchIds();
   let enqueued = 0;
   for (const providerBatchId of providerBatchIds) {
@@ -1408,12 +2299,39 @@ async function reconcileSubmittedEmbeddingBatches() {
       });
     }
   }
-
   if (providerBatchIds.length > 0) {
     console.info("worker: submitted embedding Batches reconciled", {
       checked: providerBatchIds.length,
       enqueued,
     });
+  }
+}
+
+async function runOutboxLoop(
+  signal: ReturnType<typeof createJobSignal>,
+  isStopped: () => boolean,
+  runtime: BullQueueRuntime,
+) {
+  while (!isStopped()) {
+    await signal.wait();
+    if (isStopped()) break;
+    while (!isStopped()) {
+      const result = await publishOutboxBatch((jobs) => runtime.publish(jobs));
+      if (result.failed || result.published === 0) break;
+    }
+  }
+}
+
+async function runPostgresJobLoop(
+  signal: ReturnType<typeof createJobSignal>,
+  isStopped: () => boolean,
+) {
+  while (!isStopped()) {
+    await signal.wait();
+    if (isStopped()) break;
+    while (!isStopped() && (await processNextPostgresJob())) {
+      // Drain the current queue before waiting for another database notification.
+    }
   }
 }
 
@@ -1423,14 +2341,17 @@ async function run() {
   await runtime.configureGlobalConcurrency();
   startBullWorkers(runtime);
 
-  const signal = createJobSignal();
+  const outboxSignal = createJobSignal();
+  const postgresJobSignal = createJobSignal();
   let stopRequested = false;
   const requestStop = () => {
     stopRequested = true;
-    signal.notify();
+    outboxSignal.notify();
+    postgresJobSignal.notify();
   };
-  const stopListening = await listenForOutboxNotifications(signal.notify);
-  const stopRedisReadyListener = runtime.onReady(signal.notify);
+  const stopOutboxListening = await listenForOutboxNotifications(outboxSignal.notify);
+  const stopJobListening = await listenForJobNotifications(postgresJobSignal.notify);
+  const stopRedisReadyListener = runtime.onReady(outboxSignal.notify);
 
   process.once("SIGINT", requestStop);
   process.once("SIGTERM", requestStop);
@@ -1439,22 +2360,20 @@ async function run() {
     await enqueueMissingMailSyncRuns();
     await enqueueReadyMailSyncFinalizers();
     await enqueuePostSyncWorkflowSteps();
+    await enqueueAnalysisJobsForIndexedAccounts();
     await reconcileSubmittedEmbeddingBatches();
-    signal.notify();
-
-    while (!stopRequested) {
-      await signal.wait();
-      if (stopRequested) break;
-      while (!stopRequested) {
-        const result = await publishOutboxBatch((jobs) => runtime.publish(jobs));
-        if (result.failed || result.published === 0) break;
-      }
-    }
+    outboxSignal.notify();
+    postgresJobSignal.notify();
+    await Promise.all([
+      runOutboxLoop(outboxSignal, () => stopRequested, runtime),
+      runPostgresJobLoop(postgresJobSignal, () => stopRequested),
+    ]);
   } finally {
     process.removeListener("SIGINT", requestStop);
     process.removeListener("SIGTERM", requestStop);
     stopRedisReadyListener();
-    await stopListening();
+    await stopOutboxListening();
+    await stopJobListening();
     await runtime.close();
   }
 }

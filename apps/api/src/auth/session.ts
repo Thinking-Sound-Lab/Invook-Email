@@ -1,8 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { IncomingMessage } from "node:http";
+import type { FastifyReply, FastifyRequest } from "fastify";
 
 import { usesSecureCookies } from "../config";
-import { readCookies, serializeCookie } from "../http/cookies";
 
 const SESSION_COOKIE = "invook_session";
 const SESSION_DURATION_SECONDS = 60 * 60 * 24 * 30;
@@ -89,19 +88,22 @@ function parseSession(value: string | undefined): InvookSession | null {
 function cookieOptions() {
   return {
     httpOnly: true,
-    sameSite: "Lax" as const,
+    sameSite: "lax" as const,
     secure: usesSecureCookies(),
     path: "/",
   };
 }
 
-export function getCurrentSession(request: IncomingMessage): InvookSession | null {
-  return parseSession(readCookies(request).get(SESSION_COOKIE));
+export function getCurrentSession(request: FastifyRequest): InvookSession | null {
+  return parseSession(request.cookies[SESSION_COOKIE]);
 }
 
-export function createSessionCookie(identity: Omit<InvookSession, "expiresAt">): string {
+export function createSessionCookie(
+  reply: FastifyReply,
+  identity: Omit<InvookSession, "expiresAt">,
+) {
   const expiresAt = Date.now() + SESSION_DURATION_SECONDS * 1000;
-  return serializeCookie(
+  reply.setCookie(
     SESSION_COOKIE,
     serializeSession({ ...identity, expiresAt }),
     {
@@ -112,8 +114,8 @@ export function createSessionCookie(identity: Omit<InvookSession, "expiresAt">):
   );
 }
 
-export function clearSessionCookie(): string {
-  return serializeCookie(SESSION_COOKIE, "", {
+export function clearSessionCookie(reply: FastifyReply) {
+  reply.setCookie(SESSION_COOKIE, "", {
     ...cookieOptions(),
     expires: new Date(0),
     maxAge: 0,

@@ -6,22 +6,15 @@ import {
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { ApiProblem, ReplyDraft } from "@invook/contracts";
+import type { ReplyDraft } from "@invook/contracts";
+import axios from "axios";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-
-async function responseError(response: Response, fallback: string) {
-  try {
-    const problem = (await response.json()) as Partial<ApiProblem>;
-    return problem.title || fallback;
-  } catch {
-    return fallback;
-  }
-}
+import { apiErrorMessage } from "@/lib/http-error";
 
 export function DraftComposer({
   threadId,
@@ -46,15 +39,11 @@ export function DraftComposer({
     setError(null);
     setNotice(null);
     try {
-      const response = await fetch(`/v1/threads/${threadId}/drafts`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ instruction }),
-      });
-      if (!response.ok) {
-        throw new Error(await responseError(response, "Invook could not draft this reply."));
-      }
-      const body = (await response.json()) as { draft: ReplyDraft };
+      const response = await axios.post<{ draft: ReplyDraft }>(
+        `/v1/threads/${threadId}/drafts`,
+        { instruction },
+      );
+      const body = response.data;
       setDraft(body.draft);
       setText(body.draft.currentText);
       setNotice(
@@ -64,7 +53,7 @@ export function DraftComposer({
       );
       router.refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Invook could not draft this reply.");
+      setError(apiErrorMessage(cause, "Invook could not draft this reply."));
     } finally {
       setPending(null);
     }
@@ -76,15 +65,11 @@ export function DraftComposer({
     setError(null);
     setNotice(null);
     try {
-      const response = await fetch(`/v1/drafts/${draft.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ currentText: text }),
-      });
-      if (!response.ok) {
-        throw new Error(await responseError(response, "Invook could not save this draft."));
-      }
-      const body = (await response.json()) as { draft: ReplyDraft };
+      const response = await axios.patch<{ draft: ReplyDraft }>(
+        `/v1/drafts/${draft.id}`,
+        { currentText: text },
+      );
+      const body = response.data;
       setDraft(body.draft);
       setText(body.draft.currentText);
       setNotice(
@@ -94,7 +79,7 @@ export function DraftComposer({
       );
       router.refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Invook could not save this draft.");
+      setError(apiErrorMessage(cause, "Invook could not save this draft."));
     } finally {
       setPending(null);
     }

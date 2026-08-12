@@ -73,7 +73,7 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "import('axios').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
       interval: 3s
       retries: 20
     restart: unless-stopped

@@ -17,6 +17,16 @@ export type WorkflowStepJob = {
   maxAttempts: number;
 };
 
+export type ClaimedJob = {
+  id: string;
+  userId: string | null;
+  accountId: string | null;
+  jobType: string;
+  payload: Record<string, unknown>;
+  attempts: number;
+  maxAttempts: number;
+};
+
 export type QueueName =
   | "gmail-pages"
   | "gmail-messages"
@@ -41,10 +51,16 @@ export type MailboxMessage = {
   recipients: string[];
   bodyText: string;
   isMemoryEligible: boolean;
+  ingestionMode: "initial" | "incremental";
+  memoryContactEmails: string[];
   attachments: Array<{
     providerAttachmentId: string | null;
     filename: string;
     mimeType: string | null;
     size: number | null;
   }>;
+};
+
+export type IndexedMessage = Omit<MailboxMessage, "attachments"> & {
+  attachments?: MailboxMessage["attachments"];
 };

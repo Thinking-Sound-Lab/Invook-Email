@@ -1,6 +1,8 @@
 export {
   createDatabase,
   getDatabase,
+  listenForJobNotifications,
+  listenForJobStatusNotifications,
   listenForAccountSyncNotifications,
   listenForOutboxNotifications,
   type Database,
@@ -17,6 +19,8 @@ export * from "./workflows";
 export type {
   AccountSyncStage,
   AccountSyncState,
+  ClaimedJob,
+  IndexedMessage,
   MailboxMessage,
   QueueName,
   WorkflowStepJob,

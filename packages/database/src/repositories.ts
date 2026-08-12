@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 
 import {
   MAIL_EMBEDDING_DIMENSIONS,
+  systemLabelDefinitions,
+  type LabelAnalysisState,
   type MailboxView,
+  type SystemLabelKey,
 } from "@invook/contracts";
 import {
   and,
@@ -15,30 +18,45 @@ import {
   isNotNull,
   isNull,
   lt,
+  lte,
   ne,
   not,
   or,
   sql,
 } from "drizzle-orm";
+import { validate as validateUuid } from "uuid";
 
-import { getDatabase, type Database } from "./client";
+import {
+  getDatabase,
+  listenForJobStatusNotifications,
+  type Database,
+} from "./client";
 import {
   accountSecrets,
   auditEvents,
   connectedAccounts,
   drafts,
   embeddingBatchSubmissions,
+  jobs,
+  mailLabels,
   memoryDeletions,
   memoryEntries,
+  memoryPendingEvidence,
   messageAttachments,
   messageEmbeddings,
   messages,
   profiles,
   threadLabels,
+  threadLabelAnalyses,
   threads,
   workflowSteps,
 } from "./schema";
-import type { AccountSyncState, MailboxMessage } from "./types";
+import type {
+  AccountSyncState,
+  ClaimedJob,
+  IndexedMessage,
+  MailboxMessage,
+} from "./types";
 import {
   createInitialMailSyncRun,
   enqueueWorkflowStep,
@@ -66,9 +84,6 @@ export type MailboxCursor = {
   threadId: string;
 };
 
-const uuidPattern =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
 export function parseMailboxCursor(value: string): MailboxCursor | null {
   try {
     const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
@@ -80,7 +95,7 @@ export function parseMailboxCursor(value: string): MailboxCursor | null {
       (decoded.direction !== "newer" && decoded.direction !== "older") ||
       typeof decoded.latestMessageAt !== "string" ||
       typeof decoded.threadId !== "string" ||
-      !uuidPattern.test(decoded.threadId)
+      !validateUuid(decoded.threadId)
     ) {
       return null;
     }
@@ -110,6 +125,16 @@ function createMailboxCursor(
 }
 
 function mailboxViewCondition(view: MailboxView) {
+  if (view.startsWith("label:")) {
+    const labelId = view.slice(6);
+    return sql<boolean>`exists (
+      select 1
+      from ${threadLabels}
+      where ${threadLabels.threadId} = ${threads.id}
+        and ${threadLabels.labelId} = ${labelId}::uuid
+        and ${threadLabels.state} = 'applied'
+    )`;
+  }
   switch (view) {
     case "all":
       return undefined;
@@ -120,8 +145,9 @@ function mailboxViewCondition(view: MailboxView) {
       return sql<boolean>`exists (
         select 1
         from ${threadLabels}
+        inner join ${mailLabels} on ${mailLabels.id} = ${threadLabels.labelId}
         where ${threadLabels.threadId} = ${threads.id}
-          and ${threadLabels.labelKey} = ${view}
+          and ${mailLabels.systemKey} = ${view}
           and ${threadLabels.state} = 'applied'
       )`;
     case "starred":
@@ -145,6 +171,20 @@ function mailboxViewCondition(view: MailboxView) {
 
 export type MemoryType = "preference" | "contact" | "scheduling";
 export type MemorySource = "user" | "inferred" | "feedback";
+
+function equalStringArrays(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function equalSender(
+  left: { raw: string; email: string },
+  right: { raw: string; email: string },
+): boolean {
+  return left.raw === right.raw && left.email === right.email;
+}
 
 function normalizeMemoryStatement(value: string): string {
   return value.trim().replace(/\s+/g, " ");
@@ -233,7 +273,13 @@ export async function saveGmailConnection(
       });
 
     const [existingAccount] = await transaction
-      .select({ id: connectedAccounts.id, userId: connectedAccounts.userId })
+      .select({
+        id: connectedAccounts.id,
+        userId: connectedAccounts.userId,
+        historyCursor: connectedAccounts.historyCursor,
+        lastSyncedAt: connectedAccounts.lastSyncedAt,
+        syncState: connectedAccounts.syncState,
+      })
       .from(connectedAccounts)
       .where(
         and(
@@ -268,14 +314,34 @@ export async function saveGmailConnection(
           status: "connected",
           scopes: input.scopes,
           memoryAcknowledgedAt: input.acknowledgedAt,
-          historyCursor: input.historyCursor,
-          syncState: initialSyncState,
+          historyCursor: existingAccount?.historyCursor ?? input.historyCursor,
+          syncState: existingAccount?.syncState ?? initialSyncState,
           updatedAt: new Date(),
         },
       })
       .returning({ id: connectedAccounts.id });
 
     if (!account) throw new Error("The Gmail connection could not be saved.");
+
+    if (!existingAccount) {
+      await transaction
+        .insert(mailLabels)
+        .values(
+          systemLabelDefinitions.map((definition) => ({
+            userId: input.userId,
+            accountId: account.id,
+            name: definition.name,
+            normalizedName: definition.name.toLowerCase(),
+            description: definition.description,
+            systemKey: definition.key,
+            definitionVersion: 1,
+            analysisState: "pending" as const,
+          })),
+        )
+        .onConflictDoNothing({
+          target: [mailLabels.accountId, mailLabels.systemKey],
+        });
+    }
 
     await transaction
       .insert(accountSecrets)
@@ -316,6 +382,135 @@ export async function saveGmailConnection(
 
     return account;
   });
+}
+
+export async function enqueueIncrementalSyncForUser(
+  userId: string,
+  database: Database = getDatabase(),
+): Promise<
+  | { jobId: string; reason: null }
+  | { jobId: null; reason: "not_found" | "initial_sync_incomplete" }
+> {
+  return database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({
+        id: connectedAccounts.id,
+        historyCursor: connectedAccounts.historyCursor,
+        lastSyncedAt: connectedAccounts.lastSyncedAt,
+      })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.userId, userId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .orderBy(desc(connectedAccounts.createdAt))
+      .limit(1);
+    if (!account) return { jobId: null, reason: "not_found" };
+    if (!account.historyCursor || !account.lastSyncedAt) {
+      return { jobId: null, reason: "initial_sync_incomplete" };
+    }
+
+    const idempotencyKey = `gmail.incremental_sync:${account.id}:${account.historyCursor}`;
+    const [queued] = await transaction
+      .insert(jobs)
+      .values({
+        userId,
+        accountId: account.id,
+        jobType: "gmail.incremental_sync",
+        status: "queued",
+        payload: { historyId: account.historyCursor },
+        attempts: 0,
+        idempotencyKey,
+      })
+      .onConflictDoUpdate({
+        target: jobs.idempotencyKey,
+        set: {
+          status: "queued",
+          payload: { historyId: account.historyCursor },
+          attempts: 0,
+          lockedAt: null,
+          lockedBy: null,
+          lastError: null,
+          updatedAt: new Date(),
+        },
+        setWhere: ne(jobs.status, "running"),
+      })
+      .returning({ id: jobs.id });
+    if (queued) return { jobId: queued.id, reason: null };
+
+    const [existing] = await transaction
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(eq(jobs.idempotencyKey, idempotencyKey))
+      .limit(1);
+    if (existing) return { jobId: existing.id, reason: null };
+    throw new Error("The incremental Gmail sync job could not be queued.");
+  });
+}
+
+export async function waitForMailboxSyncCompletion(
+  input: { userId: string; jobId: string },
+  database: Database = getDatabase(),
+): Promise<
+  | { status: "complete"; result: Record<string, unknown> }
+  | { status: "failed"; error: string | null }
+  | null
+> {
+  let signaled = false;
+  let release: (() => void) | null = null;
+  const waitForStatusChange = () => {
+    if (signaled) {
+      signaled = false;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      release = () => {
+        signaled = false;
+        resolve();
+      };
+    });
+  };
+  const stopListening = await listenForJobStatusNotifications((jobId) => {
+    if (jobId !== input.jobId) return;
+    signaled = true;
+    if (release) {
+      const currentRelease = release;
+      release = null;
+      currentRelease();
+    }
+  });
+
+  try {
+    while (true) {
+      const [job] = await database
+        .select({
+          status: jobs.status,
+          result: jobs.result,
+          lastError: jobs.lastError,
+        })
+        .from(jobs)
+        .where(
+          and(
+            eq(jobs.id, input.jobId),
+            eq(jobs.userId, input.userId),
+            eq(jobs.jobType, "gmail.incremental_sync"),
+          ),
+        )
+        .limit(1);
+      if (!job) return null;
+      if (job.status === "complete") {
+        return { status: "complete", result: job.result ?? {} };
+      }
+      if (job.status === "failed") {
+        return { status: "failed", error: job.lastError };
+      }
+      await waitForStatusChange();
+    }
+  } finally {
+    await stopListening();
+  }
 }
 
 export async function hasConnectedGmailAccount(
@@ -803,6 +998,76 @@ export async function getMailboxWorkspace(
       asc(memoryEntries.createdAt),
     );
 
+  const mailLabelRows = await database
+    .select({
+      id: mailLabels.id,
+      name: mailLabels.name,
+      description: mailLabels.description,
+      systemKey: mailLabels.systemKey,
+      definitionVersion: mailLabels.definitionVersion,
+      analysisState: mailLabels.analysisState,
+      createdAt: mailLabels.createdAt,
+    })
+    .from(mailLabels)
+    .where(
+      and(eq(mailLabels.userId, userId), eq(mailLabels.accountId, account.id)),
+    )
+    .orderBy(asc(mailLabels.createdAt), asc(mailLabels.name));
+
+  const [threadCountRow] = await database
+    .select({ value: count(threads.id) })
+    .from(threads)
+    .where(and(eq(threads.userId, userId), eq(threads.accountId, account.id)));
+  const analyzedCounts = await database
+    .select({
+      labelId: threadLabelAnalyses.labelId,
+      definitionVersion: threadLabelAnalyses.definitionVersion,
+      value: count(threadLabelAnalyses.id),
+    })
+    .from(threadLabelAnalyses)
+    .where(
+      and(
+        eq(threadLabelAnalyses.userId, userId),
+        eq(threadLabelAnalyses.accountId, account.id),
+      ),
+    )
+    .groupBy(
+      threadLabelAnalyses.labelId,
+      threadLabelAnalyses.definitionVersion,
+    );
+  const analyzedCountByLabel = new Map(
+    analyzedCounts.map((entry) => [
+      `${entry.labelId}:${entry.definitionVersion}`,
+      entry.value,
+    ]),
+  );
+  const systemLabelOrder = new Map(
+    systemLabelDefinitions.map((definition, index) => [definition.key, index]),
+  );
+  const serializedLabels = mailLabelRows
+    .map((label) => ({
+      id: label.id,
+      name: label.name,
+      description: label.description,
+      systemKey: label.systemKey,
+      definitionVersion: label.definitionVersion,
+      analysisState: label.analysisState,
+      analyzedThreadCount:
+        analyzedCountByLabel.get(`${label.id}:${label.definitionVersion}`) ?? 0,
+      totalThreadCount: threadCountRow?.value ?? 0,
+    }))
+    .sort((left, right) => {
+      if (left.systemKey && right.systemKey) {
+        return (
+          (systemLabelOrder.get(left.systemKey) ?? 0) -
+          (systemLabelOrder.get(right.systemKey) ?? 0)
+        );
+      }
+      if (left.systemKey) return -1;
+      if (right.systemKey) return 1;
+      return left.name.localeCompare(right.name);
+    });
+
   const [selectedThread] = selectedThreadId
     ? await database
         .select({
@@ -830,16 +1095,19 @@ export async function getMailboxWorkspace(
       ...(selectedThread ? [selectedThread.id] : []),
     ]),
   );
-  const labelRows =
+  const appliedLabelRows =
     threadIds.length > 0
       ? await database
           .select({
             threadId: threadLabels.threadId,
-            key: threadLabels.labelKey,
+            labelId: threadLabels.labelId,
+            name: mailLabels.name,
+            systemKey: mailLabels.systemKey,
             source: threadLabels.source,
             confidence: threadLabels.confidence,
           })
           .from(threadLabels)
+          .innerJoin(mailLabels, eq(mailLabels.id, threadLabels.labelId))
           .where(
             and(
               inArray(threadLabels.threadId, threadIds),
@@ -847,8 +1115,8 @@ export async function getMailboxWorkspace(
             ),
           )
       : [];
-  const labelsByThread = new Map<string, typeof labelRows>();
-  for (const label of labelRows) {
+  const labelsByThread = new Map<string, typeof appliedLabelRows>();
+  for (const label of appliedLabelRows) {
     const current = labelsByThread.get(label.threadId) ?? [];
     current.push(label);
     labelsByThread.set(label.threadId, current);
@@ -856,7 +1124,9 @@ export async function getMailboxWorkspace(
   const attachLabels = <T extends { id: string }>(thread: T) => ({
     ...thread,
     invookLabels: (labelsByThread.get(thread.id) ?? []).map((label) => ({
-      key: label.key,
+      labelId: label.labelId,
+      name: label.name,
+      systemKey: label.systemKey,
       source: label.source,
       confidence: label.confidence === null ? null : Number(label.confidence),
     })),
@@ -879,6 +1149,7 @@ export async function getMailboxWorkspace(
       account,
       memoryBatchSubmission,
       memories: serializedMemories,
+      labels: serializedLabels,
       pagination,
       threads: mailboxThreadsWithLabels,
       selectedThread: null,
@@ -949,6 +1220,7 @@ export async function getMailboxWorkspace(
     account,
     memoryBatchSubmission,
     memories: serializedMemories,
+    labels: serializedLabels,
     pagination,
     threads: mailboxThreadsWithLabels,
     selectedThread: {
@@ -1002,6 +1274,8 @@ export async function getWorkerAccount(
       id: connectedAccounts.id,
       userId: connectedAccounts.userId,
       email: connectedAccounts.email,
+      historyCursor: connectedAccounts.historyCursor,
+      syncState: connectedAccounts.syncState,
       tokenCiphertext: accountSecrets.tokenCiphertext,
     })
     .from(connectedAccounts)
@@ -1039,10 +1313,129 @@ export async function setAccountSyncState(
   });
 }
 
-export async function upsertMailboxMessage(
-  input: MailboxMessage,
+export async function claimNextJob(
+  workerId: string,
+  jobTypes: string[],
   database: Database = getDatabase(),
-): Promise<{ messageId: string; threadId: string }> {
+): Promise<ClaimedJob | null> {
+  if (jobTypes.length === 0) return null;
+  return database.transaction(async (transaction) => {
+    const [candidate] = await transaction
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(
+        and(
+          inArray(jobs.status, ["queued", "retry"]),
+          lt(jobs.attempts, jobs.maxAttempts),
+          inArray(jobs.jobType, jobTypes),
+        ),
+      )
+      .orderBy(asc(jobs.createdAt))
+      .limit(1)
+      .for("update", { skipLocked: true });
+    if (!candidate) return null;
+
+    const [job] = await transaction
+      .update(jobs)
+      .set({
+        status: "running",
+        lockedAt: new Date(),
+        lockedBy: workerId,
+        attempts: sql`${jobs.attempts} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(eq(jobs.id, candidate.id))
+      .returning({
+        id: jobs.id,
+        userId: jobs.userId,
+        accountId: jobs.accountId,
+        jobType: jobs.jobType,
+        payload: jobs.payload,
+        attempts: jobs.attempts,
+        maxAttempts: jobs.maxAttempts,
+      });
+    return job ?? null;
+  });
+}
+
+type DatabaseTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
+
+async function invalidateThreadAnalysis(
+  transaction: DatabaseTransaction,
+  accountId: string,
+  threadId: string,
+) {
+  await transaction
+    .delete(threadLabelAnalyses)
+    .where(eq(threadLabelAnalyses.threadId, threadId));
+  await transaction
+    .delete(threadLabels)
+    .where(and(eq(threadLabels.threadId, threadId), eq(threadLabels.source, "ai")));
+  await transaction
+    .update(mailLabels)
+    .set({ analysisState: "pending", updatedAt: new Date() })
+    .where(eq(mailLabels.accountId, accountId));
+}
+
+async function refreshIndexedThread(
+  transaction: DatabaseTransaction,
+  threadId: string,
+  incrementContentVersion = true,
+): Promise<boolean> {
+  const threadMessages = await transaction
+    .select({
+      sender: messages.sender,
+      recipients: messages.recipients,
+      labelIds: messages.labelIds,
+      subject: messages.subject,
+      snippet: messages.snippet,
+      sentAt: messages.sentAt,
+      createdAt: messages.createdAt,
+    })
+    .from(messages)
+    .where(eq(messages.threadId, threadId))
+    .orderBy(desc(messages.sentAt), desc(messages.createdAt));
+
+  const latestMessage = threadMessages[0];
+  if (!latestMessage) {
+    await transaction.delete(threads).where(eq(threads.id, threadId));
+    return false;
+  }
+
+  const participants = Array.from(
+    new Set(
+      threadMessages.flatMap((message) => [
+        message.sender.raw,
+        ...message.recipients,
+      ]),
+    ),
+  ).filter(Boolean);
+  const labelIds = Array.from(
+    new Set(threadMessages.flatMap((message) => message.labelIds)),
+  );
+
+  await transaction
+    .update(threads)
+    .set({
+      subject: latestMessage.subject,
+      snippet: latestMessage.snippet,
+      participants,
+      labelIds,
+      latestMessageAt: latestMessage.sentAt,
+      messageCount: threadMessages.length,
+      ...(incrementContentVersion
+        ? { contentVersion: sql`${threads.contentVersion} + 1` }
+        : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(threads.id, threadId));
+  return true;
+}
+
+export async function upsertIndexedMessage(
+  input: IndexedMessage,
+  database: Database = getDatabase(),
+) {
   return database.transaction(async (transaction) => {
     await transaction.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerThreadId}`}, 0))`,
@@ -1095,116 +1488,213 @@ export async function upsertMailboxMessage(
 
     if (!threadId) throw new Error("The Gmail thread could not be stored.");
 
-    const [storedMessage] = await transaction
-      .insert(messages)
-      .values({
-        userId: input.userId,
-        threadId,
-        providerMessageId: input.providerMessageId,
-        direction: input.direction,
-        sender: input.sender,
-        recipients: input.recipients,
-        labelIds: input.labelIds,
-        subject: input.subject,
-        bodyText: input.bodyText,
-        sentAt: input.sentAt,
-        isMemoryEligible: input.isMemoryEligible,
+    const [existingMessage] = await transaction
+      .select({
+        id: messages.id,
+        direction: messages.direction,
+        sender: messages.sender,
+        recipients: messages.recipients,
+        labelIds: messages.labelIds,
+        subject: messages.subject,
+        snippet: messages.snippet,
+        bodyText: messages.bodyText,
+        sentAt: messages.sentAt,
+        isMemoryEligible: messages.isMemoryEligible,
       })
-      .onConflictDoUpdate({
-        target: [messages.threadId, messages.providerMessageId],
-        set: {
+      .from(messages)
+      .where(
+        and(
+          eq(messages.threadId, threadId),
+          eq(messages.providerMessageId, input.providerMessageId),
+        ),
+      )
+      .limit(1);
+    const analysisChanged =
+      !existingMessage ||
+      existingMessage.direction !== input.direction ||
+      !equalSender(existingMessage.sender, input.sender) ||
+      !equalStringArrays(existingMessage.recipients, input.recipients) ||
+      existingMessage.subject !== input.subject ||
+      existingMessage.bodyText !== input.bodyText ||
+      existingMessage.sentAt.getTime() !== input.sentAt.getTime() ||
+      existingMessage.isMemoryEligible !== input.isMemoryEligible;
+    const changed =
+      analysisChanged ||
+      !equalStringArrays(existingMessage?.labelIds ?? [], input.labelIds) ||
+      (existingMessage?.snippet ?? "") !== input.snippet;
+
+    let messageId = existingMessage?.id;
+    if (changed) {
+      const [storedMessage] = await transaction
+        .insert(messages)
+        .values({
+          userId: input.userId,
+          threadId,
+          providerMessageId: input.providerMessageId,
           direction: input.direction,
           sender: input.sender,
           recipients: input.recipients,
           labelIds: input.labelIds,
           subject: input.subject,
+          snippet: input.snippet,
           bodyText: input.bodyText,
           sentAt: input.sentAt,
           isMemoryEligible: input.isMemoryEligible,
-          updatedAt: new Date(),
-        },
-      })
-      .returning({ id: messages.id });
+        })
+        .onConflictDoUpdate({
+          target: [messages.threadId, messages.providerMessageId],
+          set: {
+            direction: input.direction,
+            sender: input.sender,
+            recipients: input.recipients,
+            labelIds: input.labelIds,
+            subject: input.subject,
+            snippet: input.snippet,
+            bodyText: input.bodyText,
+            sentAt: input.sentAt,
+            isMemoryEligible: input.isMemoryEligible,
+            updatedAt: new Date(),
+          },
+        })
+        .returning({ id: messages.id });
+      messageId = storedMessage?.id;
+      if (!messageId) throw new Error("The Gmail message could not be stored.");
 
-    if (!storedMessage) throw new Error("The Gmail message could not be stored.");
+      if (analysisChanged) {
+        await invalidateThreadAnalysis(transaction, input.accountId, threadId);
+      }
 
-    await transaction
-      .update(threads)
-      .set({
-        subject: input.subject,
-        snippet: input.snippet,
-        participants: input.participants,
-        labelIds: input.labelIds,
-        latestMessageAt: input.sentAt,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(threads.id, threadId),
-          or(
-            isNull(threads.latestMessageAt),
-            sql`${threads.latestMessageAt} <= ${input.sentAt}`,
-          ),
-        ),
-      );
+      if (analysisChanged && input.ingestionMode === "incremental") {
+        await transaction
+          .delete(memoryPendingEvidence)
+          .where(eq(memoryPendingEvidence.messageId, messageId));
+        if (input.direction === "outgoing" && input.isMemoryEligible) {
+          const contactEmails = Array.from(
+            new Set(input.memoryContactEmails.map(normalizeContactEmail).filter(Boolean)),
+          ) as string[];
+          await transaction
+            .insert(memoryPendingEvidence)
+            .values([
+              {
+                userId: input.userId,
+                accountId: input.accountId,
+                threadId,
+                messageId,
+                scope: "global" as const,
+                contactEmail: "",
+                schemaVersion: MEMORY_SCHEMA_VERSION,
+              },
+              ...contactEmails.map((contactEmail) => ({
+                userId: input.userId,
+                accountId: input.accountId,
+                threadId,
+                messageId,
+                scope: "contact" as const,
+                contactEmail,
+                schemaVersion: MEMORY_SCHEMA_VERSION,
+              })),
+            ])
+            .onConflictDoNothing({
+              target: [
+                memoryPendingEvidence.messageId,
+                memoryPendingEvidence.scope,
+                memoryPendingEvidence.contactEmail,
+              ],
+            });
+        }
+      }
 
-    await transaction
-      .delete(messageAttachments)
-      .where(eq(messageAttachments.messageId, storedMessage.id));
-    if (input.attachments.length > 0) {
-      await transaction.insert(messageAttachments).values(
-        input.attachments.map((attachment) => ({
-          userId: input.userId,
-          accountId: input.accountId,
-          messageId: storedMessage.id,
-          providerAttachmentId: attachment.providerAttachmentId,
-          filename: attachment.filename,
-          mimeType: attachment.mimeType,
-          size: attachment.size,
-        })),
-      );
+      await transaction
+        .delete(messageAttachments)
+        .where(eq(messageAttachments.messageId, messageId));
+      const attachments = input.attachments ?? [];
+      if (attachments.length > 0) {
+        await transaction.insert(messageAttachments).values(
+          attachments.map((attachment) => ({
+            userId: input.userId,
+            accountId: input.accountId,
+            messageId,
+            providerAttachmentId: attachment.providerAttachmentId,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            size: attachment.size,
+          })),
+        );
+      }
+
+      if (analysisChanged) {
+        const contentHash = createMessageContentHash(input);
+        await transaction
+          .delete(messageEmbeddings)
+          .where(
+            and(
+              eq(messageEmbeddings.messageId, messageId),
+              ne(messageEmbeddings.contentHash, contentHash),
+            ),
+          );
+        if (input.ingestionMode === "incremental") {
+          await enqueueWorkflowStep(
+            {
+              userId: input.userId,
+              accountId: input.accountId,
+              stepType: "embedding.incremental",
+              payload: { messageId },
+              idempotencyKey: `embedding.incremental:${messageId}:${contentHash}`,
+            },
+            transaction as unknown as Database,
+          );
+        }
+      }
     }
 
-    await transaction
-      .delete(messageEmbeddings)
-      .where(
-        and(
-          eq(messageEmbeddings.messageId, storedMessage.id),
-          ne(messageEmbeddings.contentHash, createMessageContentHash(input)),
-        ),
-      );
-
-    const [messageTotal] = await transaction
-      .select({ value: count(messages.id) })
-      .from(messages)
-      .where(eq(messages.threadId, threadId));
-
-    await transaction
-      .update(threads)
-      .set({ messageCount: messageTotal?.value ?? 0, updatedAt: new Date() })
-      .where(eq(threads.id, threadId));
-
-    const [account] = await transaction
-      .select({ syncState: connectedAccounts.syncState })
-      .from(connectedAccounts)
-      .where(eq(connectedAccounts.id, input.accountId))
-      .limit(1);
-    if (account?.syncState.mailSync === "complete") {
-      const contentHash = createMessageContentHash(input);
-      await enqueueWorkflowStep(
-        {
-          userId: input.userId,
-          accountId: input.accountId,
-          stepType: "embedding.incremental",
-          payload: { messageId: storedMessage.id },
-          idempotencyKey: `embedding.incremental:${storedMessage.id}:${contentHash}`,
-        },
-        transaction as unknown as Database,
-      );
+    if (changed) {
+      await refreshIndexedThread(transaction, threadId, analysisChanged);
     }
 
-    return { messageId: storedMessage.id, threadId };
+    return { messageId, threadId, changed };
   });
+}
+
+export async function deleteIndexedMessage(
+  input: { accountId: string; providerMessageId: string },
+  database: Database = getDatabase(),
+) {
+  return database.transaction(async (transaction) => {
+    const [storedMessage] = await transaction
+      .select({ id: messages.id, threadId: messages.threadId })
+      .from(messages)
+      .innerJoin(threads, eq(threads.id, messages.threadId))
+      .where(
+        and(
+          eq(threads.accountId, input.accountId),
+          eq(messages.providerMessageId, input.providerMessageId),
+        ),
+      )
+      .limit(1);
+    if (!storedMessage) return { changed: false, threadId: null };
+
+    await transaction.delete(messages).where(eq(messages.id, storedMessage.id));
+    await invalidateThreadAnalysis(
+      transaction,
+      input.accountId,
+      storedMessage.threadId,
+    );
+    await refreshIndexedThread(transaction, storedMessage.threadId);
+
+    return { changed: true, threadId: storedMessage.threadId };
+  });
+}
+
+export async function getIndexedMessageIds(
+  accountId: string,
+  database: Database = getDatabase(),
+) {
+  const storedMessages = await database
+    .select({ providerMessageId: messages.providerMessageId })
+    .from(messages)
+    .innerJoin(threads, eq(threads.id, messages.threadId))
+    .where(eq(threads.accountId, accountId));
+  return storedMessages.map((message) => message.providerMessageId);
 }
 
 export function createMessageContentHash(
@@ -1214,6 +1704,8 @@ export function createMessageContentHash(
     .update(`${input.subject.trim()}\n${input.bodyText.trim()}`)
     .digest("hex");
 }
+
+export const upsertMailboxMessage = upsertIndexedMessage;
 
 export async function countMemoryEligibleMessages(
   accountId: string,
@@ -1235,13 +1727,428 @@ export async function countMemoryEligibleMessages(
   return total?.value ?? 0;
 }
 
-type InvookLabelKey = "important" | "travel" | "pitch" | "newsletter";
+export class LabelConflictError extends Error {
+  constructor(message = "A label with this name already exists.") {
+    super(message);
+    this.name = "LabelConflictError";
+  }
+}
+
+function normalizeLabelName(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
+}
+
+function isUniqueViolation(error: unknown) {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "23505",
+  );
+}
+
+export async function createUserLabel(
+  input: { userId: string; name: string; description: string },
+  database: Database = getDatabase(),
+) {
+  try {
+    return await database.transaction(async (transaction) => {
+      const [account] = await transaction
+        .select({
+          id: connectedAccounts.id,
+          syncState: connectedAccounts.syncState,
+          historyCursor: connectedAccounts.historyCursor,
+        })
+        .from(connectedAccounts)
+        .where(
+          and(
+            eq(connectedAccounts.userId, input.userId),
+            eq(connectedAccounts.status, "connected"),
+          ),
+        )
+        .orderBy(desc(connectedAccounts.createdAt))
+        .limit(1);
+      if (!account) return null;
+
+      const normalizedName = normalizeLabelName(input.name);
+      const [existing] = await transaction
+        .select({ id: mailLabels.id })
+        .from(mailLabels)
+        .where(
+          and(
+            eq(mailLabels.accountId, account.id),
+            eq(mailLabels.normalizedName, normalizedName),
+          ),
+        )
+        .limit(1);
+      if (existing) throw new LabelConflictError();
+
+      const [label] = await transaction
+        .insert(mailLabels)
+        .values({
+          userId: input.userId,
+          accountId: account.id,
+          name: input.name.trim().replace(/\s+/g, " "),
+          normalizedName,
+          description: input.description.trim().replace(/\s+/g, " "),
+          systemKey: null,
+          definitionVersion: 1,
+          analysisState: "pending",
+        })
+        .returning();
+      if (!label) throw new Error("The label could not be created.");
+
+      if (account.syncState.mailSync === "complete" && account.historyCursor) {
+        await transaction
+          .insert(jobs)
+          .values({
+            userId: input.userId,
+            accountId: account.id,
+            jobType: "label.backfill.submit",
+            status: "queued",
+            payload: { labelId: label.id, definitionVersion: 1 },
+            attempts: 0,
+            idempotencyKey: `label.backfill.submit:${label.id}:1:${account.historyCursor}`,
+          })
+          .onConflictDoNothing({ target: jobs.idempotencyKey });
+      }
+
+      await transaction.insert(auditEvents).values({
+        userId: input.userId,
+        accountId: account.id,
+        eventType: "label.created",
+        targetType: "label",
+        targetId: label.id,
+        metadata: { name: label.name },
+      });
+
+      const [threadTotal] = await transaction
+        .select({ value: count(threads.id) })
+        .from(threads)
+        .where(eq(threads.accountId, account.id));
+      return {
+        id: label.id,
+        name: label.name,
+        description: label.description,
+        systemKey: label.systemKey,
+        definitionVersion: label.definitionVersion,
+        analysisState: label.analysisState,
+        analyzedThreadCount: 0,
+        totalThreadCount: threadTotal?.value ?? 0,
+      };
+    });
+  } catch (error) {
+    if (error instanceof LabelConflictError || isUniqueViolation(error)) {
+      throw new LabelConflictError();
+    }
+    throw error;
+  }
+}
+
+export async function deleteUserLabel(
+  input: { userId: string; labelId: string },
+  database: Database = getDatabase(),
+) {
+  return database.transaction(async (transaction) => {
+    const [label] = await transaction
+      .select({
+        id: mailLabels.id,
+        accountId: mailLabels.accountId,
+        name: mailLabels.name,
+        systemKey: mailLabels.systemKey,
+      })
+      .from(mailLabels)
+      .where(
+        and(eq(mailLabels.id, input.labelId), eq(mailLabels.userId, input.userId)),
+      )
+      .limit(1);
+    if (!label) return false;
+
+    await transaction.delete(mailLabels).where(eq(mailLabels.id, label.id));
+    await transaction.insert(auditEvents).values({
+      userId: input.userId,
+      accountId: label.accountId,
+      eventType: "label.deleted",
+      targetType: "label",
+      targetId: label.id,
+      metadata: { name: label.name, systemKey: label.systemKey },
+    });
+    return true;
+  });
+}
+
+export async function getLabelForAnalysis(
+  accountId: string,
+  labelId: string,
+  database: Database = getDatabase(),
+) {
+  const [label] = await database
+    .select({
+      id: mailLabels.id,
+      userId: mailLabels.userId,
+      accountId: mailLabels.accountId,
+      name: mailLabels.name,
+      description: mailLabels.description,
+      definitionVersion: mailLabels.definitionVersion,
+      analysisState: mailLabels.analysisState,
+    })
+    .from(mailLabels)
+    .where(and(eq(mailLabels.id, labelId), eq(mailLabels.accountId, accountId)))
+    .limit(1);
+  return label ?? null;
+}
+
+async function loadLabelAnalysisThreads(
+  accountId: string,
+  threadIds: string[],
+  database: Database,
+) {
+  if (threadIds.length === 0) return [];
+  const threadRows = await database
+    .select({
+      id: threads.id,
+      contentVersion: threads.contentVersion,
+      subject: threads.subject,
+      participants: threads.participants,
+      latestMessageAt: threads.latestMessageAt,
+      updatedAt: threads.updatedAt,
+    })
+    .from(threads)
+    .where(and(eq(threads.accountId, accountId), inArray(threads.id, threadIds)))
+    .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt));
+  const rankedMessages = database
+    .select({
+      messageId: messages.id,
+      threadId: messages.threadId,
+      direction: messages.direction,
+      sender: messages.sender,
+      bodyText: messages.bodyText,
+      sentAt: messages.sentAt,
+      rank: sql<number>`row_number() over (partition by ${messages.threadId} order by ${messages.sentAt} desc, ${messages.id} desc)`.as(
+        "message_rank",
+      ),
+    })
+    .from(messages)
+    .where(inArray(messages.threadId, threadIds))
+    .as("ranked_label_messages");
+  const messageRows = await database
+    .select({
+      messageId: rankedMessages.messageId,
+      threadId: rankedMessages.threadId,
+      direction: rankedMessages.direction,
+      sender: rankedMessages.sender,
+      bodyText: rankedMessages.bodyText,
+      sentAt: rankedMessages.sentAt,
+    })
+    .from(rankedMessages)
+    .where(lte(rankedMessages.rank, 3))
+    .orderBy(desc(rankedMessages.sentAt), desc(rankedMessages.messageId));
+
+  const messagesByThread = new Map<string, typeof messageRows>();
+  for (const message of messageRows) {
+    const grouped = messagesByThread.get(message.threadId) ?? [];
+    grouped.push(message);
+    messagesByThread.set(message.threadId, grouped);
+  }
+
+  return threadRows.map((thread) => ({
+    id: thread.id,
+    contentVersion: thread.contentVersion,
+    subject: thread.subject,
+    participants: thread.participants,
+    messages: (messagesByThread.get(thread.id) ?? [])
+      .slice(0, 3)
+      .map((message) => ({
+        direction: message.direction,
+        sender: message.sender.raw || message.sender.email,
+        bodyText: message.bodyText,
+      })),
+  }));
+}
+
+export async function getThreadsForLabelBackfill(
+  input: { accountId: string; labelId: string; definitionVersion: number },
+  database: Database = getDatabase(),
+) {
+  const candidateRows = await database
+    .select({ id: threads.id })
+    .from(threads)
+    .leftJoin(
+      threadLabelAnalyses,
+      and(
+        eq(threadLabelAnalyses.threadId, threads.id),
+        eq(threadLabelAnalyses.labelId, input.labelId),
+      ),
+    )
+    .where(
+      and(
+        eq(threads.accountId, input.accountId),
+        or(
+          isNull(threadLabelAnalyses.id),
+          ne(threadLabelAnalyses.definitionVersion, input.definitionVersion),
+        ),
+      ),
+    )
+    .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt))
+    .limit(50_000);
+  return loadLabelAnalysisThreads(
+    input.accountId,
+    candidateRows.map((thread) => thread.id),
+    database,
+  );
+}
+
+export function getThreadsForLabelRetry(
+  accountId: string,
+  threadIds: string[],
+  database: Database = getDatabase(),
+) {
+  return loadLabelAnalysisThreads(accountId, threadIds, database);
+}
+
+export async function setLabelAnalysisState(
+  input: {
+    accountId: string;
+    labelId: string;
+    definitionVersion: number;
+    state: LabelAnalysisState;
+  },
+  database: Database = getDatabase(),
+) {
+  await database
+    .update(mailLabels)
+    .set({
+      analysisState: input.state,
+      lastAnalyzedAt: input.state === "complete" ? new Date() : undefined,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(mailLabels.id, input.labelId),
+        eq(mailLabels.accountId, input.accountId),
+        eq(mailLabels.definitionVersion, input.definitionVersion),
+      ),
+    );
+}
+
+export async function saveLabelBatchResults(
+  input: {
+    userId: string;
+    accountId: string;
+    labelId: string;
+    definitionVersion: number;
+    modelId: string;
+    results: Array<{
+      threadId: string;
+      threadVersion: number;
+      matched: boolean;
+      confidence: number;
+    }>;
+  },
+  database: Database = getDatabase(),
+) {
+  return database.transaction(async (transaction) => {
+    const [label] = await transaction
+      .select({ id: mailLabels.id })
+      .from(mailLabels)
+      .where(
+        and(
+          eq(mailLabels.id, input.labelId),
+          eq(mailLabels.accountId, input.accountId),
+          eq(mailLabels.definitionVersion, input.definitionVersion),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!label) return null;
+
+    const staleThreadIds = new Set<string>();
+    let savedThreadCount = 0;
+    for (let offset = 0; offset < input.results.length; offset += 500) {
+      const requestedResults = input.results.slice(offset, offset + 500);
+      const requestedThreadIds = requestedResults.map((result) => result.threadId);
+      const currentThreads = await transaction
+        .select({ id: threads.id, contentVersion: threads.contentVersion })
+        .from(threads)
+        .where(
+          and(
+            eq(threads.accountId, input.accountId),
+            inArray(threads.id, requestedThreadIds),
+          ),
+        )
+        .for("update");
+      const currentVersions = new Map(
+        currentThreads.map((thread) => [thread.id, thread.contentVersion]),
+      );
+      const results = requestedResults.filter((result) => {
+        const currentVersion = currentVersions.get(result.threadId);
+        if (currentVersion === result.threadVersion) return true;
+        staleThreadIds.add(result.threadId);
+        return false;
+      });
+      if (results.length === 0) continue;
+
+      savedThreadCount += results.length;
+      const threadIds = results.map((result) => result.threadId);
+      await transaction
+        .delete(threadLabels)
+        .where(
+          and(
+            inArray(threadLabels.threadId, threadIds),
+            eq(threadLabels.labelId, input.labelId),
+            eq(threadLabels.source, "ai"),
+          ),
+        );
+
+      const matches = results.filter((result) => result.matched);
+      if (matches.length > 0) {
+        await transaction
+          .insert(threadLabels)
+          .values(matches.map((result) => ({
+            userId: input.userId,
+            accountId: input.accountId,
+            threadId: result.threadId,
+            labelId: input.labelId,
+            source: "ai" as const,
+            state: "applied" as const,
+            confidence: result.confidence.toFixed(2),
+            modelId: input.modelId,
+            analysisVersion: input.definitionVersion,
+          })))
+          .onConflictDoNothing({
+            target: [threadLabels.threadId, threadLabels.labelId],
+          });
+      }
+
+      await transaction
+        .insert(threadLabelAnalyses)
+        .values(results.map((result) => ({
+          userId: input.userId,
+          accountId: input.accountId,
+          threadId: result.threadId,
+          labelId: input.labelId,
+          definitionVersion: input.definitionVersion,
+          modelId: input.modelId,
+          analyzedAt: new Date(),
+        })))
+        .onConflictDoUpdate({
+          target: [threadLabelAnalyses.threadId, threadLabelAnalyses.labelId],
+          set: {
+            definitionVersion: input.definitionVersion,
+            modelId: input.modelId,
+            analyzedAt: new Date(),
+          },
+        });
+    }
+    return { savedThreadCount, staleThreadIds: Array.from(staleThreadIds) };
+  });
+}
 
 export async function setUserThreadLabel(
   input: {
     userId: string;
     threadId: string;
-    label: InvookLabelKey;
+    labelId: string;
     applied: boolean;
   },
   database: Database = getDatabase(),
@@ -1254,21 +2161,38 @@ export async function setUserThreadLabel(
       .limit(1);
     if (!thread) return null;
 
+    const [label] = await transaction
+      .select({
+        id: mailLabels.id,
+        name: mailLabels.name,
+        definitionVersion: mailLabels.definitionVersion,
+      })
+      .from(mailLabels)
+      .where(
+        and(
+          eq(mailLabels.id, input.labelId),
+          eq(mailLabels.userId, input.userId),
+          eq(mailLabels.accountId, thread.accountId),
+        ),
+      )
+      .limit(1);
+    if (!label) return null;
+
     await transaction
       .insert(threadLabels)
       .values({
         userId: input.userId,
         accountId: thread.accountId,
         threadId: thread.id,
-        labelKey: input.label,
+        labelId: label.id,
         source: "user",
         state: input.applied ? "applied" : "dismissed",
         confidence: null,
         modelId: null,
-        analysisVersion: MAIL_CLASSIFICATION_VERSION,
+        analysisVersion: label.definitionVersion,
       })
       .onConflictDoUpdate({
-        target: [threadLabels.threadId, threadLabels.labelKey],
+        target: [threadLabels.threadId, threadLabels.labelId],
         set: {
           source: "user",
           state: input.applied ? "applied" : "dismissed",
@@ -1284,22 +2208,27 @@ export async function setUserThreadLabel(
       eventType: input.applied ? "thread.label_applied" : "thread.label_dismissed",
       targetType: "thread",
       targetId: thread.id,
-      metadata: { label: input.label },
+      metadata: { labelId: label.id, labelName: label.name },
     });
 
     const appliedLabels = await transaction
       .select({
-        key: threadLabels.labelKey,
+        labelId: threadLabels.labelId,
+        name: mailLabels.name,
+        systemKey: mailLabels.systemKey,
         source: threadLabels.source,
         confidence: threadLabels.confidence,
       })
       .from(threadLabels)
+      .innerJoin(mailLabels, eq(mailLabels.id, threadLabels.labelId))
       .where(
         and(eq(threadLabels.threadId, thread.id), eq(threadLabels.state, "applied")),
       );
 
     return appliedLabels.map((label) => ({
-      key: label.key,
+      labelId: label.labelId,
+      name: label.name,
+      systemKey: label.systemKey,
       source: label.source,
       confidence: label.confidence === null ? null : Number(label.confidence),
     }));
@@ -1308,8 +2237,13 @@ export async function setUserThreadLabel(
 
 export async function getMemoryAnalysisThreads(
   accountId: string,
+  evidenceMessageIds?: string[],
   database: Database = getDatabase(),
 ) {
+  if (evidenceMessageIds && evidenceMessageIds.length === 0) return [];
+  const evidenceIdSet = evidenceMessageIds
+    ? new Set(evidenceMessageIds)
+    : null;
   const eligibleThreadIds = database
     .select({ id: messages.threadId })
     .from(messages)
@@ -1318,6 +2252,9 @@ export async function getMemoryAnalysisThreads(
         eq(messages.direction, "outgoing"),
         eq(messages.isMemoryEligible, true),
         eq(messages.excludedFromMemory, false),
+        ...(evidenceMessageIds
+          ? [inArray(messages.id, evidenceMessageIds)]
+          : []),
       ),
     )
     .groupBy(messages.threadId);
@@ -1346,6 +2283,9 @@ export async function getMemoryAnalysisThreads(
           and(
             eq(messages.direction, "outgoing"),
             eq(messages.isMemoryEligible, true),
+            ...(evidenceMessageIds
+              ? [inArray(messages.id, evidenceMessageIds)]
+              : []),
           ),
         ),
       ),
@@ -1382,7 +2322,10 @@ export async function getMemoryAnalysisThreads(
       recipients: row.recipients,
       bodyText: row.bodyText,
       sentAt: row.sentAt,
-      ownerEvidence: row.direction === "outgoing" && row.isMemoryEligible,
+      ownerEvidence:
+        row.direction === "outgoing" &&
+        row.isMemoryEligible &&
+        (!evidenceIdSet || evidenceIdSet.has(row.id)),
     });
     grouped.set(row.threadId, thread);
   }
@@ -2616,6 +3559,301 @@ export async function markDraftFeedbackAnalyzed(
   });
 }
 
+type PendingMemoryEvidence = {
+  messageId: string;
+  scope: "global" | "contact";
+  contactEmail: string;
+};
+
+function incrementalMemoryJobs(input: {
+  userId: string;
+  accountId: string;
+  pendingEvidence: PendingMemoryEvidence[];
+}) {
+  const evidenceByScope = new Map<string, PendingMemoryEvidence[]>();
+  for (const evidence of input.pendingEvidence) {
+    const key = `${evidence.scope}:${evidence.contactEmail}`;
+    const grouped = evidenceByScope.get(key) ?? [];
+    grouped.push(evidence);
+    evidenceByScope.set(key, grouped);
+  }
+
+  return Array.from(evidenceByScope.values()).flatMap((evidence) => {
+    if (evidence.length < 3) return [];
+    const first = evidence[0];
+    if (!first) return [];
+    const evidenceMessageIds = evidence.map((entry) => entry.messageId);
+    const digest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          scope: first.scope,
+          contactEmail: first.contactEmail,
+          evidenceMessageIds,
+        }),
+      )
+      .digest("hex");
+    return [{
+      userId: input.userId,
+      accountId: input.accountId,
+      jobType: "memory.incremental",
+      status: "queued" as const,
+      payload: {
+        schemaVersion: MEMORY_SCHEMA_VERSION,
+        mode: first.scope,
+        contactEmail: first.scope === "contact" ? first.contactEmail : null,
+        evidenceMessageIds,
+      },
+      attempts: 0,
+      idempotencyKey: `memory.incremental:${input.accountId}:${digest}`,
+    }];
+  });
+}
+
+export async function completeIncrementalSync(
+  input: {
+    accountId: string;
+    historyCursor: string;
+    changedThreadIds: string[];
+  },
+  database: Database = getDatabase(),
+) {
+  await database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ userId: connectedAccounts.userId, syncState: connectedAccounts.syncState })
+      .from(connectedAccounts)
+      .where(eq(connectedAccounts.id, input.accountId))
+      .for("update")
+      .limit(1);
+    if (!account) throw new Error("The indexed Gmail account was not found.");
+
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        historyCursor: input.historyCursor,
+        lastSyncedAt: new Date(),
+        syncState: {
+          ...account.syncState,
+          mailSync: "complete",
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, input.accountId));
+
+    const changedThreadIds = Array.from(new Set(input.changedThreadIds));
+    const pendingLabels = await transaction
+      .select({ id: mailLabels.id, definitionVersion: mailLabels.definitionVersion })
+      .from(mailLabels)
+      .where(
+        and(
+          eq(mailLabels.accountId, input.accountId),
+          ne(mailLabels.analysisState, "complete"),
+        ),
+      );
+    if (pendingLabels.length > 0) {
+      await transaction
+        .insert(jobs)
+        .values(
+          pendingLabels.map((label) => ({
+            userId: account.userId,
+            accountId: input.accountId,
+            jobType: "label.backfill.submit",
+            status: "queued" as const,
+            payload: {
+              labelId: label.id,
+              definitionVersion: label.definitionVersion,
+            },
+            attempts: 0,
+            idempotencyKey: `label.backfill.submit:${label.id}:${label.definitionVersion}:${input.historyCursor}`,
+          })),
+        )
+        .onConflictDoNothing({ target: jobs.idempotencyKey });
+    }
+
+    const pendingEvidence = await transaction
+      .select({
+        messageId: memoryPendingEvidence.messageId,
+        scope: memoryPendingEvidence.scope,
+        contactEmail: memoryPendingEvidence.contactEmail,
+      })
+      .from(memoryPendingEvidence)
+      .where(
+        and(
+          eq(memoryPendingEvidence.accountId, input.accountId),
+          eq(memoryPendingEvidence.schemaVersion, MEMORY_SCHEMA_VERSION),
+        ),
+      )
+      .orderBy(asc(memoryPendingEvidence.createdAt), asc(memoryPendingEvidence.id));
+    const memoryJobs =
+      account.syncState.memory === "complete"
+        ? incrementalMemoryJobs({
+            userId: account.userId,
+            accountId: input.accountId,
+            pendingEvidence,
+          })
+        : [];
+    if (memoryJobs.length > 0) {
+      await transaction
+        .insert(jobs)
+        .values(memoryJobs)
+        .onConflictDoNothing({ target: jobs.idempotencyKey });
+    }
+
+    await transaction.insert(auditEvents).values({
+      userId: account.userId,
+      accountId: input.accountId,
+      eventType: "gmail.incremental_sync_completed",
+      targetType: "connected_account",
+      targetId: input.accountId,
+      metadata: {
+        historyCursor: input.historyCursor,
+        changedThreadCount: changedThreadIds.length,
+      },
+    });
+  });
+}
+
+export async function clearPendingMemoryEvidence(
+  input: {
+    accountId: string;
+    mode: "global" | "contact";
+    contactEmail: string | null;
+    messageIds: string[];
+  },
+  database: Database = getDatabase(),
+) {
+  if (input.messageIds.length === 0) return;
+  await database
+    .delete(memoryPendingEvidence)
+    .where(
+      and(
+        eq(memoryPendingEvidence.accountId, input.accountId),
+        eq(memoryPendingEvidence.scope, input.mode),
+        eq(memoryPendingEvidence.contactEmail, input.contactEmail ?? ""),
+        inArray(memoryPendingEvidence.messageId, input.messageIds),
+      ),
+    );
+}
+
+export async function enqueueAnalysisJobsForIndexedAccounts(
+  database: Database = getDatabase(),
+): Promise<number> {
+  const indexedAccounts = await database
+    .select({
+      id: connectedAccounts.id,
+      userId: connectedAccounts.userId,
+      historyCursor: connectedAccounts.historyCursor,
+      syncState: connectedAccounts.syncState,
+    })
+    .from(connectedAccounts)
+    .where(eq(connectedAccounts.status, "connected"));
+
+  const indexedAccountIds = indexedAccounts.map((account) => account.id);
+  const accountLabels =
+    indexedAccountIds.length > 0
+      ? await database
+          .select({
+            id: mailLabels.id,
+            accountId: mailLabels.accountId,
+            definitionVersion: mailLabels.definitionVersion,
+            analysisState: mailLabels.analysisState,
+          })
+          .from(mailLabels)
+          .where(inArray(mailLabels.accountId, indexedAccountIds))
+      : [];
+
+  const analysisJobs = indexedAccounts.flatMap((account) => {
+    if (account.syncState.mailSync !== "complete" || !account.historyCursor) return [];
+    return [
+      ...accountLabels
+        .filter(
+          (label) =>
+            label.accountId === account.id && label.analysisState !== "complete",
+        )
+        .map((label) => ({
+          userId: account.userId,
+          accountId: account.id,
+          jobType: "label.backfill.submit",
+          status: "queued" as const,
+          payload: {
+            labelId: label.id,
+            definitionVersion: label.definitionVersion,
+          },
+          attempts: 0,
+          idempotencyKey: `label.backfill.submit:${label.id}:${label.definitionVersion}:${account.historyCursor}`,
+        })),
+    ];
+  });
+  const memoryReadyAccountIds = indexedAccounts
+    .filter((account) => account.syncState.memory === "complete")
+    .map((account) => account.id);
+  const pendingEvidence =
+    memoryReadyAccountIds.length > 0
+      ? await database
+          .select({
+            accountId: memoryPendingEvidence.accountId,
+            messageId: memoryPendingEvidence.messageId,
+            scope: memoryPendingEvidence.scope,
+            contactEmail: memoryPendingEvidence.contactEmail,
+          })
+          .from(memoryPendingEvidence)
+          .where(
+            and(
+              inArray(memoryPendingEvidence.accountId, memoryReadyAccountIds),
+              eq(memoryPendingEvidence.schemaVersion, MEMORY_SCHEMA_VERSION),
+            ),
+          )
+          .orderBy(
+            asc(memoryPendingEvidence.accountId),
+            asc(memoryPendingEvidence.createdAt),
+            asc(memoryPendingEvidence.id),
+          )
+      : [];
+  const pendingEvidenceByAccount = new Map<
+    string,
+    PendingMemoryEvidence[]
+  >();
+  for (const evidence of pendingEvidence) {
+    const grouped = pendingEvidenceByAccount.get(evidence.accountId) ?? [];
+    grouped.push(evidence);
+    pendingEvidenceByAccount.set(evidence.accountId, grouped);
+  }
+  const incrementalJobs = indexedAccounts.flatMap((account) =>
+    account.syncState.memory === "complete"
+      ? incrementalMemoryJobs({
+          userId: account.userId,
+          accountId: account.id,
+          pendingEvidence: pendingEvidenceByAccount.get(account.id) ?? [],
+        })
+      : [],
+  );
+  const values = [...analysisJobs, ...incrementalJobs];
+  if (values.length === 0) return 0;
+
+  const inserted = await database
+    .insert(jobs)
+    .values(values)
+    .onConflictDoNothing({ target: jobs.idempotencyKey })
+    .returning({ id: jobs.id });
+  return inserted.length;
+}
+
+export async function completeJob(
+  jobId: string,
+  result: Record<string, unknown> = {},
+  database: Database = getDatabase(),
+) {
+  await database
+    .update(jobs)
+    .set({
+      status: "complete",
+      result: { ...result, completedAt: new Date().toISOString() },
+      lockedAt: null,
+      lockedBy: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(jobs.id, jobId));
+}
+
 export async function enqueueBatchEvent(
   input: {
     provider: "openai" | "azure-openai";
@@ -2675,29 +3913,72 @@ export async function enqueueBatchEvent(
           )
           .orderBy(desc(workflowSteps.updatedAt))
           .limit(1);
-    const submission = embeddingSubmission ?? memorySubmission;
+    const workflowSubmission = embeddingSubmission ?? memorySubmission;
+    const [postgresSubmission] = workflowSubmission
+      ? []
+      : await transaction
+          .select({
+            id: jobs.id,
+            userId: jobs.userId,
+            accountId: jobs.accountId,
+            jobType: jobs.jobType,
+          })
+          .from(jobs)
+          .where(
+            and(
+              eq(jobs.status, "complete"),
+              inArray(jobs.jobType, [
+                "memory.incremental",
+                "memory.batch.retry",
+                "label.backfill.submit",
+                "label.batch.retry",
+              ]),
+              sql`${jobs.result}->>'provider' = ${input.provider}`,
+              sql`${jobs.result}->>'providerBatchId' = ${input.providerBatchId}`,
+            ),
+          )
+          .orderBy(desc(jobs.updatedAt))
+          .limit(1);
+    const submission = workflowSubmission ?? postgresSubmission;
     if (!submission) return null;
 
-    const eventJobType = submission.stepType.startsWith("embedding.")
-      ? "embedding.batch.event"
-      : "memory.batch.event";
-
-    await enqueueWorkflowStep(
-      {
-        userId: submission.userId,
-        accountId: submission.accountId,
-        stepType: eventJobType,
-        payload: {
-          submissionJobId: submission.id,
-          webhookId: input.webhookId,
-          eventType: input.eventType,
-          provider: input.provider,
-          providerBatchId: input.providerBatchId,
+    const payload = {
+      submissionJobId: submission.id,
+      webhookId: input.webhookId,
+      eventType: input.eventType,
+      provider: input.provider,
+      providerBatchId: input.providerBatchId,
+    };
+    const idempotencyKey = `${input.provider}.batch-event:${input.eventType}:${input.providerBatchId}`;
+    if (workflowSubmission) {
+      const eventJobType = workflowSubmission.stepType.startsWith("embedding.")
+        ? "embedding.batch.event"
+        : "memory.batch.event";
+      await enqueueWorkflowStep(
+        {
+          userId: workflowSubmission.userId,
+          accountId: workflowSubmission.accountId,
+          stepType: eventJobType,
+          payload,
+          idempotencyKey,
         },
-        idempotencyKey: `${input.provider}.batch-event:${input.eventType}:${input.providerBatchId}`,
-      },
-      transaction as unknown as Database,
-    );
+        transaction as unknown as Database,
+      );
+    } else if (postgresSubmission) {
+      await transaction.insert(jobs).values({
+        userId: postgresSubmission.userId,
+        accountId: postgresSubmission.accountId,
+        jobType: postgresSubmission.jobType.startsWith("label.")
+          ? "label.batch.event"
+          : "memory.batch.event",
+        status: "queued",
+        payload: {
+          ...payload,
+        },
+        attempts: 0,
+        idempotencyKey,
+      }).onConflictDoNothing({ target: jobs.idempotencyKey });
+    }
 
     return { submissionJobId: submission.id };
   });
@@ -2707,7 +3988,57 @@ export async function getBatchSubmission(
   jobId: string,
   database: Database = getDatabase(),
 ) {
-  return getWorkflowStepSubmission(jobId, database);
+  const workflowSubmission = await getWorkflowStepSubmission(jobId, database);
+  if (workflowSubmission) return workflowSubmission;
+  const [submission] = await database
+    .select({
+      id: jobs.id,
+      userId: jobs.userId,
+      accountId: jobs.accountId,
+      jobType: jobs.jobType,
+      result: jobs.result,
+      maxAttempts: jobs.maxAttempts,
+    })
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.id, jobId),
+        eq(jobs.status, "complete"),
+        inArray(jobs.jobType, [
+          "memory.incremental",
+          "memory.batch.retry",
+        ]),
+      ),
+    )
+    .limit(1);
+
+  return submission ?? null;
+}
+
+export async function getLabelBatchSubmission(
+  jobId: string,
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .select({
+      id: jobs.id,
+      userId: jobs.userId,
+      accountId: jobs.accountId,
+      jobType: jobs.jobType,
+      result: jobs.result,
+      maxAttempts: jobs.maxAttempts,
+    })
+    .from(jobs)
+    .where(
+      and(
+        eq(jobs.id, jobId),
+        eq(jobs.status, "complete"),
+        inArray(jobs.jobType, ["label.backfill.submit", "label.batch.retry"]),
+      ),
+    )
+    .limit(1);
+
+  return submission ?? null;
 }
 
 export async function enqueueMemoryBatchRetry(
@@ -2739,20 +4070,276 @@ export async function enqueueMemoryBatchRetry(
     .digest("hex");
 
   const idempotencyKey = `memory.batch.retry:${input.parentSubmissionJobId}:${manifestHash}`;
-  return enqueueWorkflowStep(
-    {
+  const payload = {
+    parentSubmissionJobId: input.parentSubmissionJobId,
+    rootSubmissionJobId: input.rootSubmissionJobId,
+    batchAttempt: input.batchAttempt,
+    replaceExisting: input.replaceExisting,
+    manifest: input.manifest,
+  };
+  const workflowParent = await getWorkflowStepSubmission(
+    input.parentSubmissionJobId,
+    database,
+  );
+  if (workflowParent) {
+    return enqueueWorkflowStep(
+      {
+        userId: input.userId,
+        accountId: input.accountId,
+        stepType: "memory.batch.retry",
+        payload,
+        idempotencyKey,
+      },
+      database,
+    );
+  }
+  const inserted = await database
+    .insert(jobs)
+    .values({
       userId: input.userId,
       accountId: input.accountId,
-      stepType: "memory.batch.retry",
+      jobType: "memory.batch.retry",
+      status: "queued",
+      payload,
+      attempts: 0,
+      idempotencyKey,
+    })
+    .onConflictDoNothing({ target: jobs.idempotencyKey })
+    .returning({ id: jobs.id });
+
+  if (inserted[0]) return inserted[0].id;
+  const [existing] = await database
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(eq(jobs.idempotencyKey, idempotencyKey))
+    .limit(1);
+  return existing?.id ?? null;
+}
+
+export async function enqueueLabelBatchRetry(
+  input: {
+    userId: string;
+    accountId: string;
+    labelId: string;
+    definitionVersion: number;
+    parentSubmissionJobId: string;
+    rootSubmissionJobId: string;
+    batchAttempt: number;
+    continueBackfill: boolean;
+    manifest: Array<{
+      key: string;
+      labelId: string;
+      definitionVersion: number;
+      threadId: string;
+    }>;
+  },
+  database: Database = getDatabase(),
+) {
+  const manifestHash = createHash("sha256")
+    .update(
+      JSON.stringify(
+        input.manifest.map((entry) => ({
+          key: entry.key,
+          threadId: entry.threadId,
+        })),
+      ),
+    )
+    .digest("hex");
+  const idempotencyKey = `label.batch.retry:${input.parentSubmissionJobId}:${manifestHash}`;
+  const inserted = await database
+    .insert(jobs)
+    .values({
+      userId: input.userId,
+      accountId: input.accountId,
+      jobType: "label.batch.retry",
+      status: "queued",
       payload: {
+        labelId: input.labelId,
+        definitionVersion: input.definitionVersion,
         parentSubmissionJobId: input.parentSubmissionJobId,
         rootSubmissionJobId: input.rootSubmissionJobId,
         batchAttempt: input.batchAttempt,
-        replaceExisting: input.replaceExisting,
+        continueBackfill: input.continueBackfill,
         manifest: input.manifest,
       },
+      attempts: 0,
       idempotencyKey,
-    },
-    database,
-  );
+    })
+    .onConflictDoNothing({ target: jobs.idempotencyKey })
+    .returning({ id: jobs.id });
+
+  if (inserted[0]) return inserted[0].id;
+  const [existing] = await database
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(eq(jobs.idempotencyKey, idempotencyKey))
+    .limit(1);
+  return existing?.id ?? null;
+}
+
+export async function enqueueLabelBackfillContinuation(
+  input: {
+    userId: string;
+    accountId: string;
+    labelId: string;
+    definitionVersion: number;
+    parentSubmissionJobId: string;
+  },
+  database: Database = getDatabase(),
+) {
+  const idempotencyKey = `label.backfill.continue:${input.parentSubmissionJobId}`;
+  const inserted = await database
+    .insert(jobs)
+    .values({
+      userId: input.userId,
+      accountId: input.accountId,
+      jobType: "label.backfill.submit",
+      status: "queued",
+      payload: {
+        labelId: input.labelId,
+        definitionVersion: input.definitionVersion,
+      },
+      attempts: 0,
+      idempotencyKey,
+    })
+    .onConflictDoNothing({ target: jobs.idempotencyKey })
+    .returning({ id: jobs.id });
+
+  if (inserted[0]) return inserted[0].id;
+  const [existing] = await database
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(eq(jobs.idempotencyKey, idempotencyKey))
+    .limit(1);
+  return existing?.id ?? null;
+}
+
+export async function deferJobWithoutAttempt(
+  input: { jobId: string; message: string },
+  database: Database = getDatabase(),
+) {
+  await database
+    .update(jobs)
+    .set({
+      status: "queued",
+      attempts: sql`greatest(${jobs.attempts} - 1, 0)`,
+      lastError: input.message,
+      lockedAt: null,
+      lockedBy: null,
+      updatedAt: new Date(),
+    })
+    .where(eq(jobs.id, input.jobId));
+}
+
+export async function failAnalysisJob(
+  input: { job: ClaimedJob; message: string },
+  database: Database = getDatabase(),
+) {
+  const terminal = input.job.attempts >= input.job.maxAttempts;
+  await database.transaction(async (transaction) => {
+    await transaction
+      .update(jobs)
+      .set({
+        status: terminal ? "failed" : "retry",
+        lastError: input.message,
+        lockedAt: null,
+        lockedBy: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(jobs.id, input.job.id));
+
+    if (
+      terminal &&
+      ["memory.extract", "memory.batch.retry", "memory.batch.event"].includes(
+        input.job.jobType,
+      ) &&
+      input.job.accountId
+    ) {
+      const [account] = await transaction
+        .select({ syncState: connectedAccounts.syncState })
+        .from(connectedAccounts)
+        .where(eq(connectedAccounts.id, input.job.accountId))
+        .limit(1);
+      if (account) {
+        await transaction
+          .update(connectedAccounts)
+          .set({
+            syncState: { ...account.syncState, memory: "failed" },
+            updatedAt: new Date(),
+          })
+          .where(eq(connectedAccounts.id, input.job.accountId));
+      }
+    }
+
+    if (terminal && input.job.jobType.startsWith("label.") && input.job.accountId) {
+      let labelId = input.job.payload.labelId;
+      let definitionVersion = input.job.payload.definitionVersion;
+      if (input.job.jobType === "label.batch.event") {
+        const submissionJobId = input.job.payload.submissionJobId;
+        if (typeof submissionJobId === "string") {
+          const [submission] = await transaction
+            .select({ result: jobs.result })
+            .from(jobs)
+            .where(eq(jobs.id, submissionJobId))
+            .limit(1);
+          if (submission?.result && typeof submission.result === "object") {
+            labelId = submission.result.labelId;
+            definitionVersion = submission.result.definitionVersion;
+          }
+        }
+      }
+      if (typeof labelId === "string" && typeof definitionVersion === "number") {
+        await transaction
+          .update(mailLabels)
+          .set({ analysisState: "failed", updatedAt: new Date() })
+          .where(
+            and(
+              eq(mailLabels.id, labelId),
+              eq(mailLabels.accountId, input.job.accountId),
+              eq(mailLabels.definitionVersion, definitionVersion),
+            ),
+          );
+      }
+    }
+  });
+}
+
+export async function failJobAndAccount(input: {
+  job: ClaimedJob;
+  message: string;
+  reconnectRequired: boolean;
+}, database: Database = getDatabase()) {
+  const accountId = input.job.accountId;
+
+  await database.transaction(async (transaction) => {
+    await transaction
+      .update(jobs)
+      .set({
+        status: input.job.attempts < input.job.maxAttempts ? "retry" : "failed",
+        lastError: input.message,
+        lockedAt: null,
+        lockedBy: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(jobs.id, input.job.id));
+
+    if (accountId) {
+      const [account] = await transaction
+        .select({ syncState: connectedAccounts.syncState })
+        .from(connectedAccounts)
+        .where(eq(connectedAccounts.id, accountId))
+        .limit(1);
+      await transaction
+        .update(connectedAccounts)
+        .set({
+          status: input.reconnectRequired ? "reconnect_required" : "connected",
+          syncState:
+            input.job.jobType === "gmail.incremental_sync" && account
+              ? { ...account.syncState, mailSync: "failed" }
+              : { mailSync: "failed", indexing: "pending", memory: "pending" },
+          updatedAt: new Date(),
+        })
+        .where(eq(connectedAccounts.id, accountId));
+    }
+  });
 }

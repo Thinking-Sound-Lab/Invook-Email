@@ -1,7 +1,6 @@
 import {
   ArrowLeft01Icon,
   ArrowRight01Icon,
-  RefreshIcon,
   Search02Icon,
   StarIcon,
 } from "@hugeicons/core-free-icons";
@@ -14,14 +13,16 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
-import type { MailAccount, MailboxView, MailThreadSummary } from "./types";
+import { MailboxRefreshButton } from "./mailbox-refresh-button";
+import type {
+  MailAccount,
+  MailboxView,
+  MailThreadSummary,
+  StaticMailboxView,
+} from "./types";
 
-const viewTitles: Record<MailboxView, string> = {
+const viewTitles: Record<StaticMailboxView, string> = {
   all: "All mail",
-  travel: "Travel",
-  important: "Important",
-  pitch: "Pitch",
-  newsletter: "Newsletter",
   starred: "Starred",
   shared: "Shared",
   reminders: "Reminders",
@@ -101,10 +102,12 @@ function MailRow({
           <span
             className={cn(
               "hidden shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium capitalize 2xl:inline-flex",
-              labelStyles[primaryLabel.key],
+              primaryLabel.systemKey
+                ? labelStyles[primaryLabel.systemKey]
+                : "bg-secondary text-muted-foreground",
             )}
           >
-            {primaryLabel.key}
+            {primaryLabel.name}
           </span>
         ) : null}
         {starred ? (
@@ -162,6 +165,8 @@ export function MailList({
   pagination,
   remainingThreads,
   query,
+  title,
+  importantView = false,
 }: {
   account: MailAccount;
   currentView: MailboxView;
@@ -170,6 +175,8 @@ export function MailList({
   pagination: MailboxPagination;
   remainingThreads: MailThreadSummary[];
   query?: string;
+  title?: string;
+  importantView?: boolean;
 }) {
   const noMail = importantThreads.length === 0 && remainingThreads.length === 0;
   const syncing =
@@ -179,7 +186,12 @@ export function MailList({
     <section className="flex min-h-0 flex-col bg-background" aria-label="Mailbox">
       <header className="flex h-15 shrink-0 items-center justify-between border-b border-border/45 px-5">
         <h1 className="truncate text-base font-semibold tracking-[-0.025em]">
-          {query ? `Search: ${query}` : viewTitles[currentView]}
+          {query
+            ? `Search: ${query}`
+            : title ??
+              (currentView.startsWith("label:")
+                ? "Label"
+                : viewTitles[currentView as StaticMailboxView])}
         </h1>
         <div className="flex items-center gap-1">
           <span className="mr-1 hidden text-xs tabular-nums text-muted-foreground sm:inline">
@@ -220,11 +232,7 @@ export function MailList({
               <HugeiconsIcon icon={Search02Icon} size={16} />
             </Link>
           </Button>
-          <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
-            <Link href={mailboxHref(currentView, mailboxCursor)} aria-label="Refresh mailbox">
-              <HugeiconsIcon icon={RefreshIcon} size={16} />
-            </Link>
-          </Button>
+          <MailboxRefreshButton />
         </div>
       </header>
 
@@ -256,7 +264,7 @@ export function MailList({
             accountEmail={account.email}
             currentView={currentView}
             mailboxCursor={mailboxCursor}
-            important={currentView === "important"}
+            important={importantView}
           />
         )}
 
