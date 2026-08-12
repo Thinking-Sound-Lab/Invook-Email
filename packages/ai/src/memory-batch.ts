@@ -5,8 +5,10 @@ import OpenAI, { APIError, toFile } from "openai";
 import type { Batch } from "openai/resources/batches";
 import { z } from "zod";
 
-export const memoryBatchProviders = ["openai", "azure-openai"] as const;
-export type MemoryBatchProvider = (typeof memoryBatchProviders)[number];
+export const batchProviders = ["openai", "azure-openai"] as const;
+export type BatchProvider = (typeof batchProviders)[number];
+export const memoryBatchProviders = batchProviders;
+export type MemoryBatchProvider = BatchProvider;
 
 const OPENAI_BATCH_MODEL = "gpt-5.4-nano-2026-03-17";
 const OPENAI_BATCH_INPUT_TOKEN_LIMIT = 272_000;
@@ -14,8 +16,8 @@ const BATCH_FILE_LIMIT_BYTES = 200_000_000;
 const OPENAI_BATCH_REQUEST_LIMIT = 50_000;
 const AZURE_OPENAI_BATCH_REQUEST_LIMIT = 100_000;
 
-type MemoryBatchProviderConfig = {
-  provider: MemoryBatchProvider;
+type BatchProviderConfig = {
+  provider: BatchProvider;
   providerName: string;
   apiKey: string;
   baseURL?: string;
@@ -23,6 +25,7 @@ type MemoryBatchProviderConfig = {
   inputTokenLimit: number;
   requestLimit: number;
 };
+type MemoryBatchProviderConfig = BatchProviderConfig;
 
 const memoryOutputSchema = z.object({
   memories: z
@@ -147,7 +150,7 @@ export type MemoryBatchManifestEntry = {
 };
 
 export type MemoryBatchSubmission = {
-  provider: MemoryBatchProvider;
+  provider: BatchProvider;
   providerBatchId: string;
   inputFileId: string;
   modelId: string;
@@ -227,14 +230,14 @@ export class MemoryBatchConfigurationError extends Error {
   }
 }
 
-function selectedProvider(): MemoryBatchProvider {
+function selectedProvider(): BatchProvider {
   const provider = process.env.MEMORY_BATCH_PROVIDER?.trim();
-  if (!memoryBatchProviders.includes(provider as MemoryBatchProvider)) {
+  if (!batchProviders.includes(provider as BatchProvider)) {
     throw new MemoryBatchConfigurationError(
       "MEMORY_BATCH_PROVIDER must be openai or azure-openai.",
     );
   }
-  return provider as MemoryBatchProvider;
+  return provider as BatchProvider;
 }
 
 function positiveInteger(value: string | undefined, name: string): number {
@@ -277,7 +280,7 @@ function azureBaseURL(endpoint: string): string {
   return url.toString();
 }
 
-function providerConfig(provider: MemoryBatchProvider): MemoryBatchProviderConfig {
+function providerConfig(provider: BatchProvider): BatchProviderConfig {
   if (provider === "openai") {
     const apiKey = process.env.OPENAI_API_KEY?.trim();
     const webhookSecret = process.env.OPENAI_WEBHOOK_SECRET?.trim();
@@ -319,7 +322,7 @@ function providerConfig(provider: MemoryBatchProvider): MemoryBatchProviderConfi
   };
 }
 
-function getClient(config: MemoryBatchProviderConfig): OpenAI {
+function getClient(config: BatchProviderConfig): OpenAI {
   return new OpenAI({
     apiKey: config.apiKey,
     ...(config.baseURL ? { baseURL: config.baseURL } : {}),
@@ -327,7 +330,7 @@ function getClient(config: MemoryBatchProviderConfig): OpenAI {
 }
 
 export function getBatchWebhookSecret(
-  provider: MemoryBatchProvider,
+  provider: BatchProvider,
 ): string | null {
   const value =
     provider === "openai"
@@ -337,7 +340,7 @@ export function getBatchWebhookSecret(
 }
 
 export function isMemoryBatchProviderConfigured(
-  provider: MemoryBatchProvider,
+  provider: BatchProvider,
 ): boolean {
   try {
     providerConfig(provider);
@@ -356,7 +359,7 @@ export function isMemoryBatchConfigured(): boolean {
 }
 
 export function isAnyMemoryBatchProviderConfigured(): boolean {
-  return memoryBatchProviders.some(isMemoryBatchProviderConfigured);
+  return batchProviders.some(isMemoryBatchProviderConfigured);
 }
 
 function normalizeEmail(value: string): string {
@@ -421,7 +424,7 @@ function requestContents(scope: MemoryScope, protectedMemories: ProtectedMemory[
 
 async function scopeTokenCountUpperBound(
   client: OpenAI,
-  config: MemoryBatchProviderConfig,
+  config: BatchProviderConfig,
   scope: MemoryScope,
   protectedMemories: ProtectedMemory[],
 ): Promise<number> {
@@ -493,7 +496,7 @@ function splitScope(scope: MemoryScope): [MemoryScope, MemoryScope] | null {
 
 async function fitScopeToModel(
   client: OpenAI,
-  config: MemoryBatchProviderConfig,
+  config: BatchProviderConfig,
   scope: MemoryScope,
   protectedMemories: ProtectedMemory[],
 ): Promise<MemoryScope[]> {
@@ -684,7 +687,7 @@ function toJsonlRequest(
 
 async function createRequests(input: {
   client: OpenAI;
-  config: MemoryBatchProviderConfig;
+  config: BatchProviderConfig;
   threads: MemoryAnalysisThread[];
   protectedMemories: ProtectedMemory[];
   retryManifest?: MemoryBatchManifestEntry[];
@@ -744,7 +747,7 @@ async function createRequests(input: {
 
 function configurationError(
   error: unknown,
-  config: MemoryBatchProviderConfig,
+  config: BatchProviderConfig,
 ): MemoryBatchConfigurationError | null {
   if (!(error instanceof APIError)) return null;
   if (
@@ -761,7 +764,7 @@ function configurationError(
 }
 
 async function providerCall<T>(
-  config: MemoryBatchProviderConfig,
+  config: BatchProviderConfig,
   call: () => Promise<T>,
 ): Promise<T> {
   try {
@@ -775,7 +778,7 @@ async function providerCall<T>(
 
 async function createProviderBatch(input: {
   client: OpenAI;
-  config: MemoryBatchProviderConfig;
+  config: BatchProviderConfig;
   inputFileId: string;
   submissionId: string;
   batchAttempt: number;
@@ -806,7 +809,7 @@ async function createProviderBatch(input: {
 }
 
 export async function submitMemoryBatch(input: {
-  provider?: MemoryBatchProvider;
+  provider?: BatchProvider;
   submissionId: string;
   batchAttempt: number;
   threads: MemoryAnalysisThread[];
@@ -1181,7 +1184,7 @@ function batchError(batch: Awaited<ReturnType<OpenAI["batches"]["retrieve"]>>) {
 }
 
 export async function readMemoryBatch(input: {
-  provider: MemoryBatchProvider;
+  provider: BatchProvider;
   providerBatchId: string;
   modelId: string;
   expectedKeys: string[];
@@ -1321,8 +1324,8 @@ export async function readLabelBatch(input: {
   };
 }
 
-export async function getBatchRequestProgress(input: {
-  provider: MemoryBatchProvider;
+export async function getMemoryBatchRequestProgress(input: {
+  provider: BatchProvider;
   providerBatchId: string;
 }): Promise<MemoryBatchRequestProgress> {
   const config = providerConfig(input.provider);
@@ -1339,8 +1342,8 @@ export async function getBatchRequestProgress(input: {
   };
 }
 
-export async function deleteBatchFiles(input: {
-  provider: MemoryBatchProvider;
+export async function deleteMemoryBatchFiles(input: {
+  provider: BatchProvider;
   inputFileId: string;
   outputFileId?: string | null;
   errorFileId?: string | null;
@@ -1363,3 +1366,6 @@ export async function deleteBatchFiles(input: {
   }
   return failures;
 }
+
+export const getBatchRequestProgress = getMemoryBatchRequestProgress;
+export const deleteBatchFiles = deleteMemoryBatchFiles;

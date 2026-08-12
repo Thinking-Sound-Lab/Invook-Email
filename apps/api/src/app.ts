@@ -3,9 +3,11 @@ import Fastify, { type FastifyRequest } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 
 import { registerAuthRoutes } from "./routes/auth";
+import { registerAgentRoutes } from "./routes/agent";
 import { registerBatchWebhookRoutes } from "./routes/batch-webhook";
 import { registerDraftRoutes } from "./routes/drafts";
 import { registerHealthRoutes } from "./routes/health";
+import { registerIndexingEventRoutes } from "./routes/indexing-events";
 import { registerLabelRoutes } from "./routes/labels";
 import { registerMailboxRoutes } from "./routes/mailbox";
 import { registerMemoryRoutes } from "./routes/memories";
@@ -64,6 +66,8 @@ export async function buildApi() {
   await api.register(registerHealthRoutes);
   await api.register(registerAuthRoutes);
   await api.register(registerSessionRoutes);
+  await api.register(registerAgentRoutes);
+  await api.register(registerIndexingEventRoutes);
   await api.register(registerMailboxRoutes);
   await api.register(registerMemoryRoutes, { prefix: "/v1/memories" });
   await api.register(registerLabelRoutes, { prefix: "/v1/labels" });

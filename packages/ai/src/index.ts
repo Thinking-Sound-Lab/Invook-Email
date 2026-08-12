@@ -1,11 +1,17 @@
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { memoryTypes, type MemoryType } from "@invook/contracts";
+import {
+  memoryTypes,
+  type MemoryType,
+} from "@invook/contracts";
 import { generateText, Output } from "ai";
 import { z } from "zod";
 
 import type { ProtectedMemory } from "./memory-batch";
+import { getAiModel } from "./model";
 
 export * from "./memory-batch";
+export * from "./embedding";
+export * from "./mail-agent";
+export * from "./model";
 
 const feedbackMemorySchema = z.object({
   type: z.enum(memoryTypes),
@@ -60,42 +66,15 @@ export type ReplyDraftInput = {
   instruction?: string;
 };
 
-export class AiConfigurationError extends Error {
-  constructor() {
-    super("AI_BASE_URL and AI_MODEL are required for mailbox analysis.");
-    this.name = "AiConfigurationError";
-  }
-}
-
-function getModel() {
-  const baseURL = process.env.AI_BASE_URL?.trim();
-  const modelId = process.env.AI_MODEL?.trim();
-  if (!baseURL || !modelId) throw new AiConfigurationError();
-
-  const apiKey = process.env.AI_API_KEY?.trim();
-  const provider = createOpenAICompatible({
-    name: "invook",
-    baseURL,
-    ...(apiKey ? { apiKey } : {}),
-    supportsStructuredOutputs: true,
-  });
-
-  return { model: provider.chatModel(modelId), modelId };
-}
-
 function clip(value: string, maximumLength: number): string {
   return value.length <= maximumLength ? value : value.slice(0, maximumLength);
-}
-
-export function isAiConfigured(): boolean {
-  return Boolean(process.env.AI_BASE_URL?.trim() && process.env.AI_MODEL?.trim());
 }
 
 export async function extractFeedbackMemories(input: {
   samples: DraftFeedbackSample[];
   protectedMemories: ProtectedMemory[];
 }): Promise<{ modelId: string; memories: FeedbackMemoryCandidate[] }> {
-  const { model, modelId } = getModel();
+  const { model, modelId } = getAiModel();
   const samples = input.samples.map((sample) => ({
     draftId: sample.id,
     subject: clip(sample.subject, 500),
@@ -132,7 +111,7 @@ export async function generateReplyDraft(
   usedMemoryIds: string[];
   schedulingRelevant: boolean;
 }> {
-  const { model, modelId } = getModel();
+  const { model, modelId } = getAiModel();
   const payload = {
     instruction: input.instruction ? clip(input.instruction, 1_000) : null,
     subject: clip(input.subject, 500),

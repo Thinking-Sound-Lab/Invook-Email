@@ -1,5 +1,5 @@
 {
-  "id": "a1e46730-eefc-482c-998c-cd1abf7385fc",
+  "id": "81041413-c726-4658-b429-1d2d064b3fc7",
   "prevId": "32b9398b-b6ce-45c3-ae40-cc0621964019",
   "version": "7",
   "dialect": "postgresql",
@@ -250,7 +250,7 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": true,
-          "default": "'{\"recent\":\"pending\",\"memory\":\"pending\",\"history\":\"pending\"}'::jsonb"
+          "default": "'{\"mailSync\":\"pending\",\"indexing\":\"pending\",\"memory\":\"pending\"}'::jsonb"
         },
         "last_synced_at": {
           "name": "last_synced_at",
@@ -732,212 +732,6 @@
       },
       "isRLSEnabled": false
     },
-    "public.labels": {
-      "name": "labels",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "account_id": {
-          "name": "account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "normalized_name": {
-          "name": "normalized_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "description": {
-          "name": "description",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "system_key": {
-          "name": "system_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "definition_version": {
-          "name": "definition_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        },
-        "analysis_state": {
-          "name": "analysis_state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "last_analyzed_at": {
-          "name": "last_analyzed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "labels_account_name_idx": {
-          "name": "labels_account_name_idx",
-          "columns": [
-            {
-              "expression": "account_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "normalized_name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "labels_account_system_key_idx": {
-          "name": "labels_account_system_key_idx",
-          "columns": [
-            {
-              "expression": "account_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "system_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "labels_account_created_idx": {
-          "name": "labels_account_created_idx",
-          "columns": [
-            {
-              "expression": "account_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "labels_user_id_profiles_id_fk": {
-          "name": "labels_user_id_profiles_id_fk",
-          "tableFrom": "labels",
-          "tableTo": "profiles",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "labels_account_id_connected_accounts_id_fk": {
-          "name": "labels_account_id_connected_accounts_id_fk",
-          "tableFrom": "labels",
-          "tableTo": "connected_accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "labels_name_check": {
-          "name": "labels_name_check",
-          "value": "char_length(btrim(\"labels\".\"name\")) > 0"
-        },
-        "labels_normalized_name_check": {
-          "name": "labels_normalized_name_check",
-          "value": "char_length(btrim(\"labels\".\"normalized_name\")) > 0"
-        },
-        "labels_description_check": {
-          "name": "labels_description_check",
-          "value": "char_length(btrim(\"labels\".\"description\")) > 0"
-        },
-        "labels_system_key_check": {
-          "name": "labels_system_key_check",
-          "value": "\"labels\".\"system_key\" is null or \"labels\".\"system_key\" in ('important', 'travel', 'pitch', 'newsletter')"
-        },
-        "labels_definition_version_check": {
-          "name": "labels_definition_version_check",
-          "value": "\"labels\".\"definition_version\" > 0"
-        },
-        "labels_analysis_state_check": {
-          "name": "labels_analysis_state_check",
-          "value": "\"labels\".\"analysis_state\" in ('pending', 'running', 'complete', 'failed')"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.memory_deletions": {
       "name": "memory_deletions",
       "schema": "",
@@ -1276,6 +1070,375 @@
       },
       "isRLSEnabled": false
     },
+    "public.message_attachments": {
+      "name": "message_attachments",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "message_id": {
+          "name": "message_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_attachment_id": {
+          "name": "provider_attachment_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "filename": {
+          "name": "filename",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "mime_type": {
+          "name": "mime_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "size": {
+          "name": "size",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "message_attachments_message_idx": {
+          "name": "message_attachments_message_idx",
+          "columns": [
+            {
+              "expression": "message_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "message_attachments_account_filename_idx": {
+          "name": "message_attachments_account_filename_idx",
+          "columns": [
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "filename",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "message_attachments_user_id_profiles_id_fk": {
+          "name": "message_attachments_user_id_profiles_id_fk",
+          "tableFrom": "message_attachments",
+          "tableTo": "profiles",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "message_attachments_account_id_connected_accounts_id_fk": {
+          "name": "message_attachments_account_id_connected_accounts_id_fk",
+          "tableFrom": "message_attachments",
+          "tableTo": "connected_accounts",
+          "columnsFrom": [
+            "account_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "message_attachments_message_id_messages_id_fk": {
+          "name": "message_attachments_message_id_messages_id_fk",
+          "tableFrom": "message_attachments",
+          "tableTo": "messages",
+          "columnsFrom": [
+            "message_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "message_attachments_size_check": {
+          "name": "message_attachments_size_check",
+          "value": "\"message_attachments\".\"size\" is null or \"message_attachments\".\"size\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.message_embeddings": {
+      "name": "message_embeddings",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "message_id": {
+          "name": "message_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "model_id": {
+          "name": "model_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dimensions": {
+          "name": "dimensions",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "index_version": {
+          "name": "index_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "content_hash": {
+          "name": "content_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "embedding": {
+          "name": "embedding",
+          "type": "vector",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "provider_batch_id": {
+          "name": "provider_batch_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "message_embeddings_message_model_version_idx": {
+          "name": "message_embeddings_message_model_version_idx",
+          "columns": [
+            {
+              "expression": "message_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "model_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "index_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "message_embeddings_account_status_idx": {
+          "name": "message_embeddings_account_status_idx",
+          "columns": [
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "model_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "index_version",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "message_embeddings_user_id_profiles_id_fk": {
+          "name": "message_embeddings_user_id_profiles_id_fk",
+          "tableFrom": "message_embeddings",
+          "tableTo": "profiles",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "message_embeddings_account_id_connected_accounts_id_fk": {
+          "name": "message_embeddings_account_id_connected_accounts_id_fk",
+          "tableFrom": "message_embeddings",
+          "tableTo": "connected_accounts",
+          "columnsFrom": [
+            "account_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "message_embeddings_message_id_messages_id_fk": {
+          "name": "message_embeddings_message_id_messages_id_fk",
+          "tableFrom": "message_embeddings",
+          "tableTo": "messages",
+          "columnsFrom": [
+            "message_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "message_embeddings_dimensions_check": {
+          "name": "message_embeddings_dimensions_check",
+          "value": "\"message_embeddings\".\"dimensions\" > 0"
+        },
+        "message_embeddings_status_check": {
+          "name": "message_embeddings_status_check",
+          "value": "\"message_embeddings\".\"status\" in ('pending', 'submitted', 'complete', 'failed')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.messages": {
       "name": "messages",
       "schema": "",
@@ -1555,170 +1718,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.thread_label_analyses": {
-      "name": "thread_label_analyses",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "account_id": {
-          "name": "account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "thread_id": {
-          "name": "thread_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "label_id": {
-          "name": "label_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "definition_version": {
-          "name": "definition_version",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "model_id": {
-          "name": "model_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "analyzed_at": {
-          "name": "analyzed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "thread_label_analyses_thread_label_idx": {
-          "name": "thread_label_analyses_thread_label_idx",
-          "columns": [
-            {
-              "expression": "thread_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "label_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "thread_label_analyses_label_version_idx": {
-          "name": "thread_label_analyses_label_version_idx",
-          "columns": [
-            {
-              "expression": "label_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "definition_version",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "thread_label_analyses_user_id_profiles_id_fk": {
-          "name": "thread_label_analyses_user_id_profiles_id_fk",
-          "tableFrom": "thread_label_analyses",
-          "tableTo": "profiles",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "thread_label_analyses_account_id_connected_accounts_id_fk": {
-          "name": "thread_label_analyses_account_id_connected_accounts_id_fk",
-          "tableFrom": "thread_label_analyses",
-          "tableTo": "connected_accounts",
-          "columnsFrom": [
-            "account_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "thread_label_analyses_thread_id_threads_id_fk": {
-          "name": "thread_label_analyses_thread_id_threads_id_fk",
-          "tableFrom": "thread_label_analyses",
-          "tableTo": "threads",
-          "columnsFrom": [
-            "thread_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "thread_label_analyses_label_id_labels_id_fk": {
-          "name": "thread_label_analyses_label_id_labels_id_fk",
-          "tableFrom": "thread_label_analyses",
-          "tableTo": "labels",
-          "columnsFrom": [
-            "label_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "thread_label_analyses_definition_version_check": {
-          "name": "thread_label_analyses_definition_version_check",
-          "value": "\"thread_label_analyses\".\"definition_version\" > 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.thread_labels": {
       "name": "thread_labels",
       "schema": "",
@@ -1748,9 +1747,9 @@
           "primaryKey": false,
           "notNull": true
         },
-        "label_id": {
-          "name": "label_id",
-          "type": "uuid",
+        "label_key": {
+          "name": "label_key",
+          "type": "text",
           "primaryKey": false,
           "notNull": true
         },
@@ -1801,8 +1800,8 @@
         }
       },
       "indexes": {
-        "thread_labels_thread_label_idx": {
-          "name": "thread_labels_thread_label_idx",
+        "thread_labels_thread_key_idx": {
+          "name": "thread_labels_thread_key_idx",
           "columns": [
             {
               "expression": "thread_id",
@@ -1811,7 +1810,7 @@
               "nulls": "last"
             },
             {
-              "expression": "label_id",
+              "expression": "label_key",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1822,8 +1821,8 @@
           "method": "btree",
           "with": {}
         },
-        "thread_labels_account_label_state_idx": {
-          "name": "thread_labels_account_label_state_idx",
+        "thread_labels_account_key_state_idx": {
+          "name": "thread_labels_account_key_state_idx",
           "columns": [
             {
               "expression": "account_id",
@@ -1832,7 +1831,7 @@
               "nulls": "last"
             },
             {
-              "expression": "label_id",
+              "expression": "label_key",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -1889,25 +1888,16 @@
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
-        },
-        "thread_labels_label_id_labels_id_fk": {
-          "name": "thread_labels_label_id_labels_id_fk",
-          "tableFrom": "thread_labels",
-          "tableTo": "labels",
-          "columnsFrom": [
-            "label_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "thread_labels_key_check": {
+          "name": "thread_labels_key_check",
+          "value": "\"thread_labels\".\"label_key\" in ('important', 'travel', 'pitch', 'newsletter')"
+        },
         "thread_labels_source_check": {
           "name": "thread_labels_source_check",
           "value": "\"thread_labels\".\"source\" in ('ai', 'user')"
@@ -1979,6 +1969,19 @@
           "primaryKey": false,
           "notNull": true,
           "default": "ARRAY[]::text[]"
+        },
+        "classification_version": {
+          "name": "classification_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "classified_at": {
+          "name": "classified_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "latest_message_at": {
           "name": "latest_message_at",

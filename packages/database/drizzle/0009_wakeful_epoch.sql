@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "embedding_batch_submissions_account_active_idx" ON "embedding_batch_submissions" USING btree ("account_id") WHERE "embedding_batch_submissions"."status" in ('preparing', 'submitted');

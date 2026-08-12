@@ -1,65 +1,112 @@
 import {
   AiConfigurationError,
   deleteBatchFiles,
+  buildEmbeddingInput,
+  createEmbeddingBatch,
+  deleteEmbeddingBatchInputFile,
+  deleteMemoryBatchFiles,
+  embedMailboxTexts,
   extractFeedbackMemories,
+  findEmbeddingBatchBySubmissionId,
+  getEmbeddingBatchState,
+  getEmbeddingConfiguration,
   isAnyMemoryBatchProviderConfigured,
   isAiConfigured,
+  isEmbeddingBatchConfigured,
+  isEmbeddingConfigured,
   isMemoryBatchConfigured,
   isMemoryBatchProviderConfigured,
-  memoryBatchProviders,
+  batchProviders,
   MemoryBatchConfigurationError,
   readLabelBatch,
-  readMemoryBatch,
   submitLabelBatch,
+  readEmbeddingBatch,
+  readMemoryBatch,
+  prepareEmbeddingBatch,
   submitMemoryBatch,
+  uploadEmbeddingBatchInput,
   type FeedbackMemoryCandidate,
   type LabelAnalysisThread,
   type LabelBatchManifestEntry,
   type MemoryAnalysisThread,
   type MemoryBatchManifestEntry,
-  type MemoryBatchProvider,
+  type BatchProvider,
   type MessageMemoryCandidate,
 } from "@invook/ai";
 import {
   claimNextJob,
   clearPendingMemoryEvidence,
-  completeInitialSync,
   completeIncrementalSync,
   completeJob,
   deleteIndexedMessage,
+  completeMailSyncItem,
+  completeMailSyncRun,
+  completeEmbeddingBatchSubmission,
+  completeWorkflowStep,
+  countFailedEmbeddings,
   decryptGoogleCredential,
-  deferJobWithoutAttempt,
   DRAFT_FEEDBACK_VERSION,
   encryptGoogleCredential,
   enqueueAnalysisJobsForIndexedAccounts,
   enqueueLabelBackfillContinuation,
   enqueueLabelBatchRetry,
+  enqueueBatchEvent,
+  enqueueEmbeddingBackfillContinuation,
   enqueueMemoryBatchRetry,
+  enqueueMissingMailSyncRuns,
+  enqueuePostSyncWorkflowSteps,
+  enqueueReadyMailSyncFinalizers,
+  deferJobWithoutAttempt,
   failAnalysisJob,
   failJobAndAccount,
+  failMailSyncItem,
+  failMailSyncRun,
+  failWorkflowStep,
+  getActiveEmbeddingBatchSubmissionForAccount,
+  getEmbeddingCandidates,
+  getEmbeddingBatchSubmissionForStep,
   getDraftFeedbackSamples,
   getIndexedMessageIds,
   getLabelBatchSubmission,
   getLabelForAnalysis,
   getMemoryAnalysisThreads,
-  getMemoryBatchSubmission,
   getThreadsForLabelBackfill,
   getThreadsForLabelRetry,
   getUserAuthoredMemories,
   getWorkerAccount,
   listenForJobNotifications,
-  MEMORY_SCHEMA_VERSION,
-  markDraftFeedbackAnalyzed,
   saveLabelBatchResults,
-  saveExtractedMemories,
   setAccountSyncState,
   setLabelAnalysisState,
+  getBatchSubmission,
+  hasCompletedMailSyncPage,
+  listenForOutboxNotifications,
+  MAIL_INDEX_VERSION,
+  listSubmittedEmbeddingBatchIds,
+  markMailSyncItemRunning,
+  markWorkflowStepRunning,
+  MEMORY_SCHEMA_VERSION,
+  markDraftFeedbackAnalyzed,
+  markEmbeddingBatchSubmitted,
+  markMessageEmbeddingsFailed,
+  countIncompleteEmbeddings,
+  saveMessageEmbeddings,
+  saveExtractedMemories,
+  setIndexingSyncStage,
   setMemorySyncStage,
+  publishOutboxBatch,
+  prepareEmbeddingBatchSubmission,
+  recordEmbeddingBatchInputFile,
+  recordEmbeddingProviderBatch,
+  recordMailSyncPage,
+  refreshPreparingEmbeddingBatchSubmission,
+  startMailSyncRun,
   updateStoredCredential,
-  upsertIndexedMessage,
+  upsertMailboxMessage,
   type ClaimedJob,
   type GoogleCredential,
   type MemoryType,
+  type WorkflowStepJob,
 } from "@invook/database";
 import {
   extractEmailAddress,
@@ -75,11 +122,22 @@ import {
   type ParsedGmailMessage,
 } from "@invook/gmail";
 
+import { BullQueueRuntime, type WorkflowJob } from "./queue";
+
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
 const workerId = `worker-${process.pid}`;
 const feedbackBatchSize = 24;
+const embeddingBatchRequestLimit = 2_000;
+const embeddingBatchAttemptLimit = 3;
+const batchWorkerLockDuration = 5 * 60 * 1_000;
+const terminalEmbeddingBatchStates = new Set([
+  "completed",
+  "failed",
+  "expired",
+  "cancelled",
+]);
 
 function createJobSignal() {
   let pending = false;
@@ -166,7 +224,7 @@ async function storeMessage(options: {
       ? "outgoing"
       : "incoming";
 
-  return upsertIndexedMessage({
+  return upsertMailboxMessage({
     userId,
     accountId,
     providerThreadId: message.providerThreadId,
@@ -186,6 +244,7 @@ async function storeMessage(options: {
       [message.from, ...message.to, ...message.cc],
       accountEmail,
     ),
+    attachments: message.attachments,
   });
 }
 
@@ -334,37 +393,81 @@ async function syncMailboxHistory(options: {
   return { changedThreadIds, historyId };
 }
 
-async function runInitialSync(job: ClaimedJob) {
-  if (!job.accountId) throw new Error("The Gmail sync job has no connected account.");
-
-  const account = await getWorkerAccount(job.accountId);
+async function getMailSyncContext(accountId: string) {
+  const account = await getWorkerAccount(accountId);
   if (!account) throw new Error("The connected Gmail account or credential was not found.");
-
   const storedCredential = decryptGoogleCredential(account.tokenCiphertext, encryptionKey);
-  const credential = await refreshCredentialIfRequired(job.accountId, storedCredential);
+  const credential = await refreshCredentialIfRequired(accountId, storedCredential);
+  return { account, credential };
+}
 
-  await setAccountSyncState(job.accountId, {
-    recent: "running",
-    memory: "pending",
-    history: "running",
+async function runGmailPage(job: WorkflowStepJob) {
+  if (!job.accountId || !job.userId || !job.runId) {
+    throw new Error("The Gmail page job is missing its synchronization run.");
+  }
+  const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
+  const pageNumber = requiredInteger(job.payload.pageNumber, "Gmail page number");
+  const rawPageToken = job.payload.pageToken;
+  if (rawPageToken !== null && rawPageToken !== undefined && typeof rawPageToken !== "string") {
+    throw new Error("The Gmail page token is invalid.");
+  }
+  if (await hasCompletedMailSyncPage(runId, pageNumber)) {
+    return { status: "current", runId, pageNumber };
+  }
+
+  await startMailSyncRun(runId);
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  const page = await listGmailMessages(credential.accessToken, {
+    maxResults: 100,
+    pageToken: rawPageToken ?? undefined,
   });
+  const providerMessageIds = (page.messages ?? []).map((message) => message.id);
+  await recordMailSyncPage({
+    runId,
+    userId: account.userId,
+    accountId: account.id,
+    pageNumber,
+    pageToken: rawPageToken ?? null,
+    nextPageToken: page.nextPageToken ?? null,
+    providerMessageIds,
+  });
+  return {
+    status: "complete",
+    runId,
+    pageNumber,
+    discoveredMessageCount: providerMessageIds.length,
+    hasNextPage: Boolean(page.nextPageToken),
+  };
+}
 
-  await syncMailbox({
-    accessToken: credential.accessToken,
+async function runGmailMessage(job: WorkflowStepJob) {
+  if (!job.accountId || !job.runId) {
+    throw new Error("The Gmail message job is missing its synchronization run.");
+  }
+  const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
+  const providerMessageId = requiredString(
+    job.payload.providerMessageId,
+    "Gmail message ID",
+  );
+  const shouldProcess = await markMailSyncItemRunning(
+    runId,
+    providerMessageId,
+    job.attempts,
+  );
+  if (!shouldProcess) {
+    return { status: "current", runId, providerMessageId };
+  }
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  const gmailMessage = await getGmailMessage(credential.accessToken, providerMessageId);
+  await storeMessage({
     userId: account.userId,
     accountId: account.id,
     accountEmail: account.email,
     ingestionMode: "initial",
+    message: parseGmailMessage(gmailMessage),
   });
-
-  const initialHistoryId =
-    typeof job.payload.historyId === "string" && job.payload.historyId
-      ? job.payload.historyId
-      : account.historyCursor;
-  if (!initialHistoryId) {
-    throw new Error("The initial Gmail history cursor is missing.");
-  }
-  await completeInitialSync(job.accountId, initialHistoryId);
+  await completeMailSyncItem(runId, providerMessageId);
+  return { status: "complete", runId, providerMessageId };
 }
 
 async function runIncrementalSync(job: ClaimedJob) {
@@ -376,8 +479,7 @@ async function runIncrementalSync(job: ClaimedJob) {
   const credential = await refreshCredentialIfRequired(job.accountId, storedCredential);
   await setAccountSyncState(job.accountId, {
     ...account.syncState,
-    recent: "running",
-    history: "running",
+    mailSync: "running",
   });
 
   const requestedHistoryId =
@@ -432,10 +534,388 @@ async function runIncrementalSync(job: ClaimedJob) {
   };
 }
 
-type IndexedMemoryThread = Awaited<ReturnType<typeof getMemoryAnalysisThreads>>[number];
+async function runGmailFinalize(job: WorkflowStepJob) {
+  if (!job.accountId || !job.runId) {
+    throw new Error("The Gmail finalization job is missing its synchronization run.");
+  }
+  const runId = requiredString(job.payload.runId, "Gmail synchronization run ID");
+  const { credential } = await getMailSyncContext(job.accountId);
+  const gmailProfile = await getGmailProfile(credential.accessToken);
+  await completeMailSyncRun({ runId, finalHistoryCursor: gmailProfile.historyId });
+  await enqueueAnalysisJobsForIndexedAccounts();
+  return { status: "complete", runId, historyCursor: gmailProfile.historyId };
+}
+
+async function runEmbeddingBackfill(job: WorkflowStepJob) {
+  if (!job.accountId || !job.userId) {
+    throw new Error("The embedding backfill has no connected account.");
+  }
+  const config = getEmbeddingConfiguration();
+  const batchAttempt =
+    job.payload.batchAttempt === undefined
+      ? 1
+      : requiredInteger(job.payload.batchAttempt, "embedding batch attempt");
+  await setIndexingSyncStage(job.accountId, "running");
+  let submission = await getEmbeddingBatchSubmissionForStep(job.id);
+  let preparedBatch: Awaited<ReturnType<typeof prepareEmbeddingBatch>> = null;
+
+  if (!submission) {
+    const activeSubmission = await getActiveEmbeddingBatchSubmissionForAccount(
+      job.accountId,
+    );
+    if (activeSubmission) {
+      return {
+        status: "deferred",
+        activeSubmissionId: activeSubmission.id,
+        activeProviderBatchId: activeSubmission.providerBatchId,
+      };
+    }
+  }
+
+  if (!submission?.inputFileId && !submission?.providerBatchId) {
+    const candidates = await getEmbeddingCandidates({
+      accountId: job.accountId,
+      modelId: config.modelId,
+      indexVersion: MAIL_INDEX_VERSION,
+      limit: embeddingBatchRequestLimit + 1,
+      includeFailed: job.payload.includeFailed !== false,
+    });
+    if (candidates.length === 0) {
+      const incompleteCount = await countIncompleteEmbeddings({
+        accountId: job.accountId,
+        modelId: config.modelId,
+        indexVersion: MAIL_INDEX_VERSION,
+      });
+      if (submission) {
+        await completeEmbeddingBatchSubmission({
+          submissionId: submission.id,
+          providerState: "not_submitted",
+          error: null,
+        });
+      }
+      await setIndexingSyncStage(
+        job.accountId,
+        incompleteCount === 0 ? "complete" : "failed",
+      );
+      return {
+        status: incompleteCount === 0 ? "complete" : "failed",
+        incompleteCount,
+      };
+    }
+
+    const batchCandidates = candidates.slice(0, embeddingBatchRequestLimit);
+    preparedBatch = await prepareEmbeddingBatch({ messages: batchCandidates });
+    if (!preparedBatch) {
+      await setIndexingSyncStage(job.accountId, "complete");
+      return { status: "complete", requestCount: 0 };
+    }
+    const hasMore =
+      candidates.length > embeddingBatchRequestLimit ||
+      preparedBatch.requestCount < batchCandidates.length;
+    submission = submission
+      ? await refreshPreparingEmbeddingBatchSubmission({
+          submissionId: submission.id,
+          modelId: preparedBatch.modelId,
+          dimensions: preparedBatch.dimensions,
+          indexVersion: MAIL_INDEX_VERSION,
+          batchAttempt,
+          hasMore,
+          manifest: preparedBatch.manifest,
+        })
+      : await prepareEmbeddingBatchSubmission({
+          workflowStepId: job.id,
+          userId: job.userId,
+          accountId: job.accountId,
+          modelId: preparedBatch.modelId,
+          dimensions: preparedBatch.dimensions,
+          indexVersion: MAIL_INDEX_VERSION,
+          batchAttempt,
+          hasMore,
+          manifest: preparedBatch.manifest,
+        });
+  }
+  if (!submission) {
+    const activeSubmission = await getActiveEmbeddingBatchSubmissionForAccount(
+      job.accountId,
+    );
+    if (activeSubmission) {
+      return {
+        status: "deferred",
+        activeSubmissionId: activeSubmission.id,
+        activeProviderBatchId: activeSubmission.providerBatchId,
+      };
+    }
+    throw new Error("The embedding batch submission is unavailable.");
+  }
+  if (submission.status === "failed") {
+    throw new Error(submission.lastError ?? "The embedding batch submission failed.");
+  }
+
+  const hadRecordedInputFile = Boolean(submission.inputFileId);
+  let inputFileId = submission.inputFileId;
+  if (!inputFileId) {
+    if (!preparedBatch) {
+      throw new Error("The prepared embedding batch input is unavailable.");
+    }
+    const uploadedInputFileId = await uploadEmbeddingBatchInput({
+      submissionId: submission.id,
+      jsonl: preparedBatch.jsonl,
+    });
+    inputFileId = await recordEmbeddingBatchInputFile({
+      submissionId: submission.id,
+      inputFileId: uploadedInputFileId,
+    });
+  }
+
+  let providerBatchId = submission.providerBatchId;
+  if (!providerBatchId) {
+    const recovered = hadRecordedInputFile
+      ? await findEmbeddingBatchBySubmissionId(submission.id)
+      : null;
+    const providerBatch =
+      recovered ??
+      (await createEmbeddingBatch({
+        submissionId: submission.id,
+        inputFileId,
+      }));
+    submission = await recordEmbeddingProviderBatch({
+      submissionId: submission.id,
+      providerBatchId: providerBatch.providerBatchId,
+      inputFileId: providerBatch.inputFileId,
+    });
+    providerBatchId = submission.providerBatchId;
+  }
+  if (!providerBatchId || !submission.inputFileId) {
+    throw new Error("The OpenAI embedding batch is missing its provider identity.");
+  }
+
+  await markEmbeddingBatchSubmitted({
+    accountId: job.accountId,
+    modelId: submission.modelId,
+    dimensions: submission.dimensions,
+    indexVersion: MAIL_INDEX_VERSION,
+    providerBatchId,
+    messages: submission.manifest.map((entry) => ({
+      messageId: entry.messageId,
+      userId: job.userId!,
+      contentHash: entry.contentHash,
+    })),
+  });
+  return {
+    status: "submitted",
+    batchPurpose: "embedding",
+    provider: submission.provider,
+    providerBatchId,
+    inputFileId: submission.inputFileId,
+    modelId: submission.modelId,
+    dimensions: submission.dimensions,
+    requestCount: submission.requestCount,
+    manifest: submission.manifest,
+    indexVersion: MAIL_INDEX_VERSION,
+    hasMore: submission.hasMore,
+    batchAttempt: submission.batchAttempt,
+  };
+}
+
+async function runIncrementalEmbedding(job: WorkflowStepJob) {
+  if (!job.accountId) {
+    throw new Error("The incremental embedding job has no connected account.");
+  }
+  const messageId = requiredString(job.payload.messageId, "message ID");
+  const config = getEmbeddingConfiguration();
+  const candidates = await getEmbeddingCandidates({
+    accountId: job.accountId,
+    modelId: config.modelId,
+    indexVersion: MAIL_INDEX_VERSION,
+    messageIds: [messageId],
+  });
+  if (candidates.length === 0) return { status: "current", messageId };
+
+  const result = await embedMailboxTexts(
+    candidates.map((candidate) => buildEmbeddingInput(candidate)),
+  );
+  const savedCount = await saveMessageEmbeddings({
+    accountId: job.accountId,
+    modelId: result.modelId,
+    dimensions: result.dimensions,
+    indexVersion: MAIL_INDEX_VERSION,
+    values: candidates.map((candidate, index) => ({
+      messageId: candidate.messageId,
+      userId: candidate.userId,
+      contentHash: candidate.contentHash,
+      embedding: result.embeddings[index]!,
+    })),
+  });
+  const incompleteCount = await countIncompleteEmbeddings({
+    accountId: job.accountId,
+    modelId: result.modelId,
+    indexVersion: MAIL_INDEX_VERSION,
+  });
+  if (incompleteCount === 0) await setIndexingSyncStage(job.accountId, "complete");
+  return { status: "complete", messageId, savedCount, incompleteCount };
+}
+
+async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
+  if (!job.accountId) throw new Error("The embedding batch event has no account.");
+  const submissionJobId = requiredString(
+    job.payload.submissionJobId,
+    "embedding submission job ID",
+  );
+  const submission = await getEmbeddingBatchSubmissionForStep(submissionJobId);
+  if (
+    !submission ||
+    submission.accountId !== job.accountId ||
+    !["submitted", "complete"].includes(submission.status)
+  ) {
+    throw new Error("The embedding batch submission could not be matched.");
+  }
+  if (
+    job.payload.provider !== submission.provider ||
+    job.payload.providerBatchId !== submission.providerBatchId
+  ) {
+    throw new Error("The provider event does not match its embedding submission.");
+  }
+  if (!submission.providerBatchId || !submission.inputFileId) {
+    throw new Error("The embedding batch submission is missing provider files.");
+  }
+  const batch = await readEmbeddingBatch({
+    providerBatchId: submission.providerBatchId,
+    expectedKeys: submission.manifest.map((entry) => entry.key),
+    expectedDimensions: submission.dimensions,
+  });
+  const terminalState = ["completed", "failed", "cancelled", "expired"].includes(
+    batch.state,
+  );
+  if (!terminalState) {
+    throw new Error(
+      `OpenAI emitted a terminal event while the embedding batch is ${batch.state}.`,
+    );
+  }
+
+  const manifestByKey = new Map(
+    submission.manifest.map((entry) => [entry.key, entry]),
+  );
+  const savedCount = await saveMessageEmbeddings({
+    accountId: submission.accountId,
+    modelId: submission.modelId,
+    dimensions: submission.dimensions,
+    indexVersion: submission.indexVersion,
+    values: [...batch.embeddingsByKey].flatMap(([key, embedding]) => {
+      const entry = manifestByKey.get(key);
+      return entry
+        ? [{
+            messageId: entry.messageId,
+            userId: submission.userId,
+            contentHash: entry.contentHash,
+            embedding,
+          }]
+        : [];
+    }),
+  });
+  const failedEntries = batch.failedKeys.flatMap((key) => {
+    const entry = manifestByKey.get(key);
+    return entry ? [{ messageId: entry.messageId, contentHash: entry.contentHash }] : [];
+  });
+  if (failedEntries.length > 0) {
+    await markMessageEmbeddingsFailed({
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
+      values: failedEntries,
+      error: batch.providerError ?? `OpenAI embedding batch ended as ${batch.state}.`,
+    });
+  }
+
+  await completeEmbeddingBatchSubmission({
+    submissionId: submission.id,
+    providerState: batch.state,
+    error: batch.providerError,
+  });
+
+  const [incompleteCount, failedCount, submittedBatchIds] = await Promise.all([
+    countIncompleteEmbeddings({
+      accountId: submission.accountId,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
+    }),
+    countFailedEmbeddings({
+      accountId: submission.accountId,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
+    }),
+    listSubmittedEmbeddingBatchIds({ accountId: submission.accountId }),
+  ]);
+  const continuationJobIds: string[] = [];
+  const providerCapacityAvailable = submittedBatchIds.length === 0;
+  const continueFailedEmbeddings =
+    providerCapacityAvailable &&
+    failedCount > 0 &&
+    (failedEntries.length === 0 ||
+      submission.batchAttempt < embeddingBatchAttemptLimit);
+  if (continueFailedEmbeddings) {
+    const retryJobId = await enqueueEmbeddingBackfillContinuation({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
+      predecessorBatchId: submission.providerBatchId,
+      includeFailed: true,
+      batchAttempt:
+        failedEntries.length > 0 ? submission.batchAttempt + 1 : 1,
+      reason: "retry",
+    });
+    if (retryJobId) continuationJobIds.push(retryJobId);
+  } else if (providerCapacityAvailable && failedCount === 0 && incompleteCount > 0) {
+    const nextJobId = await enqueueEmbeddingBackfillContinuation({
+      userId: submission.userId,
+      accountId: submission.accountId,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
+      predecessorBatchId: submission.providerBatchId,
+      includeFailed: false,
+      batchAttempt: 1,
+      reason: "next",
+    });
+    if (nextJobId) continuationJobIds.push(nextJobId);
+  }
+  const indexingStage =
+    incompleteCount === 0
+      ? "complete"
+      : submittedBatchIds.length > 0 || continuationJobIds.length > 0
+        ? "running"
+        : "failed";
+  await setIndexingSyncStage(submission.accountId, indexingStage);
+
+  const inputFileDeleted = await deleteEmbeddingBatchInputFile(
+    submission.inputFileId,
+  );
+  if (!inputFileDeleted) {
+    console.error("worker: embedding batch input file could not be deleted", {
+      submissionJobId: submission.id,
+    });
+  }
+  return {
+    status:
+      indexingStage === "complete"
+        ? "complete"
+        : indexingStage === "failed"
+          ? "failed"
+          : "continuing",
+    providerState: batch.state,
+    providerError: batch.providerError,
+    outputFileId: batch.outputFileId,
+    errorFileId: batch.errorFileId,
+    batchAttempt: submission.batchAttempt,
+    savedCount,
+    failedRequestCount: failedEntries.length,
+    incompleteCount,
+    continuationJobIds,
+  };
+}
+
+type StoredMemoryThread = Awaited<ReturnType<typeof getMemoryAnalysisThreads>>[number];
 
 type MemorySubmissionResult = {
-  provider: MemoryBatchProvider;
+  provider: BatchProvider;
   providerBatchId: string;
   inputFileId: string;
   modelId: string;
@@ -451,7 +931,7 @@ type MemorySubmissionResult = {
 };
 
 function toMemoryAnalysisThreads(
-  threads: IndexedMemoryThread[],
+  threads: StoredMemoryThread[],
   ownerEmail: string,
 ): MemoryAnalysisThread[] {
   return threads.map((thread) => ({
@@ -517,10 +997,10 @@ function parseSubmissionResult(value: unknown): MemorySubmissionResult | null {
     throw new Error("The Memory Batch submission result is missing.");
   }
   const result = value as Record<string, unknown>;
-  if (!memoryBatchProviders.includes(result.provider as MemoryBatchProvider)) {
+  if (!batchProviders.includes(result.provider as BatchProvider)) {
     return null;
   }
-  const provider = result.provider as MemoryBatchProvider;
+  const provider = result.provider as BatchProvider;
   if (typeof result.replaceExisting !== "boolean") {
     throw new Error("The Memory Batch replacement state is missing.");
   }
@@ -697,7 +1177,7 @@ async function clearMemoryEvidenceUsedByCandidates(
   );
 }
 
-async function runMemoryExtraction(job: ClaimedJob) {
+async function runMemoryExtraction(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The memory job has no connected account.");
   if (job.payload.schemaVersion !== MEMORY_SCHEMA_VERSION) {
     return {
@@ -845,13 +1325,13 @@ async function runIncrementalMemoryExtraction(job: ClaimedJob) {
   };
 }
 
-async function runMemoryBatchRetry(job: ClaimedJob) {
+async function runMemoryBatchRetry(job: ClaimedJob | WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Memory retry has no connected account.");
   const parentSubmissionJobId = requiredString(
     job.payload.parentSubmissionJobId,
     "Parent Memory submission job ID",
   );
-  const parentSubmission = await getMemoryBatchSubmission(parentSubmissionJobId);
+  const parentSubmission = await getBatchSubmission(parentSubmissionJobId);
   if (parentSubmission?.accountId !== job.accountId) {
     throw new Error("The parent Memory submission could not be matched to this account.");
   }
@@ -906,13 +1386,13 @@ async function runMemoryBatchRetry(job: ClaimedJob) {
   };
 }
 
-async function runMemoryBatchEvent(job: ClaimedJob) {
+async function runMemoryBatchEvent(job: ClaimedJob | WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Memory batch event has no account.");
   const submissionJobId = requiredString(
     job.payload.submissionJobId,
     "Memory submission job ID",
   );
-  const submission = await getMemoryBatchSubmission(submissionJobId);
+  const submission = await getBatchSubmission(submissionJobId);
   if (!submission?.accountId || !submission.userId || submission.accountId !== job.accountId) {
     throw new Error("The Memory Batch submission could not be matched to this account.");
   }
@@ -1042,7 +1522,7 @@ async function runMemoryBatchEvent(job: ClaimedJob) {
 }
 
 type LabelSubmissionResult = {
-  provider: MemoryBatchProvider;
+  provider: BatchProvider;
   providerBatchId: string;
   inputFileId: string;
   modelId: string;
@@ -1089,7 +1569,7 @@ function parseLabelSubmissionResult(value: unknown): LabelSubmissionResult | nul
     throw new Error("The label Batch submission result is missing.");
   }
   const result = value as Record<string, unknown>;
-  if (!memoryBatchProviders.includes(result.provider as MemoryBatchProvider)) {
+  if (!batchProviders.includes(result.provider as BatchProvider)) {
     return null;
   }
   if (typeof result.continueBackfill !== "boolean") {
@@ -1113,7 +1593,7 @@ function parseLabelSubmissionResult(value: unknown): LabelSubmissionResult | nul
     throw new Error("The label Batch manifest does not match its request count or label.");
   }
   return {
-    provider: result.provider as MemoryBatchProvider,
+    provider: result.provider as BatchProvider,
     providerBatchId: requiredString(result.providerBatchId, "Provider batch ID"),
     inputFileId: requiredString(result.inputFileId, "Provider input file"),
     modelId: requiredString(result.modelId, "Label Batch model"),
@@ -1131,7 +1611,7 @@ function parseLabelSubmissionResult(value: unknown): LabelSubmissionResult | nul
 }
 
 async function cleanupLabelBatchFiles(input: {
-  provider: MemoryBatchProvider;
+  provider: BatchProvider;
   inputFileId: string;
   outputFileId: string | null;
   errorFileId: string | null;
@@ -1455,7 +1935,7 @@ async function runLabelBatchEvent(job: ClaimedJob) {
   };
 }
 
-async function runMemoryFeedback(job: ClaimedJob) {
+async function runMemoryFeedback(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The feedback job has no connected account.");
   const account = await getWorkerAccount(job.accountId);
   if (!account) throw new Error("The connected Gmail account was not found.");
@@ -1555,20 +2035,12 @@ async function runMemoryFeedback(job: ClaimedJob) {
     memoryCount: savedCount,
   };
 }
-
-async function markJobFailed(job: ClaimedJob, error: unknown) {
+async function markPostgresJobFailed(job: ClaimedJob, error: unknown) {
   const message = error instanceof Error ? error.message : "Unknown worker failure";
-  if (
-    job.jobType !== "gmail.initial_sync" &&
-    job.jobType !== "gmail.incremental_sync"
-  ) {
-    await failAnalysisJob({
-      job,
-      message,
-    });
+  if (job.jobType !== "gmail.incremental_sync") {
+    await failAnalysisJob({ job, message });
     return;
   }
-
   await failJobAndAccount({
     job,
     message,
@@ -1576,15 +2048,10 @@ async function markJobFailed(job: ClaimedJob, error: unknown) {
   });
 }
 
-async function processNextJob() {
-  const jobTypes = ["gmail.initial_sync", "gmail.incremental_sync"];
-  if (isAiConfigured()) jobTypes.push("memory.feedback");
+async function processNextPostgresJob() {
+  const jobTypes = ["gmail.incremental_sync"];
   if (isMemoryBatchConfigured()) {
-    jobTypes.push(
-      "memory.extract",
-      "memory.incremental",
-      "label.backfill.submit",
-    );
+    jobTypes.push("memory.incremental", "label.backfill.submit");
   }
   if (isAnyMemoryBatchProviderConfigured()) {
     jobTypes.push(
@@ -1598,16 +2065,10 @@ async function processNextJob() {
   if (!job) return false;
 
   try {
-    let result: Record<string, unknown> = {};
+    let result: Record<string, unknown>;
     switch (job.jobType) {
-      case "gmail.initial_sync":
-        await runInitialSync(job);
-        break;
       case "gmail.incremental_sync":
         result = await runIncrementalSync(job);
-        break;
-      case "memory.extract":
-        result = await runMemoryExtraction(job);
         break;
       case "memory.incremental":
         result = await runIncrementalMemoryExtraction(job);
@@ -1627,11 +2088,8 @@ async function processNextJob() {
       case "label.batch.event":
         result = await runLabelBatchEvent(job);
         break;
-      case "memory.feedback":
-        result = await runMemoryFeedback(job);
-        break;
       default:
-        throw new Error(`Unsupported job type: ${job.jobType}`);
+        throw new Error(`Unsupported PostgreSQL job type: ${job.jobType}`);
     }
     await completeJob(job.id, result);
   } catch (error) {
@@ -1639,9 +2097,6 @@ async function processNextJob() {
       error instanceof AiConfigurationError ||
       error instanceof MemoryBatchConfigurationError
     ) {
-      if (job.jobType === "memory.extract" && job.accountId) {
-        await setMemorySyncStage(job.accountId, "pending");
-      }
       if (job.jobType === "label.backfill.submit" && job.accountId) {
         const labelId = job.payload.labelId;
         const definitionVersion = job.payload.definitionVersion;
@@ -1660,40 +2115,266 @@ async function processNextJob() {
       });
       return false;
     }
-    await markJobFailed(job, error);
+    await markPostgresJobFailed(job, error);
     throw error;
   }
-
   return true;
 }
 
+async function persistWorkflowFailure(
+  job: WorkflowStepJob,
+  message: string,
+  terminal: boolean,
+  reconnectRequired: boolean,
+) {
+  const stepUpdated = await failWorkflowStep({ step: job, message, terminal });
+  if (!stepUpdated) return;
+  if (job.stepType === "gmail.sync.message" && job.runId) {
+    await failMailSyncItem({
+      runId: job.runId,
+      providerMessageId: requiredString(
+        job.payload.providerMessageId,
+        "Gmail message ID",
+      ),
+      attempt: job.attempts,
+      message,
+      terminal,
+      reconnectRequired,
+    });
+  } else if (
+    terminal &&
+    job.runId &&
+    ["gmail.sync.page", "gmail.sync.finalize"].includes(job.stepType)
+  ) {
+    await failMailSyncRun({ runId: job.runId, message, reconnectRequired });
+  }
+}
+
+function workflowStepFromBullJob(bullJob: WorkflowJob): WorkflowStepJob {
+  return {
+    ...bullJob.data,
+    stepType: bullJob.name,
+    attempts: bullJob.data.attempts + Math.max(bullJob.attemptsMade, 1),
+    maxAttempts: bullJob.data.maxAttempts,
+  };
+}
+
+async function reconcileTerminalQueueFailure(bullJob: WorkflowJob, error: Error) {
+  const job = workflowStepFromBullJob(bullJob);
+  await persistWorkflowFailure(
+    job,
+    error.message || "BullMQ reported a terminal workflow failure.",
+    true,
+    error instanceof GmailApiError && error.status === 401,
+  );
+}
+
+async function executeWorkflowJob(
+  bullJob: WorkflowJob,
+  handler: (job: WorkflowStepJob) => Promise<Record<string, unknown>>,
+) {
+  const job: WorkflowStepJob = {
+    ...bullJob.data,
+    stepType: bullJob.name,
+    attempts: bullJob.data.attempts + bullJob.attemptsMade + 1,
+    maxAttempts: bullJob.data.maxAttempts,
+  };
+  const started = await markWorkflowStepRunning(job.id, job.attempts);
+  if (started.alreadyComplete) return started.result;
+  try {
+    const result = await handler(job);
+    await completeWorkflowStep(job.id, result);
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown worker failure";
+    const terminal = job.attempts >= job.maxAttempts;
+    const reconnectRequired = error instanceof GmailApiError && error.status === 401;
+    await persistWorkflowFailure(job, message, terminal, reconnectRequired);
+    throw error;
+  }
+}
+
+function processGmailPages(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "gmail.sync.page") return runGmailPage(job);
+    if (job.stepType === "gmail.sync.finalize") return runGmailFinalize(job);
+    throw new Error(`Unsupported Gmail page step: ${job.stepType}`);
+  });
+}
+
+function processGmailMessage(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runGmailMessage);
+}
+
+function processIndexingBatch(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "embedding.backfill") return runEmbeddingBackfill(job);
+    if (job.stepType === "embedding.batch.event") return runEmbeddingBatchEvent(job);
+    throw new Error(`Unsupported indexing Batch step: ${job.stepType}`);
+  });
+}
+
+function processIncrementalIndexing(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runIncrementalEmbedding);
+}
+
+function processMemorySubmission(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runMemoryExtraction);
+}
+
+function processMemoryEvent(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "memory.batch.retry") return runMemoryBatchRetry(job);
+    if (job.stepType === "memory.batch.event") return runMemoryBatchEvent(job);
+    throw new Error(`Unsupported Memory Batch step: ${job.stepType}`);
+  });
+}
+
+function processMemoryFeedback(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runMemoryFeedback);
+}
+
+function startBullWorkers(runtime: BullQueueRuntime) {
+  const withFailureReconciliation = {
+    onTerminalFailure: reconcileTerminalQueueFailure,
+  };
+  runtime.createWorker("gmail-pages", processGmailPages, withFailureReconciliation);
+  runtime.createWorker("gmail-messages", processGmailMessage, {
+    ...withFailureReconciliation,
+    concurrency: 5,
+  });
+  if (isAiConfigured()) {
+    runtime.createWorker(
+      "mail-memory-feedback",
+      processMemoryFeedback,
+      withFailureReconciliation,
+    );
+  }
+  if (isEmbeddingBatchConfigured()) {
+    runtime.createWorker("mail-indexing-batch", processIndexingBatch, {
+      ...withFailureReconciliation,
+      lockDuration: batchWorkerLockDuration,
+    });
+  }
+  if (isEmbeddingConfigured()) {
+    runtime.createWorker("mail-indexing-live", processIncrementalIndexing, {
+      ...withFailureReconciliation,
+      concurrency: 5,
+    });
+  }
+  if (isMemoryBatchConfigured()) {
+    runtime.createWorker("mail-memory-submit", processMemorySubmission, {
+      ...withFailureReconciliation,
+      lockDuration: batchWorkerLockDuration,
+    });
+  }
+  if (isAnyMemoryBatchProviderConfigured()) {
+    runtime.createWorker(
+      "mail-memory-events",
+      processMemoryEvent,
+      withFailureReconciliation,
+    );
+  }
+}
+
+async function reconcileSubmittedEmbeddingBatches() {
+  if (!isEmbeddingBatchConfigured()) return;
+  const providerBatchIds = await listSubmittedEmbeddingBatchIds();
+  let enqueued = 0;
+  for (const providerBatchId of providerBatchIds) {
+    try {
+      const state = await getEmbeddingBatchState(providerBatchId);
+      if (!terminalEmbeddingBatchStates.has(state)) continue;
+      const event = await enqueueBatchEvent({
+        provider: "openai",
+        webhookId: `worker-startup:${providerBatchId}:${state}`,
+        eventType: `batch.${state}`,
+        providerBatchId,
+      });
+      if (event) enqueued += 1;
+    } catch (error) {
+      console.error("worker: submitted embedding Batch reconciliation failed", {
+        providerBatchId,
+        message: error instanceof Error ? error.message : "Unknown provider failure",
+      });
+    }
+  }
+  if (providerBatchIds.length > 0) {
+    console.info("worker: submitted embedding Batches reconciled", {
+      checked: providerBatchIds.length,
+      enqueued,
+    });
+  }
+}
+
+async function runOutboxLoop(
+  signal: ReturnType<typeof createJobSignal>,
+  isStopped: () => boolean,
+  runtime: BullQueueRuntime,
+) {
+  while (!isStopped()) {
+    await signal.wait();
+    if (isStopped()) break;
+    while (!isStopped()) {
+      const result = await publishOutboxBatch((jobs) => runtime.publish(jobs));
+      if (result.failed || result.published === 0) break;
+    }
+  }
+}
+
+async function runPostgresJobLoop(
+  signal: ReturnType<typeof createJobSignal>,
+  isStopped: () => boolean,
+) {
+  while (!isStopped()) {
+    await signal.wait();
+    if (isStopped()) break;
+    while (!isStopped() && (await processNextPostgresJob())) {
+      // Drain the current queue before waiting for another database notification.
+    }
+  }
+}
+
 async function run() {
-  const signal = createJobSignal();
+  const runtime = new BullQueueRuntime(process.env.REDIS_URL ?? "");
+  await runtime.waitUntilReady();
+  await runtime.configureGlobalConcurrency();
+  startBullWorkers(runtime);
+
+  const outboxSignal = createJobSignal();
+  const postgresJobSignal = createJobSignal();
   let stopRequested = false;
   const requestStop = () => {
     stopRequested = true;
-    signal.notify();
+    outboxSignal.notify();
+    postgresJobSignal.notify();
   };
-  const stopListening = await listenForJobNotifications(signal.notify);
+  const stopOutboxListening = await listenForOutboxNotifications(outboxSignal.notify);
+  const stopJobListening = await listenForJobNotifications(postgresJobSignal.notify);
+  const stopRedisReadyListener = runtime.onReady(outboxSignal.notify);
 
   process.once("SIGINT", requestStop);
   process.once("SIGTERM", requestStop);
 
   try {
+    await enqueueMissingMailSyncRuns();
+    await enqueueReadyMailSyncFinalizers();
+    await enqueuePostSyncWorkflowSteps();
     await enqueueAnalysisJobsForIndexedAccounts();
-    signal.notify();
-
-    while (!stopRequested) {
-      await signal.wait();
-      if (stopRequested) break;
-      while (await processNextJob()) {
-        // Drain every currently eligible job before waiting for another notification.
-      }
-    }
+    await reconcileSubmittedEmbeddingBatches();
+    outboxSignal.notify();
+    postgresJobSignal.notify();
+    await Promise.all([
+      runOutboxLoop(outboxSignal, () => stopRequested, runtime),
+      runPostgresJobLoop(postgresJobSignal, () => stopRequested),
+    ]);
   } finally {
     process.removeListener("SIGINT", requestStop);
     process.removeListener("SIGTERM", requestStop);
-    await stopListening();
+    stopRedisReadyListener();
+    await stopOutboxListening();
+    await stopJobListening();
+    await runtime.close();
   }
 }
 

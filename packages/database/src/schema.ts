@@ -13,8 +13,11 @@ import {
   timestamp,
   uniqueIndex,
   uuid,
+  vector,
 } from "drizzle-orm/pg-core";
 import type { LabelAnalysisState, SystemLabelKey } from "@invook/contracts";
+
+import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 
 import type { AccountSyncState } from "./types";
 
@@ -61,7 +64,7 @@ export const connectedAccounts = pgTable(
     syncState: jsonb("sync_state")
       .$type<AccountSyncState>()
       .notNull()
-      .default({ recent: "pending", memory: "pending", history: "pending" }),
+      .default({ mailSync: "pending", indexing: "pending", memory: "pending" }),
     lastSyncedAt: timestampWithTimezone("last_synced_at"),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
@@ -288,6 +291,11 @@ export const messages = pgTable(
     searchDocument: searchVector("search_document").generatedAlwaysAs(
       sql`to_tsvector('simple', coalesce(${sql.raw("subject")}, '') || ' ' || coalesce(${sql.raw("body_text")}, ''))`,
     ),
+    metadataSearchDocument: searchVector(
+      "metadata_search_document",
+    ).generatedAlwaysAs(
+      sql`to_tsvector('simple', coalesce(${sql.raw("sender")}->>'raw', '') || ' ' || coalesce(${sql.raw("sender")}->>'email', '') || ' ' || coalesce(${sql.raw("recipients")}::text, ''))`,
+    ),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -301,6 +309,10 @@ export const messages = pgTable(
     ),
     index("messages_thread_sent_idx").on(table.threadId, table.sentAt),
     index("messages_search_idx").using("gin", table.searchDocument),
+    index("messages_metadata_search_idx").using(
+      "gin",
+      table.metadataSearchDocument,
+    ),
     index("messages_memory_eligible_idx")
       .on(table.userId, table.sentAt)
       .where(
@@ -355,6 +367,104 @@ export const memoryPendingEvidence = pgTable(
     check(
       "memory_pending_evidence_schema_version_check",
       sql`${table.schemaVersion} > 0`,
+    ),
+  ],
+);
+
+export const messageAttachments = pgTable(
+  "message_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    providerAttachmentId: text("provider_attachment_id"),
+    filename: text("filename").notNull(),
+    filenameSearchDocument: searchVector(
+      "filename_search_document",
+    ).generatedAlwaysAs(
+      sql`to_tsvector('simple', regexp_replace(${sql.raw("filename")}, '[_\\.-]+', ' ', 'g'))`,
+    ),
+    mimeType: text("mime_type"),
+    size: integer("size"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("message_attachments_message_idx").on(table.messageId),
+    index("message_attachments_account_filename_idx").on(
+      table.accountId,
+      table.filename,
+    ),
+    index("message_attachments_filename_search_idx").using(
+      "gin",
+      table.filenameSearchDocument,
+    ),
+    check(
+      "message_attachments_size_check",
+      sql`${table.size} is null or ${table.size} >= 0`,
+    ),
+  ],
+);
+
+export const messageEmbeddings = pgTable(
+  "message_embeddings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    modelId: text("model_id").notNull(),
+    dimensions: integer("dimensions").notNull(),
+    indexVersion: integer("index_version").notNull(),
+    contentHash: text("content_hash").notNull(),
+    status: text("status")
+      .$type<"pending" | "submitted" | "complete" | "failed">()
+      .notNull()
+      .default("pending"),
+    embedding: vector("embedding", { dimensions: MAIL_EMBEDDING_DIMENSIONS }),
+    providerBatchId: text("provider_batch_id"),
+    lastError: text("last_error"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("message_embeddings_message_model_version_idx").on(
+      table.messageId,
+      table.modelId,
+      table.indexVersion,
+    ),
+    index("message_embeddings_account_status_idx").on(
+      table.accountId,
+      table.modelId,
+      table.indexVersion,
+      table.status,
+    ),
+    index("message_embeddings_embedding_hnsw_idx")
+      .using("hnsw", table.embedding.op("vector_cosine_ops"))
+      .where(sql`${table.status} = 'complete'`),
+    check("message_embeddings_dimensions_check", sql`${table.dimensions} > 0`),
+    check(
+      "message_embeddings_status_check",
+      sql`${table.status} in ('pending', 'submitted', 'complete', 'failed')`,
     ),
   ],
 );
@@ -545,6 +655,271 @@ export const jobs = pgTable(
     ),
     check("jobs_attempts_check", sql`${table.attempts} >= 0`),
     check("jobs_max_attempts_check", sql`${table.maxAttempts} > 0`),
+  ],
+);
+
+export const mailSyncRuns = pgTable(
+  "mail_sync_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    status: text("status")
+      .$type<"queued" | "running" | "complete" | "failed">()
+      .notNull()
+      .default("queued"),
+    startingHistoryCursor: text("starting_history_cursor").notNull(),
+    finalHistoryCursor: text("final_history_cursor"),
+    discoveryComplete: boolean("discovery_complete").notNull().default(false),
+    pageCount: integer("page_count").notNull().default(0),
+    discoveredMessageCount: integer("discovered_message_count").notNull().default(0),
+    processedMessageCount: integer("processed_message_count").notNull().default(0),
+    failedMessageCount: integer("failed_message_count").notNull().default(0),
+    lastError: text("last_error"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    startedAt: timestampWithTimezone("started_at"),
+    completedAt: timestampWithTimezone("completed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("mail_sync_runs_idempotency_key_idx").on(table.idempotencyKey),
+    index("mail_sync_runs_account_created_idx").on(table.accountId, table.createdAt),
+    check(
+      "mail_sync_runs_status_check",
+      sql`${table.status} in ('queued', 'running', 'complete', 'failed')`,
+    ),
+    check("mail_sync_runs_page_count_check", sql`${table.pageCount} >= 0`),
+    check(
+      "mail_sync_runs_message_counts_check",
+      sql`${table.discoveredMessageCount} >= 0 and ${table.processedMessageCount} >= 0 and ${table.failedMessageCount} >= 0`,
+    ),
+  ],
+);
+
+export const workflowSteps = pgTable(
+  "workflow_steps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id").references(() => mailSyncRuns.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").references(() => connectedAccounts.id, {
+      onDelete: "cascade",
+    }),
+    stepType: text("step_type").notNull(),
+    status: text("status")
+      .$type<"queued" | "running" | "complete" | "failed">()
+      .notNull()
+      .default("queued"),
+    input: jsonb("input").$type<JsonObject>().notNull().default({}),
+    result: jsonb("result").$type<JsonObject>(),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    lastError: text("last_error"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    startedAt: timestampWithTimezone("started_at"),
+    completedAt: timestampWithTimezone("completed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("workflow_steps_idempotency_key_idx").on(table.idempotencyKey),
+    index("workflow_steps_run_created_idx").on(table.runId, table.createdAt),
+    index("workflow_steps_account_type_created_idx").on(
+      table.accountId,
+      table.stepType,
+      table.createdAt,
+    ),
+    check(
+      "workflow_steps_status_check",
+      sql`${table.status} in ('queued', 'running', 'complete', 'failed')`,
+    ),
+    check("workflow_steps_attempts_check", sql`${table.attempts} >= 0`),
+    check("workflow_steps_max_attempts_check", sql`${table.maxAttempts} > 0`),
+  ],
+);
+
+export const embeddingBatchSubmissions = pgTable(
+  "embedding_batch_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workflowStepId: uuid("workflow_step_id")
+      .notNull()
+      .references(() => workflowSteps.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    provider: text("provider").$type<"openai">().notNull().default("openai"),
+    providerBatchId: text("provider_batch_id"),
+    inputFileId: text("input_file_id"),
+    modelId: text("model_id").notNull(),
+    dimensions: integer("dimensions").notNull(),
+    indexVersion: integer("index_version").notNull(),
+    batchAttempt: integer("batch_attempt").notNull().default(1),
+    hasMore: boolean("has_more").notNull(),
+    requestCount: integer("request_count").notNull(),
+    manifest: jsonb("manifest")
+      .$type<Array<{ key: string; messageId: string; contentHash: string }>>()
+      .notNull(),
+    status: text("status")
+      .$type<"preparing" | "submitted" | "complete" | "failed">()
+      .notNull()
+      .default("preparing"),
+    providerState: text("provider_state"),
+    lastError: text("last_error"),
+    submittedAt: timestampWithTimezone("submitted_at"),
+    completedAt: timestampWithTimezone("completed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("embedding_batch_submissions_workflow_step_idx").on(
+      table.workflowStepId,
+    ),
+    uniqueIndex("embedding_batch_submissions_provider_batch_idx")
+      .on(table.provider, table.providerBatchId)
+      .where(sql`${table.providerBatchId} is not null`),
+    uniqueIndex("embedding_batch_submissions_account_active_idx")
+      .on(table.accountId)
+      .where(sql`${table.status} in ('preparing', 'submitted')`),
+    index("embedding_batch_submissions_account_status_idx").on(
+      table.accountId,
+      table.status,
+      table.createdAt,
+    ),
+    check("embedding_batch_submissions_provider_check", sql`${table.provider} = 'openai'`),
+    check(
+      "embedding_batch_submissions_status_check",
+      sql`${table.status} in ('preparing', 'submitted', 'complete', 'failed')`,
+    ),
+    check(
+      "embedding_batch_submissions_dimensions_check",
+      sql`${table.dimensions} = ${sql.raw(String(MAIL_EMBEDDING_DIMENSIONS))}`,
+    ),
+    check(
+      "embedding_batch_submissions_request_count_check",
+      sql`${table.requestCount} > 0`,
+    ),
+    check(
+      "embedding_batch_submissions_batch_attempt_check",
+      sql`${table.batchAttempt} > 0`,
+    ),
+  ],
+);
+
+export const queueOutbox = pgTable(
+  "queue_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workflowStepId: uuid("workflow_step_id")
+      .notNull()
+      .references(() => workflowSteps.id, { onDelete: "cascade" }),
+    queueName: text("queue_name")
+      .$type<
+        | "gmail-pages"
+        | "gmail-messages"
+        | "mail-indexing-batch"
+        | "mail-indexing-live"
+        | "mail-memory-submit"
+        | "mail-memory-events"
+        | "mail-memory-feedback"
+      >()
+      .notNull(),
+    publishAttempts: integer("publish_attempts").notNull().default(0),
+    lastError: text("last_error"),
+    publishedAt: timestampWithTimezone("published_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("queue_outbox_workflow_step_idx").on(table.workflowStepId),
+    index("queue_outbox_unpublished_idx")
+      .on(table.createdAt)
+      .where(sql`${table.publishedAt} is null`),
+    check("queue_outbox_publish_attempts_check", sql`${table.publishAttempts} >= 0`),
+    check(
+      "queue_outbox_queue_name_check",
+      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback')`,
+    ),
+  ],
+);
+
+export const gmailSyncPages = pgTable(
+  "gmail_sync_pages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => mailSyncRuns.id, { onDelete: "cascade" }),
+    pageNumber: integer("page_number").notNull(),
+    pageToken: text("page_token"),
+    nextPageToken: text("next_page_token"),
+    discoveredMessageCount: integer("discovered_message_count").notNull().default(0),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    completedAt: timestampWithTimezone("completed_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("gmail_sync_pages_run_number_idx").on(table.runId, table.pageNumber),
+    check("gmail_sync_pages_number_check", sql`${table.pageNumber} > 0`),
+    check(
+      "gmail_sync_pages_message_count_check",
+      sql`${table.discoveredMessageCount} >= 0`,
+    ),
+  ],
+);
+
+export const gmailSyncItems = pgTable(
+  "gmail_sync_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => mailSyncRuns.id, { onDelete: "cascade" }),
+    providerMessageId: text("provider_message_id").notNull(),
+    status: text("status")
+      .$type<"queued" | "running" | "complete" | "failed">()
+      .notNull()
+      .default("queued"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    startedAt: timestampWithTimezone("started_at"),
+    completedAt: timestampWithTimezone("completed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("gmail_sync_items_run_message_idx").on(
+      table.runId,
+      table.providerMessageId,
+    ),
+    index("gmail_sync_items_run_status_idx").on(table.runId, table.status),
+    check(
+      "gmail_sync_items_status_check",
+      sql`${table.status} in ('queued', 'running', 'complete', 'failed')`,
+    ),
+    check("gmail_sync_items_attempts_check", sql`${table.attempts} >= 0`),
   ],
 );
 

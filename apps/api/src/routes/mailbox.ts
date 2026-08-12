@@ -1,18 +1,32 @@
 import type { FastifyPluginAsync } from "fastify";
 
+import { mailboxViews, type MailboxView } from "@invook/contracts";
 import {
   enqueueIncrementalSyncForUser,
   getMailboxWorkspace,
+  parseMailboxCursor,
   waitForMailboxSyncCompletion,
 } from "@invook/database";
 
-import { mutationAccessHooks, requireSession } from "../access";
+import { isUuid, mutationAccessHooks, requireSession } from "../access";
 import { sendJson, sendProblem } from "../responses";
 import { serializeWorkspace } from "../serializers";
 
 type MailboxQuery = {
+  cursor?: unknown;
   thread?: unknown;
+  view?: unknown;
 };
+
+const mailboxViewSet = new Set<string>(mailboxViews);
+
+function parseMailboxView(value: unknown): MailboxView | null {
+  if (value === undefined || value === "") return "all";
+  if (typeof value !== "string") return null;
+  if (mailboxViewSet.has(value)) return value as MailboxView;
+  const labelId = value.startsWith("label:") ? value.slice(6) : "";
+  return isUuid(labelId) ? (`label:${labelId}` as const) : null;
+}
 
 export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
   api.get<{ Querystring: MailboxQuery }>(
@@ -26,7 +40,23 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
         typeof request.query.thread === "string"
           ? request.query.thread.trim() || undefined
           : undefined;
-      const workspace = await getMailboxWorkspace(session.userId, threadId);
+      const view = parseMailboxView(request.query.view);
+      if (!view) {
+        await sendProblem(request, reply, 400, "Invalid mailbox view");
+        return;
+      }
+      const requestedCursor =
+        typeof request.query.cursor === "string" ? request.query.cursor.trim() : "";
+      const cursor = requestedCursor ? parseMailboxCursor(requestedCursor) : null;
+      if (requestedCursor && !cursor) {
+        await sendProblem(request, reply, 400, "Invalid mailbox cursor");
+        return;
+      }
+      const workspace = await getMailboxWorkspace(session.userId, {
+        cursor,
+        selectedThreadId: threadId,
+        view,
+      });
       if (!workspace) {
         await sendProblem(
           request,

@@ -1,0 +1,4 @@
+ALTER TABLE "message_attachments" ADD COLUMN "filename_search_document" "tsvector" GENERATED ALWAYS AS (to_tsvector('simple', regexp_replace(filename, '[_\.-]+', ' ', 'g'))) STORED;--> statement-breakpoint
+ALTER TABLE "messages" ADD COLUMN "metadata_search_document" "tsvector" GENERATED ALWAYS AS (to_tsvector('simple', coalesce(sender->>'raw', '') || ' ' || coalesce(sender->>'email', '') || ' ' || coalesce(recipients::text, ''))) STORED;--> statement-breakpoint
+CREATE INDEX "message_attachments_filename_search_idx" ON "message_attachments" USING gin ("filename_search_document");--> statement-breakpoint
+CREATE INDEX "messages_metadata_search_idx" ON "messages" USING gin ("metadata_search_document");

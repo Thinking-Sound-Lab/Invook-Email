@@ -2,7 +2,7 @@ name: invook
 
 services:
   db:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17
     ports:
       - "${POSTGRES_PORT:-54322}:5432"
     environment:
@@ -13,6 +13,19 @@ services:
       - invook-postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "${REDIS_PORT:-63790}:6379"
+    volumes:
+      - invook-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 3s
       retries: 20
     restart: unless-stopped
@@ -48,6 +61,8 @@ services:
       AI_MODEL: ${AI_MODEL:-}
       MEMORY_BATCH_PROVIDER: ${MEMORY_BATCH_PROVIDER:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-}
+      OPENAI_EMBEDDING_DIMENSIONS: ${OPENAI_EMBEDDING_DIMENSIONS:-}
       OPENAI_WEBHOOK_SECRET: ${OPENAI_WEBHOOK_SECRET:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
@@ -58,7 +73,7 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "import('axios').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
       interval: 3s
       retries: 20
     restart: unless-stopped
@@ -84,6 +99,7 @@ services:
       target: worker
     environment:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
+      REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
@@ -92,6 +108,8 @@ services:
       AI_MODEL: ${AI_MODEL:-}
       MEMORY_BATCH_PROVIDER: ${MEMORY_BATCH_PROVIDER:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-}
+      OPENAI_EMBEDDING_DIMENSIONS: ${OPENAI_EMBEDDING_DIMENSIONS:-}
       OPENAI_WEBHOOK_SECRET: ${OPENAI_WEBHOOK_SECRET:-}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
@@ -103,7 +121,10 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   invook-postgres:
+  invook-redis:

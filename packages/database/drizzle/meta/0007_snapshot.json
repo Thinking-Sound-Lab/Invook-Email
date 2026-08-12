@@ -1,6 +1,6 @@
 {
-  "id": "43eb153f-1327-4a7e-8929-f9517fe10d0c",
-  "prevId": "81041413-c726-4658-b429-1d2d064b3fc7",
+  "id": "788954c3-3bda-4cce-91c3-f0436fb46210",
+  "prevId": "d7cc5c55-41b0-42dd-a9a4-134e7518eab4",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -544,8 +544,8 @@
       },
       "isRLSEnabled": false
     },
-    "public.jobs": {
-      "name": "jobs",
+    "public.gmail_sync_items": {
+      "name": "gmail_sync_items",
       "schema": "",
       "columns": {
         "id": {
@@ -555,20 +555,14 @@
           "notNull": true,
           "default": "gen_random_uuid()"
         },
-        "user_id": {
-          "name": "user_id",
+        "run_id": {
+          "name": "run_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
-        "account_id": {
-          "name": "account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "job_type": {
-          "name": "job_type",
+        "provider_message_id": {
+          "name": "provider_message_id",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -580,19 +574,6 @@
           "notNull": true,
           "default": "'queued'"
         },
-        "payload": {
-          "name": "payload",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
-        },
-        "result": {
-          "name": "result",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
         "attempts": {
           "name": "attempts",
           "type": "integer",
@@ -600,34 +581,21 @@
           "notNull": true,
           "default": 0
         },
-        "max_attempts": {
-          "name": "max_attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 5
-        },
-        "locked_at": {
-          "name": "locked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "locked_by": {
-          "name": "locked_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
         "last_error": {
           "name": "last_error",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
-        "idempotency_key": {
-          "name": "idempotency_key",
-          "type": "text",
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
@@ -647,8 +615,308 @@
         }
       },
       "indexes": {
-        "jobs_idempotency_key_idx": {
-          "name": "jobs_idempotency_key_idx",
+        "gmail_sync_items_run_message_idx": {
+          "name": "gmail_sync_items_run_message_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider_message_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "gmail_sync_items_run_status_idx": {
+          "name": "gmail_sync_items_run_status_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "gmail_sync_items_run_id_mail_sync_runs_id_fk": {
+          "name": "gmail_sync_items_run_id_mail_sync_runs_id_fk",
+          "tableFrom": "gmail_sync_items",
+          "tableTo": "mail_sync_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "gmail_sync_items_status_check": {
+          "name": "gmail_sync_items_status_check",
+          "value": "\"gmail_sync_items\".\"status\" in ('queued', 'running', 'complete', 'failed')"
+        },
+        "gmail_sync_items_attempts_check": {
+          "name": "gmail_sync_items_attempts_check",
+          "value": "\"gmail_sync_items\".\"attempts\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.gmail_sync_pages": {
+      "name": "gmail_sync_pages",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "page_number": {
+          "name": "page_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "page_token": {
+          "name": "page_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "next_page_token": {
+          "name": "next_page_token",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "discovered_message_count": {
+          "name": "discovered_message_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "gmail_sync_pages_run_number_idx": {
+          "name": "gmail_sync_pages_run_number_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "page_number",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "gmail_sync_pages_run_id_mail_sync_runs_id_fk": {
+          "name": "gmail_sync_pages_run_id_mail_sync_runs_id_fk",
+          "tableFrom": "gmail_sync_pages",
+          "tableTo": "mail_sync_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "gmail_sync_pages_number_check": {
+          "name": "gmail_sync_pages_number_check",
+          "value": "\"gmail_sync_pages\".\"page_number\" > 0"
+        },
+        "gmail_sync_pages_message_count_check": {
+          "name": "gmail_sync_pages_message_count_check",
+          "value": "\"gmail_sync_pages\".\"discovered_message_count\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.mail_sync_runs": {
+      "name": "mail_sync_runs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "starting_history_cursor": {
+          "name": "starting_history_cursor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "final_history_cursor": {
+          "name": "final_history_cursor",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "discovery_complete": {
+          "name": "discovery_complete",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "page_count": {
+          "name": "page_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "discovered_message_count": {
+          "name": "discovered_message_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "processed_message_count": {
+          "name": "processed_message_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "failed_message_count": {
+          "name": "failed_message_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "mail_sync_runs_idempotency_key_idx": {
+          "name": "mail_sync_runs_idempotency_key_idx",
           "columns": [
             {
               "expression": "idempotency_key",
@@ -662,11 +930,11 @@
           "method": "btree",
           "with": {}
         },
-        "jobs_ready_idx": {
-          "name": "jobs_ready_idx",
+        "mail_sync_runs_account_created_idx": {
+          "name": "mail_sync_runs_account_created_idx",
           "columns": [
             {
-              "expression": "status",
+              "expression": "account_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -679,16 +947,15 @@
             }
           ],
           "isUnique": false,
-          "where": "\"jobs\".\"status\" in ('queued', 'retry')",
           "concurrently": false,
           "method": "btree",
           "with": {}
         }
       },
       "foreignKeys": {
-        "jobs_user_id_profiles_id_fk": {
-          "name": "jobs_user_id_profiles_id_fk",
-          "tableFrom": "jobs",
+        "mail_sync_runs_user_id_profiles_id_fk": {
+          "name": "mail_sync_runs_user_id_profiles_id_fk",
+          "tableFrom": "mail_sync_runs",
           "tableTo": "profiles",
           "columnsFrom": [
             "user_id"
@@ -699,9 +966,9 @@
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "jobs_account_id_connected_accounts_id_fk": {
-          "name": "jobs_account_id_connected_accounts_id_fk",
-          "tableFrom": "jobs",
+        "mail_sync_runs_account_id_connected_accounts_id_fk": {
+          "name": "mail_sync_runs_account_id_connected_accounts_id_fk",
+          "tableFrom": "mail_sync_runs",
           "tableTo": "connected_accounts",
           "columnsFrom": [
             "account_id"
@@ -717,17 +984,17 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
-        "jobs_status_check": {
-          "name": "jobs_status_check",
-          "value": "\"jobs\".\"status\" in ('queued', 'running', 'retry', 'complete', 'failed')"
+        "mail_sync_runs_status_check": {
+          "name": "mail_sync_runs_status_check",
+          "value": "\"mail_sync_runs\".\"status\" in ('queued', 'running', 'complete', 'failed')"
         },
-        "jobs_attempts_check": {
-          "name": "jobs_attempts_check",
-          "value": "\"jobs\".\"attempts\" >= 0"
+        "mail_sync_runs_page_count_check": {
+          "name": "mail_sync_runs_page_count_check",
+          "value": "\"mail_sync_runs\".\"page_count\" >= 0"
         },
-        "jobs_max_attempts_check": {
-          "name": "jobs_max_attempts_check",
-          "value": "\"jobs\".\"max_attempts\" > 0"
+        "mail_sync_runs_message_counts_check": {
+          "name": "mail_sync_runs_message_counts_check",
+          "value": "\"mail_sync_runs\".\"discovered_message_count\" >= 0 and \"mail_sync_runs\".\"processed_message_count\" >= 0 and \"mail_sync_runs\".\"failed_message_count\" >= 0"
         }
       },
       "isRLSEnabled": false
@@ -1768,6 +2035,126 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.queue_outbox": {
+      "name": "queue_outbox",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "workflow_step_id": {
+          "name": "workflow_step_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "queue_name": {
+          "name": "queue_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "publish_attempts": {
+          "name": "publish_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "published_at": {
+          "name": "published_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "queue_outbox_workflow_step_idx": {
+          "name": "queue_outbox_workflow_step_idx",
+          "columns": [
+            {
+              "expression": "workflow_step_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "queue_outbox_unpublished_idx": {
+          "name": "queue_outbox_unpublished_idx",
+          "columns": [
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"queue_outbox\".\"published_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "queue_outbox_workflow_step_id_workflow_steps_id_fk": {
+          "name": "queue_outbox_workflow_step_id_workflow_steps_id_fk",
+          "tableFrom": "queue_outbox",
+          "tableTo": "workflow_steps",
+          "columnsFrom": [
+            "workflow_step_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "queue_outbox_publish_attempts_check": {
+          "name": "queue_outbox_publish_attempts_check",
+          "value": "\"queue_outbox\".\"publish_attempts\" >= 0"
+        },
+        "queue_outbox_queue_name_check": {
+          "name": "queue_outbox_queue_name_check",
+          "value": "\"queue_outbox\".\"queue_name\" in ('gmail-pages', 'gmail-messages', 'mail-classification', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "public.thread_labels": {
       "name": "thread_labels",
       "schema": "",
@@ -2140,6 +2527,239 @@
         "threads_message_count_check": {
           "name": "threads_message_count_check",
           "value": "\"threads\".\"message_count\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.workflow_steps": {
+      "name": "workflow_steps",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "step_type": {
+          "name": "step_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'queued'"
+        },
+        "input": {
+          "name": "input",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "result": {
+          "name": "result",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "max_attempts": {
+          "name": "max_attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 5
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "workflow_steps_idempotency_key_idx": {
+          "name": "workflow_steps_idempotency_key_idx",
+          "columns": [
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "workflow_steps_run_created_idx": {
+          "name": "workflow_steps_run_created_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "workflow_steps_account_type_created_idx": {
+          "name": "workflow_steps_account_type_created_idx",
+          "columns": [
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "step_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "workflow_steps_run_id_mail_sync_runs_id_fk": {
+          "name": "workflow_steps_run_id_mail_sync_runs_id_fk",
+          "tableFrom": "workflow_steps",
+          "tableTo": "mail_sync_runs",
+          "columnsFrom": [
+            "run_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "workflow_steps_user_id_profiles_id_fk": {
+          "name": "workflow_steps_user_id_profiles_id_fk",
+          "tableFrom": "workflow_steps",
+          "tableTo": "profiles",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "workflow_steps_account_id_connected_accounts_id_fk": {
+          "name": "workflow_steps_account_id_connected_accounts_id_fk",
+          "tableFrom": "workflow_steps",
+          "tableTo": "connected_accounts",
+          "columnsFrom": [
+            "account_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "workflow_steps_status_check": {
+          "name": "workflow_steps_status_check",
+          "value": "\"workflow_steps\".\"status\" in ('queued', 'running', 'complete', 'failed')"
+        },
+        "workflow_steps_attempts_check": {
+          "name": "workflow_steps_attempts_check",
+          "value": "\"workflow_steps\".\"attempts\" >= 0"
+        },
+        "workflow_steps_max_attempts_check": {
+          "name": "workflow_steps_max_attempts_check",
+          "value": "\"workflow_steps\".\"max_attempts\" > 0"
         }
       },
       "isRLSEnabled": false

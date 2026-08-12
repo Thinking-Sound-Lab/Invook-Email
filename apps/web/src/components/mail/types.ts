@@ -3,6 +3,7 @@ import type {
   MailboxSelectedThread,
   MailboxThreadMessage,
   MailboxThreadSummary,
+  MailboxView as ContractMailboxView,
 } from "@invook/contracts";
 
 export type StaticMailboxView =
@@ -16,7 +17,7 @@ export type StaticMailboxView =
   | "sent"
   | "trash";
 
-export type MailboxView = StaticMailboxView | `label:${string}`;
+export type MailboxView = ContractMailboxView | `label:${string}`;
 
 export type MailSurface = "mail" | "compose" | "search" | "settings" | "automations";
 

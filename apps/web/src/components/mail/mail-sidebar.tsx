@@ -103,7 +103,7 @@ function MemoryProgress({ progress }: { progress: MemoryGenerationProgress }) {
         : null;
 
   const title = {
-    indexing: "Scanning Gmail",
+    waiting_for_mail: "Waiting for Gmail",
     preparing: "Preparing memory",
     validating: "Checking memory batch",
     analyzing: "Building memory",

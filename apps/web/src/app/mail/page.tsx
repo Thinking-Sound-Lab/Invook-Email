@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
-import type { MailLabel } from "@invook/contracts";
+import { mailboxViews } from "@invook/contracts";
+import { validate as validateUuid } from "uuid";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
 import { MailList } from "@/components/mail/mail-list";
@@ -16,10 +17,11 @@ import type {
 import {
   ComposeSurface,
   PendingSurface,
+  SearchResultsSurface,
   SearchSurface,
   SettingsSurface,
 } from "@/components/mail/workspace-surface";
-import { getMailboxWorkspace } from "@/lib/api";
+import { getMailboxWorkspace, searchMailbox } from "@/lib/api";
 
 type MailPageProps = {
   searchParams: Promise<{
@@ -27,20 +29,11 @@ type MailPageProps = {
     surface?: string | string[];
     thread?: string | string[];
     q?: string | string[];
+    cursor?: string | string[];
   }>;
 };
 
-const mailboxViews = new Set<StaticMailboxView>([
-  "all",
-  "starred",
-  "shared",
-  "reminders",
-  "scheduled",
-  "drafts",
-  "done",
-  "sent",
-  "trash",
-]);
+const mailboxViewSet = new Set<string>(mailboxViews);
 
 const mailSurfaces = new Set<MailSurface>([
   "mail",
@@ -54,13 +47,11 @@ function firstValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
-function normalizeView(value: string | undefined, labels: MailLabel[]): MailboxView {
-  if (value && mailboxViews.has(value as StaticMailboxView)) {
-    return value as StaticMailboxView;
-  }
+function normalizeView(value: string | undefined): MailboxView {
+  if (value && mailboxViewSet.has(value)) return value as StaticMailboxView;
   if (value?.startsWith("label:")) {
     const labelId = value.slice("label:".length);
-    if (labels.some((label) => label.id === labelId)) return `label:${labelId}`;
+    if (validateUuid(labelId)) return `label:${labelId}`;
   }
   return "all";
 }
@@ -69,57 +60,11 @@ function normalizeSurface(value: string | undefined): MailSurface {
   return value && mailSurfaces.has(value as MailSurface) ? (value as MailSurface) : "mail";
 }
 
-function hasLabel(thread: MailThreadSummary, ...labels: string[]): boolean {
-  return labels.some((label) => thread.labelIds.includes(label));
-}
-
 function hasInvookLabel(
   thread: MailThreadSummary,
   systemKey: "important" | "travel" | "pitch" | "newsletter",
 ): boolean {
   return thread.invookLabels.some((label) => label.systemKey === systemKey);
-}
-
-function filterByView(threads: MailThreadSummary[], view: MailboxView): MailThreadSummary[] {
-  if (view.startsWith("label:")) {
-    const labelId = view.slice("label:".length);
-    return threads.filter((thread) =>
-      thread.invookLabels.some((label) => label.labelId === labelId),
-    );
-  }
-  switch (view as StaticMailboxView) {
-    case "all":
-      return threads;
-    case "starred":
-      return threads.filter((thread) => hasLabel(thread, "STARRED"));
-    case "shared":
-      return threads.filter((thread) => hasLabel(thread, "SHARED"));
-    case "reminders":
-      return threads.filter((thread) => hasLabel(thread, "REMINDER"));
-    case "scheduled":
-      return threads.filter((thread) => hasLabel(thread, "SCHEDULED"));
-    case "drafts":
-      return threads.filter((thread) => hasLabel(thread, "DRAFT"));
-    case "done":
-      return threads.filter((thread) => hasLabel(thread, "DONE"));
-    case "sent":
-      return threads.filter((thread) => hasLabel(thread, "SENT"));
-    case "trash":
-      return threads.filter((thread) => hasLabel(thread, "TRASH"));
-  }
-  return threads;
-}
-
-function filterByQuery(threads: MailThreadSummary[], query: string): MailThreadSummary[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  if (!normalizedQuery) return threads;
-
-  return threads.filter((thread) =>
-    [thread.subject, thread.snippet, ...thread.participants]
-      .join("\n")
-      .toLocaleLowerCase()
-      .includes(normalizedQuery),
-  );
 }
 
 export default async function MailPage({ searchParams }: MailPageProps) {
@@ -130,20 +75,24 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   const requestedSurface = normalizeSurface(firstValue(params.surface));
   const currentSurface = requestedThreadId ? "mail" : requestedSurface;
   const query = firstValue(params.q)?.trim();
+  const mailboxCursor = firstValue(params.cursor)?.trim() || undefined;
+  const currentView = normalizeView(firstValue(params.view));
 
-  const workspace = await getMailboxWorkspace(requestedThreadId);
+  const workspace = await getMailboxWorkspace({
+    cursor: mailboxCursor,
+    selectedThreadId: requestedThreadId,
+    view: currentView,
+  });
   if (!workspace) redirect("/");
-  const currentView = normalizeView(firstValue(params.view), workspace.labels);
   const currentLabel = currentView.startsWith("label:")
     ? workspace.labels.find((label) => label.id === currentView.slice("label:".length))
     : null;
 
   const mailboxThreads = workspace.threads as MailThreadSummary[];
   const selectedThread = workspace.selectedThread as SelectedThread | null;
-  const filteredThreads =
-    currentSurface === "search" && query
-      ? filterByQuery(mailboxThreads, query)
-      : filterByView(mailboxThreads, currentView);
+  const searchResults =
+    currentSurface === "search" && query ? await searchMailbox(query) : [];
+  const filteredThreads = mailboxThreads;
   const importantThreads =
     currentView === "all" && !query
       ? filteredThreads.filter((thread) => hasInvookLabel(thread, "important"))
@@ -159,6 +108,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
       <ThreadReader
         thread={selectedThread}
         currentView={currentView}
+        mailboxCursor={mailboxCursor}
         aiConfigured={workspace.aiConfigured}
         availableLabels={workspace.labels}
       />
@@ -167,6 +117,8 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     centerPane = <ComposeSurface />;
   } else if (currentSurface === "search" && !query) {
     centerPane = <SearchSurface />;
+  } else if (currentSurface === "search" && query) {
+    centerPane = <SearchResultsSurface query={query} results={searchResults} />;
   } else if (currentSurface === "settings") {
     centerPane = (
       <SettingsSurface
@@ -186,6 +138,8 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         currentView={currentView}
         title={currentLabel?.name}
         importantThreads={importantThreads}
+        mailboxCursor={mailboxCursor}
+        pagination={workspace.pagination}
         remainingThreads={remainingThreads}
         query={currentSurface === "search" ? query : undefined}
         importantView={currentLabel?.systemKey === "important"}
@@ -205,8 +159,10 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         />
         {centerPane}
         <AgentPanel
+          openThreadId={selectedThread?.id}
           openThreadSubject={selectedThread?.subject || undefined}
           aiConfigured={workspace.aiConfigured}
+          indexingState={workspace.account.syncState.indexing}
         />
       </div>
     </main>

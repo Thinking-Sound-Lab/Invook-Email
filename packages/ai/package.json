@@ -17,6 +17,7 @@
     "@ai-sdk/openai-compatible": "^3.0.27",
     "@invook/contracts": "workspace:*",
     "ai": "^7.0.58",
+    "js-tiktoken": "^1.0.21",
     "openai": "^7.4.0",
     "zod": "^4.4.3"
   }

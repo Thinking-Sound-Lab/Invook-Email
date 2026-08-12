@@ -32,11 +32,11 @@ async function serializeMemoryProgress(
   const evidenceMessageCount = resultNumber(submission, "evidenceMessageCount");
 
   if (
-    workspace.account.syncState.recent === "pending" ||
-    workspace.account.syncState.recent === "running"
+    workspace.account.syncState.mailSync === "pending" ||
+    workspace.account.syncState.mailSync === "running"
   ) {
     return {
-      stage: "indexing",
+      stage: "waiting_for_mail",
       completedRequestCount: null,
       failedRequestCount: null,
       totalRequestCount: null,
@@ -132,6 +132,7 @@ export async function serializeWorkspace(
     memoryProgress: await serializeMemoryProgress(workspace),
     memories: workspace.memories,
     labels: workspace.labels,
+    pagination: workspace.pagination,
     threads: workspace.threads.map((thread) => ({
       ...thread,
       latestMessageAt: thread.latestMessageAt?.toISOString() ?? null,

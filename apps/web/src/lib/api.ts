@@ -1,4 +1,9 @@
-import type { MailboxWorkspace, SessionState } from "@invook/contracts";
+import type {
+  MailboxView,
+  MailboxWorkspace,
+  MailSearchResult,
+  SessionState,
+} from "@invook/contracts";
 import axios from "axios";
 import { headers } from "next/headers";
 
@@ -25,10 +30,16 @@ export async function getSessionState(): Promise<SessionState> {
 }
 
 export async function getMailboxWorkspace(
-  selectedThreadId?: string,
+  input: {
+    cursor?: string;
+    selectedThreadId?: string;
+    view: MailboxView;
+  },
 ): Promise<MailboxWorkspace | null> {
   const query = new URLSearchParams();
-  if (selectedThreadId) query.set("thread", selectedThreadId);
+  query.set("view", input.view);
+  if (input.cursor) query.set("cursor", input.cursor);
+  if (input.selectedThreadId) query.set("thread", input.selectedThreadId);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   const response = await apiRequest<MailboxWorkspace>(`/v1/mailbox${suffix}`);
 
@@ -37,4 +48,16 @@ export async function getMailboxWorkspace(
     throw new Error(`The mailbox API returned ${response.status}.`);
   }
   return response.data;
+}
+
+export async function searchMailbox(query: string): Promise<MailSearchResult[]> {
+  const search = new URLSearchParams({ q: query });
+  const response = await apiRequest<{ results: MailSearchResult[] }>(
+    `/v1/mail/search?${search.toString()}`,
+  );
+  if (response.status === 401) return [];
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`The mail search API returned ${response.status}.`);
+  }
+  return response.data.results;
 }
