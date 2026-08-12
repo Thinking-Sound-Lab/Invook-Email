@@ -176,6 +176,7 @@ export type LabelDefinitionForAnalysis = {
 
 export type LabelAnalysisThread = {
   id: string;
+  contentVersion: number;
   subject: string;
   participants: string[];
   messages: Array<{
@@ -190,6 +191,7 @@ export type LabelBatchManifestEntry = {
   labelId: string;
   definitionVersion: number;
   threadId: string;
+  threadVersion: number;
 };
 
 export type LabelBatchCandidate = {
@@ -887,6 +889,19 @@ function labelRequestKey(label: LabelDefinitionForAnalysis, threadId: string) {
   return `label-${digest}`;
 }
 
+function labelThreadContent(thread: LabelAnalysisThread) {
+  return {
+    threadId: thread.id,
+    subject: clip(thread.subject, 500),
+    participants: thread.participants.slice(0, 20),
+    messages: thread.messages.slice(0, 3).map((message) => ({
+      direction: message.direction,
+      sender: clip(message.sender, 320),
+      bodyText: clip(message.bodyText, 1_600),
+    })),
+  };
+}
+
 function labelResponseBody(
   modelId: string,
   label: LabelDefinitionForAnalysis,
@@ -899,16 +914,7 @@ function labelResponseBody(
       description: label.description,
       definitionVersion: label.definitionVersion,
     },
-    thread: {
-      threadId: thread.id,
-      subject: clip(thread.subject, 500),
-      participants: thread.participants.slice(0, 20),
-      messages: thread.messages.slice(0, 3).map((message) => ({
-        direction: message.direction,
-        sender: clip(message.sender, 320),
-        bodyText: clip(message.bodyText, 1_600),
-      })),
-    },
+    thread: labelThreadContent(thread),
   };
 
   return {
@@ -1027,6 +1033,7 @@ function createLabelRequests(input: {
         labelId: input.label.id,
         definitionVersion: input.label.definitionVersion,
         threadId: request.thread.id,
+        threadVersion: request.thread.contentVersion,
       },
     });
     totalBytes += bytes;

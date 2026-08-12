@@ -43,17 +43,30 @@ export function getDatabase(): Database {
   return database;
 }
 
-export async function listenForJobNotifications(onJobAvailable: () => void) {
+async function listenForDatabaseNotifications(
+  channel: "invook_jobs" | "invook_job_status",
+  onNotification: (payload: string) => void,
+) {
   const databaseUrl = process.env.DATABASE_URL ?? "";
   if (!databaseUrl) {
-    throw new Error("DATABASE_URL is required for worker notifications.");
+    throw new Error("DATABASE_URL is required for database notifications.");
   }
 
   const client = postgres(databaseUrl, { max: 1, prepare: false });
-  const listener = await client.listen("invook_jobs", onJobAvailable);
+  const listener = await client.listen(channel, onNotification);
 
   return async () => {
     await listener.unlisten();
     await client.end();
   };
+}
+
+export function listenForJobNotifications(onJobAvailable: () => void) {
+  return listenForDatabaseNotifications("invook_jobs", onJobAvailable);
+}
+
+export function listenForJobStatusNotifications(
+  onStatusChanged: (jobId: string) => void,
+) {
+  return listenForDatabaseNotifications("invook_job_status", onStatusChanged);
 }

@@ -39,14 +39,47 @@ export type GmailMessagePage = {
   resultSizeEstimate?: number;
 };
 
+export type GmailHistoryChange = {
+  messageId: string;
+  action: "upsert" | "delete";
+};
+
+export type GmailHistoryRecord = {
+  id: string;
+  messagesAdded?: Array<{ message: GmailMessageReference }>;
+  messagesDeleted?: Array<{ message: GmailMessageReference }>;
+  labelsAdded?: Array<{ message: GmailMessageReference; labelIds: string[] }>;
+  labelsRemoved?: Array<{ message: GmailMessageReference; labelIds: string[] }>;
+};
+
 export type GmailHistoryPage = {
-  history?: Array<{
-    id: string;
-    messagesAdded?: Array<{ message: GmailMessageReference }>;
-  }>;
+  history?: GmailHistoryRecord[];
   nextPageToken?: string;
   historyId?: string;
 };
+
+export function gmailHistoryChanges(
+  record: GmailHistoryRecord,
+): GmailHistoryChange[] {
+  return [
+    ...(record.messagesAdded ?? []).map(({ message }) => ({
+      messageId: message.id,
+      action: "upsert" as const,
+    })),
+    ...(record.labelsAdded ?? []).map(({ message }) => ({
+      messageId: message.id,
+      action: "upsert" as const,
+    })),
+    ...(record.labelsRemoved ?? []).map(({ message }) => ({
+      messageId: message.id,
+      action: "upsert" as const,
+    })),
+    ...(record.messagesDeleted ?? []).map(({ message }) => ({
+      messageId: message.id,
+      action: "delete" as const,
+    })),
+  ];
+}
 
 export class GmailApiError extends Error {
   constructor(
@@ -116,6 +149,7 @@ export function listGmailMessages(
   },
 ): Promise<GmailMessagePage> {
   const search = new URLSearchParams({
+    includeSpamTrash: "true",
     maxResults: String(options.maxResults),
   });
   if (options.labelId) search.set("labelIds", options.labelId);
@@ -137,7 +171,6 @@ export function listGmailHistory(
 ): Promise<GmailHistoryPage> {
   const search = new URLSearchParams({
     startHistoryId: options.startHistoryId,
-    historyTypes: "messageAdded",
     maxResults: String(options.maxResults),
   });
   if (options.pageToken) search.set("pageToken", options.pageToken);

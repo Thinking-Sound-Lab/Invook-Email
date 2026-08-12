@@ -2,6 +2,7 @@ export {
   createDatabase,
   getDatabase,
   listenForJobNotifications,
+  listenForJobStatusNotifications,
   type Database,
 } from "./client";
 export {

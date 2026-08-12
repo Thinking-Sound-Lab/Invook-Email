@@ -3,6 +3,7 @@ import type { FastifyPluginAsync } from "fastify";
 import {
   enqueueIncrementalSyncForUser,
   getMailboxWorkspace,
+  waitForMailboxSyncCompletion,
 } from "@invook/database";
 
 import { mutationAccessHooks, requireSession } from "../access";
@@ -47,25 +48,39 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
       const session = request.invookSession;
       if (!session) return;
       const result = await enqueueIncrementalSyncForUser(session.userId);
-      if (result.reason === "not_found") {
+      if (result.jobId === null) {
+        await sendProblem(
+          request,
+          reply,
+          result.reason === "not_found" ? 404 : 409,
+          result.reason === "not_found"
+            ? "Connected Gmail account not found"
+            : "Initial Gmail indexing is not complete",
+        );
+        return;
+      }
+      const completion = await waitForMailboxSyncCompletion({
+        userId: session.userId,
+        jobId: result.jobId,
+      });
+      if (!completion) {
         await sendProblem(
           request,
           reply,
           404,
-          "Connected Gmail account not found",
+          "Gmail synchronization job not found",
         );
         return;
       }
-      if (result.reason === "initial_sync_incomplete") {
-        await sendProblem(
-          request,
-          reply,
-          409,
-          "Initial Gmail indexing is not complete",
-        );
+      if (completion.status === "failed") {
+        await sendProblem(request, reply, 502, "Gmail synchronization failed");
         return;
       }
-      await sendJson(reply, 202, { queued: true, jobId: result.jobId });
+      await sendJson(reply, 200, {
+        completed: true,
+        jobId: result.jobId,
+        result: completion.result,
+      });
     },
   );
 };

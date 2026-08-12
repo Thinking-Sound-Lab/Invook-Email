@@ -26,6 +26,7 @@ import {
   completeInitialSync,
   completeIncrementalSync,
   completeJob,
+  deleteIndexedMessage,
   decryptGoogleCredential,
   deferJobWithoutAttempt,
   DRAFT_FEEDBACK_VERSION,
@@ -37,6 +38,7 @@ import {
   failAnalysisJob,
   failJobAndAccount,
   getDraftFeedbackSamples,
+  getIndexedMessageIds,
   getLabelBatchSubmission,
   getLabelForAnalysis,
   getMemoryAnalysisThreads,
@@ -61,6 +63,7 @@ import {
 } from "@invook/database";
 import {
   extractEmailAddress,
+  gmailHistoryChanges,
   getGmailMessage,
   getGmailProfile,
   GmailApiError,
@@ -195,6 +198,7 @@ async function syncMailbox(options: {
 }) {
   let pageToken: string | undefined;
   const changedThreadIds = new Set<string>();
+  const providerMessageIds = new Set<string>();
 
   do {
     const page = await listGmailMessages(options.accessToken, {
@@ -206,9 +210,18 @@ async function syncMailbox(options: {
     for (let start = 0; start < references.length; start += 5) {
       const batch = references.slice(start, start + 5);
       const gmailMessages = await Promise.all(
-        batch.map((reference) => getGmailMessage(options.accessToken, reference.id)),
+        batch.map(async (reference) => {
+          try {
+            return await getGmailMessage(options.accessToken, reference.id);
+          } catch (error) {
+            if (error instanceof GmailApiError && error.status === 404) return null;
+            throw error;
+          }
+        }),
       );
       for (const gmailMessage of gmailMessages) {
+        if (!gmailMessage) continue;
+        providerMessageIds.add(gmailMessage.id);
         const stored = await storeMessage({
           userId: options.userId,
           accountId: options.accountId,
@@ -223,6 +236,18 @@ async function syncMailbox(options: {
     pageToken = page.nextPageToken;
   } while (pageToken);
 
+  const indexedMessageIds = await getIndexedMessageIds(options.accountId);
+  for (const messageId of indexedMessageIds) {
+    if (providerMessageIds.has(messageId)) continue;
+    const deleted = await deleteIndexedMessage({
+      accountId: options.accountId,
+      providerMessageId: messageId,
+    });
+    if (deleted.changed && deleted.threadId) {
+      changedThreadIds.add(deleted.threadId);
+    }
+  }
+
   return changedThreadIds;
 }
 
@@ -235,7 +260,7 @@ async function syncMailboxHistory(options: {
 }) {
   let pageToken: string | undefined;
   let historyId = options.startHistoryId;
-  const messageIds = new Set<string>();
+  const messageActions = new Map<string, "upsert" | "delete">();
 
   do {
     const page = await listGmailHistory(options.accessToken, {
@@ -244,8 +269,8 @@ async function syncMailboxHistory(options: {
       pageToken,
     });
     for (const history of page.history ?? []) {
-      for (const added of history.messagesAdded ?? []) {
-        messageIds.add(added.message.id);
+      for (const change of gmailHistoryChanges(history)) {
+        messageActions.set(change.messageId, change.action);
       }
     }
     if (page.historyId) historyId = page.historyId;
@@ -253,26 +278,53 @@ async function syncMailboxHistory(options: {
   } while (pageToken);
 
   const changedThreadIds = new Set<string>();
-  const ids = Array.from(messageIds);
+  for (const [messageId, action] of messageActions) {
+    if (action !== "delete") continue;
+    const deleted = await deleteIndexedMessage({
+      accountId: options.accountId,
+      providerMessageId: messageId,
+    });
+    if (deleted.changed && deleted.threadId) {
+      changedThreadIds.add(deleted.threadId);
+    }
+  }
+
+  const ids = Array.from(messageActions)
+    .filter(([, action]) => action === "upsert")
+    .map(([messageId]) => messageId);
   for (let start = 0; start < ids.length; start += 5) {
     const batch = ids.slice(start, start + 5);
     const gmailMessages = await Promise.all(
       batch.map(async (messageId) => {
         try {
-          return await getGmailMessage(options.accessToken, messageId);
+          return {
+            messageId,
+            message: await getGmailMessage(options.accessToken, messageId),
+          };
         } catch (error) {
-          if (error instanceof GmailApiError && error.status === 404) return null;
+          if (error instanceof GmailApiError && error.status === 404) {
+            return { messageId, message: null };
+          }
           throw error;
         }
       }),
     );
     for (const gmailMessage of gmailMessages) {
-      if (!gmailMessage) continue;
+      if (!gmailMessage.message) {
+        const deleted = await deleteIndexedMessage({
+          accountId: options.accountId,
+          providerMessageId: gmailMessage.messageId,
+        });
+        if (deleted.changed && deleted.threadId) {
+          changedThreadIds.add(deleted.threadId);
+        }
+        continue;
+      }
       const stored = await storeMessage({
         userId: options.userId,
         accountId: options.accountId,
         accountEmail: options.accountEmail,
-        message: parseGmailMessage(gmailMessage),
+        message: parseGmailMessage(gmailMessage.message),
         ingestionMode: "incremental",
       });
       if (stored.changed) changedThreadIds.add(stored.threadId);
@@ -1014,17 +1066,21 @@ function parseLabelManifest(value: unknown): LabelBatchManifestEntry[] {
     const definitionVersion =
       "definitionVersion" in entry ? entry.definitionVersion : undefined;
     const threadId = "threadId" in entry ? entry.threadId : undefined;
+    const threadVersion = "threadVersion" in entry ? entry.threadVersion : undefined;
     if (
       typeof key !== "string" ||
       typeof labelId !== "string" ||
       typeof definitionVersion !== "number" ||
       !Number.isInteger(definitionVersion) ||
       definitionVersion < 1 ||
-      typeof threadId !== "string"
+      typeof threadId !== "string" ||
+      typeof threadVersion !== "number" ||
+      !Number.isInteger(threadVersion) ||
+      threadVersion < 1
     ) {
       throw new Error("The label Batch manifest is invalid.");
     }
-    return { key, labelId, definitionVersion, threadId };
+    return { key, labelId, definitionVersion, threadId, threadVersion };
   });
 }
 
@@ -1264,9 +1320,31 @@ async function runLabelBatchEvent(job: ClaimedJob) {
     return { status: "superseded", reason: "label_deleted" };
   }
 
+  const currentThreads = await getThreadsForLabelRetry(
+    submission.accountId,
+    details.manifest.map((entry) => entry.threadId),
+  );
+  const currentVersions = new Map(
+    currentThreads.map((thread) => [thread.id, thread.contentVersion]),
+  );
+  const staleKeys = new Set(
+    details.manifest
+      .filter(
+        (entry) =>
+          currentVersions.get(entry.threadId) !== entry.threadVersion,
+      )
+      .map((entry) => entry.key),
+  );
   const failedKeys = new Set(batch.failedKeys);
-  const results: Array<{ threadId: string; matched: boolean; confidence: number }> = [];
+  const results: Array<{
+    threadId: string;
+    threadVersion: number;
+    matched: boolean;
+    confidence: number;
+  }> = [];
+  let savedThreadCount = 0;
   for (const entry of details.manifest) {
+    if (staleKeys.has(entry.key)) continue;
     if (failedKeys.has(entry.key)) continue;
     const candidate = batch.candidatesByKey.get(entry.key);
     if (
@@ -1279,6 +1357,7 @@ async function runLabelBatchEvent(job: ClaimedJob) {
     }
     results.push({
       threadId: candidate.threadId,
+      threadVersion: entry.threadVersion,
       matched: candidate.matched,
       confidence: candidate.confidence,
     });
@@ -1302,9 +1381,16 @@ async function runLabelBatchEvent(job: ClaimedJob) {
       });
       return { status: "superseded", reason: "label_deleted" };
     }
+    for (const threadId of saved.staleThreadIds) {
+      const entry = details.manifest.find((candidate) => candidate.threadId === threadId);
+      if (entry) staleKeys.add(entry.key);
+    }
+    savedThreadCount = saved.savedThreadCount;
   }
 
-  const failedManifest = details.manifest.filter((entry) => failedKeys.has(entry.key));
+  const failedManifest = details.manifest.filter(
+    (entry) => failedKeys.has(entry.key) && !staleKeys.has(entry.key),
+  );
   let nextJobId: string | null = null;
   if (failedManifest.length > 0 && details.batchAttempt < submission.maxAttempts) {
     nextJobId = await enqueueLabelBatchRetry({
@@ -1325,7 +1411,7 @@ async function runLabelBatchEvent(job: ClaimedJob) {
       definitionVersion: details.definitionVersion,
       state: "failed",
     });
-  } else if (details.continueBackfill) {
+  } else if (details.continueBackfill || staleKeys.size > 0) {
     nextJobId = await enqueueLabelBackfillContinuation({
       userId: submission.userId,
       accountId: submission.accountId,
@@ -1353,7 +1439,7 @@ async function runLabelBatchEvent(job: ClaimedJob) {
   return {
     status:
       failedManifest.length === 0
-        ? details.continueBackfill
+        ? nextJobId
           ? "continuation_queued"
           : "complete"
         : nextJobId
@@ -1362,7 +1448,8 @@ async function runLabelBatchEvent(job: ClaimedJob) {
     providerState: batch.state,
     provider: details.provider,
     providerError: batch.providerError,
-    analyzedThreadCount: results.length,
+    analyzedThreadCount: savedThreadCount,
+    staleThreadCount: staleKeys.size,
     failedRequestCount: failedManifest.length,
     nextJobId,
   };

@@ -165,6 +165,7 @@ export const threads = pgTable(
     labelIds: text("label_ids").array().notNull().default(sql`ARRAY[]::text[]`),
     latestMessageAt: timestampWithTimezone("latest_message_at"),
     messageCount: integer("message_count").notNull().default(0),
+    contentVersion: integer("content_version").notNull().default(1),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -178,6 +179,7 @@ export const threads = pgTable(
     ),
     index("threads_user_latest_idx").on(table.userId, table.latestMessageAt),
     check("threads_message_count_check", sql`${table.messageCount} >= 0`),
+    check("threads_content_version_check", sql`${table.contentVersion} > 0`),
   ],
 );
 
@@ -278,6 +280,7 @@ export const messages = pgTable(
     recipients: jsonb("recipients").$type<string[]>().notNull().default([]),
     labelIds: text("label_ids").array().notNull().default(sql`ARRAY[]::text[]`),
     subject: text("subject").notNull().default(""),
+    snippet: text("snippet").notNull().default(""),
     bodyText: text("body_text").notNull().default(""),
     sentAt: timestampWithTimezone("sent_at").notNull(),
     isMemoryEligible: boolean("is_memory_eligible").notNull().default(false),

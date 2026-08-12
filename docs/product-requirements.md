@@ -57,7 +57,7 @@ Google OAuth must:
 - encrypt refresh and access credentials before persistence;
 - queue full-mailbox indexing without blocking the callback.
 
-The first connection stores real normalized messages and thread metadata in PostgreSQL by following every Gmail result page. After that one-time crawl, the mailbox Refresh action and account reconnects use the saved Gmail history cursor to fetch newly added messages. Only changed threads are relabeled, and only new eligible owner-sent evidence is considered for incremental Memory. An expired history cursor triggers a full reread with change-aware upserts so unchanged stored mail does not become new evidence or lose its labels.
+The first connection stores real normalized messages and thread metadata in PostgreSQL by following every Gmail result page, including Spam and Trash. After that one-time crawl, the mailbox Refresh action and account reconnects use the saved Gmail history cursor to apply message additions, deletions, and Gmail label changes. Only threads whose indexed content changed are relabeled, and only new eligible owner-sent evidence is considered for incremental Memory. An expired history cursor triggers a full snapshot reconciliation with change-aware upserts and deletion handling, so unchanged stored mail does not become new evidence or lose its labels.
 
 ### Mail workspace
 
@@ -222,7 +222,7 @@ Current mailbox, label, Memory, and draft endpoints include:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/mailbox` | Return the connected mailbox workspace |
-| `POST` | `/v1/mailbox/sync` | Queue a Gmail history sync from the saved cursor |
+| `POST` | `/v1/mailbox/sync` | Run a worker-backed Gmail history sync from the saved cursor and return after its database job completes |
 | `POST` | `/v1/labels` | Create a label and queue its full indexed-mailbox backfill |
 | `DELETE` | `/v1/labels/:labelId` | Delete any account-owned label and its decisions |
 | `GET` | `/v1/memories` | Return the connected account's real Memory and status |
