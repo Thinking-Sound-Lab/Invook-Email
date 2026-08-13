@@ -5,7 +5,10 @@ import axios, {
 } from "axios";
 
 const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
+const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 export const GMAIL_MESSAGE_LIST_MAX_RESULTS = 500;
+export const GOOGLE_REAUTHENTICATION_REQUIRED_ERROR_CODE =
+  "provider_authentication_failed";
 
 export type GmailProfile = {
   emailAddress: string;
@@ -192,6 +195,12 @@ export class GmailApiError extends Error {
       cause: error,
     });
   }
+}
+
+export function isGoogleReauthenticationRequired(error: unknown): boolean {
+  if (!(error instanceof GmailApiError)) return false;
+  if (error.status === 401) return true;
+  return error.path === GOOGLE_TOKEN_ENDPOINT && error.code === "invalid_grant";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -517,7 +526,7 @@ export async function refreshGoogleAccessToken(options: {
   let result: RefreshResponse;
   try {
     const response = await axios.post<RefreshResponse>(
-      "https://oauth2.googleapis.com/token",
+      GOOGLE_TOKEN_ENDPOINT,
       new URLSearchParams({
         client_id: options.clientId,
         client_secret: options.clientSecret,
@@ -532,7 +541,7 @@ export async function refreshGoogleAccessToken(options: {
     throw GmailApiError.fromAxiosError(error, {
       operation: "Google token refresh",
       method: "POST",
-      path: "https://oauth2.googleapis.com/token",
+      path: GOOGLE_TOKEN_ENDPOINT,
     });
   }
 

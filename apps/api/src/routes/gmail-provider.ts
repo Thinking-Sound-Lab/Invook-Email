@@ -33,6 +33,7 @@ import { sendJson, sendProblem } from "../responses";
 import {
   getGmailProviderAccess,
   GmailProviderConfigurationError,
+  GmailProviderReconnectRequiredError,
   type GmailProviderAccess,
 } from "../services/gmail-provider";
 
@@ -137,6 +138,10 @@ async function providerAccess(
   } catch (error) {
     if (error instanceof GmailProviderConfigurationError) {
       await sendProblem(request, reply, 503, "Gmail provider writes are not configured");
+      return null;
+    }
+    if (error instanceof GmailProviderReconnectRequiredError) {
+      await sendProblem(request, reply, 409, "Gmail account must be reconnected");
       return null;
     }
     if (error instanceof GmailApiError) {

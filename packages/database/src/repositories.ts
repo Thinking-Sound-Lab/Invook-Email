@@ -44,6 +44,7 @@ import {
   gmailWatchStates,
   mailLabels,
   mailboxChangeEvents,
+  mailSyncRuns,
   memoryDeletions,
   memoryEntries,
   memoryPendingEvidence,
@@ -100,6 +101,13 @@ export class GmailLabelCatalogMismatchError extends Error {
     this.accountId = input.accountId;
     this.providerMessageId = input.providerMessageId;
     this.missingProviderLabelIds = input.missingProviderLabelIds;
+  }
+}
+
+export class InactiveMailSyncRunError extends Error {
+  constructor(runId: string) {
+    super(`Gmail synchronization run ${runId} is no longer active.`);
+    this.name = "InactiveMailSyncRunError";
   }
 }
 
@@ -288,9 +296,27 @@ type NewGmailConnectionInput = GmailAuthenticationInput & {
 type GmailAuthenticationAccount = {
   id: string;
   userId: string;
+  status: typeof connectedAccounts.$inferSelect.status;
   replicaState: typeof gmailReplicaStates.$inferSelect.state | null;
   historyCursor: string | null;
 };
+
+export function getReturningGmailAuthenticationAction(input: {
+  status: GmailAuthenticationAccount["status"];
+  replicaState: GmailAuthenticationAccount["replicaState"];
+  historyCursor: string | null;
+  currentHistoryId: string;
+}): "repair" | "catchup" | "none" {
+  if (input.status === "reconnect_required") return "repair";
+  if (
+    input.replicaState === "ready" &&
+    input.historyCursor &&
+    input.historyCursor !== input.currentHistoryId
+  ) {
+    return "catchup";
+  }
+  return "none";
+}
 
 async function lockGmailAuthentication(
   transaction: DatabaseTransaction,
@@ -309,6 +335,7 @@ async function findGmailAuthenticationAccount(
     .select({
       id: connectedAccounts.id,
       userId: connectedAccounts.userId,
+      status: connectedAccounts.status,
       replicaState: gmailReplicaStates.state,
       historyCursor: gmailReplicaStates.historyCursor,
     })
@@ -402,12 +429,25 @@ async function saveReturningGmailAuthentication(
     throw new Error("This Gmail account is already linked to another Invook user.");
   }
   await saveGmailProfileAndCredential(transaction, input, account.id);
+  const authenticationAction = getReturningGmailAuthenticationAction({
+    status: account.status,
+    replicaState: account.replicaState,
+    historyCursor: account.historyCursor,
+    currentHistoryId: input.currentHistoryId,
+  });
 
-  if (
-    account.replicaState === "ready" &&
-    account.historyCursor &&
-    account.historyCursor !== input.currentHistoryId
-  ) {
+  if (authenticationAction === "repair") {
+    await enqueueWorkflowStep(
+      {
+        userId: input.userId,
+        accountId: account.id,
+        stepType: "gmail.replica.audit",
+        payload: { reason: "oauth_reauthentication" },
+        idempotencyKey: `gmail-reconnect-recovery:${account.id}:${input.authenticatedAt.toISOString()}`,
+      },
+      transaction as unknown as Database,
+    );
+  } else if (authenticationAction === "catchup") {
     const [activeCatchup] = await transaction
       .select({ id: workflowSteps.id })
       .from(workflowSteps)
@@ -1656,8 +1696,29 @@ async function refreshIndexedThread(
 export async function upsertIndexedMessage(
   input: IndexedMessage,
   database: Database = getDatabase(),
+  activeRunId?: string,
 ) {
   return database.transaction(async (transaction) => {
+    if (activeRunId) {
+      const [activeRun] = await transaction
+        .select({ id: mailSyncRuns.id })
+        .from(mailSyncRuns)
+        .innerJoin(
+          connectedAccounts,
+          eq(connectedAccounts.id, mailSyncRuns.accountId),
+        )
+        .where(
+          and(
+            eq(mailSyncRuns.id, activeRunId),
+            eq(mailSyncRuns.accountId, input.accountId),
+            inArray(mailSyncRuns.status, ["queued", "running"]),
+            eq(connectedAccounts.status, "connected"),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!activeRun) throw new InactiveMailSyncRunError(activeRunId);
+    }
     await transaction.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerThreadId}`}, 0))`,
     );

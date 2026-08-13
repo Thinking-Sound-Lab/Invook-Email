@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { UnrecoverableError } from "bullmq";
+
 import {
   AiConfigurationError,
   deleteBatchFiles,
@@ -46,6 +48,7 @@ import {
   deleteIndexedMessage,
   completeMailSyncItem,
   completeMailSyncRun,
+  completeGmailSynchronizationRecovery,
   completeEmbeddingBatchSubmission,
   completeWorkflowStep,
   countFailedEmbeddings,
@@ -67,7 +70,6 @@ import {
   failMailboxActionProposalExecution,
   failMailboxActionTarget,
   failMailSyncItem,
-  failMailSyncRun,
   failWorkflowStep,
   getActiveEmbeddingBatchSubmissionForAccount,
   getEmbeddingCandidates,
@@ -87,6 +89,7 @@ import {
   getGmailReplicaInventory,
   getGmailWatchContext,
   GmailLabelCatalogMismatchError,
+  InactiveMailSyncRunError,
   isActiveMailSyncRun,
   saveLabelBatchResults,
   setLabelAnalysisState,
@@ -159,8 +162,10 @@ import { createObjectStorage } from "@invook/object-storage";
 import {
   BullQueueRuntime,
   gmailControlConcurrency,
+  isBullMqStalledTerminalFailure,
   type WorkflowJob,
 } from "./queue";
+import { classifyGmailWorkflowFailure } from "./gmail-workflow-failure";
 import {
   findGmailLabelMembershipMismatches,
   type GmailLabelMembershipSnapshot,
@@ -388,9 +393,12 @@ async function withRefreshedGmailLabelCatalog<T>(
 }
 
 async function storeMessage(
-  options: Parameters<typeof prepareMessage>[0] & { accessToken: string },
+  options: Parameters<typeof prepareMessage>[0] & {
+    accessToken: string;
+    activeRunId?: string;
+  },
 ) {
-  const { accessToken, ...messageOptions } = options;
+  const { accessToken, activeRunId, ...messageOptions } = options;
   const message = await prepareMessage(messageOptions);
   return withRefreshedGmailLabelCatalog(
     {
@@ -398,7 +406,7 @@ async function storeMessage(
       userId: messageOptions.userId,
       accountId: messageOptions.accountId,
     },
-    () => upsertMailboxMessage(message),
+    () => upsertMailboxMessage(message, undefined, activeRunId),
   );
 }
 
@@ -877,14 +885,20 @@ async function runGmailMessage(job: WorkflowStepJob) {
       providerMessageId,
     };
   }
-  await storeMessage({
-    accessToken: credential.accessToken,
-    userId: account.userId,
-    accountId: account.id,
-    accountEmail: account.email,
-    ingestionMode: "initial",
-    message: await parseGmailMessage(gmailMessage),
-  });
+  try {
+    await storeMessage({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      ingestionMode: "initial",
+      message: await parseGmailMessage(gmailMessage),
+      activeRunId: runId,
+    });
+  } catch (error) {
+    if (!(error instanceof InactiveMailSyncRunError)) throw error;
+    return { status: "inactive", runId, providerMessageId };
+  }
   const completed = await completeMailSyncItem(runId, providerMessageId);
   return {
     status: completed ? "complete" : "inactive",
@@ -1553,7 +1567,14 @@ async function runGmailHistoryCatchup(job: WorkflowStepJob) {
     resumeNonReady: job.attempts > 1,
     markStoredPushEventsProcessed,
   });
-  if (result.status === "complete" || result.status === "repaired") {
+  if (
+    (result.status === "complete" || result.status === "repaired") &&
+    typeof result.historyCursor === "string"
+  ) {
+    await completeGmailSynchronizationRecovery({
+      accountId: job.accountId,
+      historyCursor: result.historyCursor,
+    });
     await enqueuePendingAnalysisWorkflowSteps();
   }
   return result;
@@ -1577,7 +1598,14 @@ async function runGmailWatchRenewal(job: WorkflowStepJob) {
     }),
   });
   const catchup = renewal.catchup;
-  if (catchup.status === "complete" || catchup.status === "repaired") {
+  if (
+    (catchup.status === "complete" || catchup.status === "repaired") &&
+    typeof catchup.historyCursor === "string"
+  ) {
+    await completeGmailSynchronizationRecovery({
+      accountId: account.id,
+      historyCursor: catchup.historyCursor,
+    });
     await enqueuePendingAnalysisWorkflowSteps();
   }
   return {
@@ -1589,23 +1617,53 @@ async function runGmailWatchRenewal(job: WorkflowStepJob) {
 
 async function runGmailReplicaAudit(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Gmail replica audit has no account.");
+  const isReconnectRecovery = job.payload.reason === "oauth_reauthentication";
   const catchup = await catchUpGmailHistory({
     accountId: job.accountId,
     resumeNonReady: true,
   });
   if (catchup.status === "deferred") return catchup;
-  const { account, credential } = await getMailSyncContext(job.accountId);
-  const auditId = await runReplicaAudit({
-    accessToken: credential.accessToken,
-    userId: account.userId,
-    accountId: account.id,
-    accountEmail: account.email,
-    trigger: "manual",
+  let historyCursor: string;
+  let auditId: string;
+  if (
+    catchup.status === "repaired" &&
+    "auditId" in catchup &&
+    typeof catchup.auditId === "string" &&
+    typeof catchup.historyCursor === "string"
+  ) {
+    historyCursor = catchup.historyCursor;
+    auditId = catchup.auditId;
+  } else {
+    const { account, credential } = await getMailSyncContext(job.accountId);
+    auditId = await runReplicaAudit({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      trigger: "manual",
+    });
+    const replica = await getGmailReplicaContext(account.id);
+    const currentHistoryCursor =
+      replica?.historyCursor ?? replica?.initialHistoryId;
+    if (!currentHistoryCursor) {
+      throw new Error("The Gmail replica cursor was not found.");
+    }
+    historyCursor = currentHistoryCursor;
+    await markGmailReplicaReady({
+      accountId: account.id,
+      historyCursor,
+      auditId,
+    });
+  }
+  const completed = await completeGmailSynchronizationRecovery({
+    accountId: job.accountId,
+    historyCursor,
   });
-  const replica = await getGmailReplicaContext(account.id);
-  const historyCursor = replica?.historyCursor ?? replica?.initialHistoryId;
-  if (!historyCursor) throw new Error("The Gmail replica cursor was not found.");
-  await markGmailReplicaReady({ accountId: account.id, historyCursor, auditId });
+  if (!completed) return { status: "inactive", historyCursor, auditId };
+  if (isReconnectRecovery) {
+    await enqueuePostSyncWorkflowSteps();
+    await enqueuePendingAnalysisWorkflowSteps();
+  }
   return { status: "complete", historyCursor, auditId };
 }
 
@@ -3128,7 +3186,12 @@ async function persistWorkflowFailure(
   terminal: boolean,
   reconnectRequired: boolean,
 ) {
-  const stepUpdated = await failWorkflowStep({ step: job, message, terminal });
+  const stepUpdated = await failWorkflowStep({
+    step: job,
+    message,
+    terminal,
+    reconnectRequired,
+  });
   if (!stepUpdated) return;
   if (job.stepType === "gmail.action.execute" && terminal) {
     const proposalId =
@@ -3141,7 +3204,7 @@ async function persistWorkflowFailure(
           : "execution_failed",
       });
     }
-  } else if (job.stepType === "gmail.sync.message" && job.runId) {
+  } else if (!terminal && job.stepType === "gmail.sync.message" && job.runId) {
     await failMailSyncItem({
       runId: job.runId,
       providerMessageId: requiredString(
@@ -3153,12 +3216,6 @@ async function persistWorkflowFailure(
       terminal,
       reconnectRequired,
     });
-  } else if (
-    terminal &&
-    job.runId &&
-    ["gmail.sync.page", "gmail.sync.finalize"].includes(job.stepType)
-  ) {
-    await failMailSyncRun({ runId: job.runId, message, reconnectRequired });
   }
 }
 
@@ -3173,11 +3230,15 @@ function workflowStepFromBullJob(bullJob: WorkflowJob): WorkflowStepJob {
 
 async function reconcileTerminalQueueFailure(bullJob: WorkflowJob, error: Error) {
   const job = workflowStepFromBullJob(bullJob);
+  const message =
+    isBullMqStalledTerminalFailure(error) && job.stepType.startsWith("gmail.")
+      ? "gmail_workflow_stalled"
+      : error.message || "BullMQ reported a terminal workflow failure.";
   await persistWorkflowFailure(
     job,
-    error.message || "BullMQ reported a terminal workflow failure.",
+    message,
     true,
-    error instanceof GmailApiError && error.status === 401,
+    false,
   );
 }
 
@@ -3198,10 +3259,19 @@ async function executeWorkflowJob(
     await completeWorkflowStep(job.id, result);
     return result;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown worker failure";
-    const terminal = job.attempts >= job.maxAttempts;
-    const reconnectRequired = error instanceof GmailApiError && error.status === 401;
-    await persistWorkflowFailure(job, message, terminal, reconnectRequired);
+    const failure = classifyGmailWorkflowFailure(error, {
+      attempt: job.attempts,
+      maxAttempts: job.maxAttempts,
+    });
+    await persistWorkflowFailure(
+      job,
+      failure.persistedMessage,
+      failure.isTerminal,
+      failure.isReconnectRequired,
+    );
+    if (failure.isReconnectRequired) {
+      throw new UnrecoverableError(failure.persistedMessage);
+    }
     throw error;
   }
 }

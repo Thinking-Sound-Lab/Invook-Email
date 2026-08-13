@@ -30,6 +30,22 @@ type WorkerRegistrationOptions = {
   onTerminalFailureReconciliationError?: (error: Error) => void;
 };
 
+export function isBullMqStalledTerminalFailure(error: Error): boolean {
+  return /^job stalled more than allowable limit\b/i.test(error.message.trim());
+}
+
+export function isTerminalQueueFailure(
+  job: Pick<WorkflowJob, "attemptsMade" | "opts"> | undefined,
+  error: Error,
+): boolean {
+  const configuredAttempts = job?.opts.attempts ?? 1;
+  return (
+    error.name === "UnrecoverableError" ||
+    isBullMqStalledTerminalFailure(error) ||
+    Boolean(job && job.attemptsMade >= configuredAttempts)
+  );
+}
+
 export class BullQueueRuntime {
   private readonly connection: IORedis;
   private readonly queues = new Map<QueueName, Queue<WorkflowStepJob>>();
@@ -156,10 +172,7 @@ export class BullQueueRuntime {
       });
     });
     worker.on("failed", (job, error) => {
-      const configuredAttempts = job?.opts.attempts ?? 1;
-      const terminal =
-        error.name === "UnrecoverableError" ||
-        Boolean(job && job.attemptsMade >= configuredAttempts);
+      const terminal = isTerminalQueueFailure(job, error);
       console.error("worker: BullMQ step failed", {
         queueName,
         stepId: job?.id,

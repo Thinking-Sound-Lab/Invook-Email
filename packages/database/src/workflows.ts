@@ -6,7 +6,8 @@ import {
   eq,
   inArray,
   isNull,
-  ne,
+  not,
+  or,
   sql,
 } from "drizzle-orm";
 
@@ -44,6 +45,23 @@ export type OutboxJob = WorkflowStepJob & {
   queueName: QueueName;
 };
 
+const gmailConnectedAccountStepTypes = [
+  "gmail.sync.page",
+  "gmail.sync.message",
+  "gmail.sync.finalize",
+  "gmail.history.catchup",
+  "gmail.watch.renew",
+  "gmail.replica.audit",
+  "gmail.action.execute",
+] as const;
+
+const gmailReplicaStepTypes = [
+  "gmail.history.catchup",
+  "gmail.watch.renew",
+  "gmail.replica.audit",
+] as const;
+const gmailReplicaStepTypeSet = new Set<string>(gmailReplicaStepTypes);
+
 async function lockMailSyncRun(
   input: { runId: string; accountId?: string; allowCompleted?: boolean },
   database: Database,
@@ -70,6 +88,161 @@ async function lockMailSyncRun(
     .for("update")
     .limit(1);
   return run ?? null;
+}
+
+async function terminalizeMailSyncRun(
+  input: {
+    runId: string;
+    message: string;
+    failedAt: Date;
+  },
+  database: Database,
+): Promise<{ accountId: string } | null> {
+  const run = await lockMailSyncRun({ runId: input.runId }, database);
+  if (!run) return null;
+
+  await database
+    .update(gmailSyncItems)
+    .set({
+      status: "failed",
+      lastError: input.message,
+      completedAt: input.failedAt,
+      updatedAt: input.failedAt,
+    })
+    .where(
+      and(
+        eq(gmailSyncItems.runId, input.runId),
+        inArray(gmailSyncItems.status, ["queued", "running"]),
+      ),
+    );
+  await database
+    .update(workflowSteps)
+    .set({
+      status: "failed",
+      lastError: input.message,
+      completedAt: input.failedAt,
+      updatedAt: input.failedAt,
+    })
+    .where(
+      and(
+        eq(workflowSteps.runId, input.runId),
+        inArray(workflowSteps.status, ["queued", "running"]),
+      ),
+    );
+
+  const counts = await getItemCounts(input.runId, database);
+  await database
+    .update(mailSyncRuns)
+    .set({
+      status: "failed",
+      discoveredMessageCount: counts.total,
+      processedMessageCount: counts.complete,
+      failedMessageCount: counts.failed,
+      lastError: input.message,
+      completedAt: input.failedAt,
+      updatedAt: input.failedAt,
+    })
+    .where(eq(mailSyncRuns.id, input.runId));
+  const [account] = await database
+    .update(connectedAccounts)
+    .set({
+      syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{mailSync}', to_jsonb(${"failed"}::text), true)`,
+      updatedAt: input.failedAt,
+    })
+    .where(eq(connectedAccounts.id, run.accountId))
+    .returning({ syncState: connectedAccounts.syncState });
+  await database
+    .update(gmailReplicaStates)
+    .set({ state: "failed", lastError: input.message, updatedAt: input.failedAt })
+    .where(eq(gmailReplicaStates.accountId, run.accountId));
+  if (account) {
+    await database.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: run.accountId, state: account.syncState.indexing })})`,
+    );
+  }
+  return { accountId: run.accountId };
+}
+
+async function terminalizeGmailAccountForReconnect(
+  input: { accountId: string; message: string; failedAt: Date },
+  database: Database,
+): Promise<boolean> {
+  const activeRuns = await database
+    .select({ id: mailSyncRuns.id })
+    .from(mailSyncRuns)
+    .where(
+      and(
+        eq(mailSyncRuns.accountId, input.accountId),
+        inArray(mailSyncRuns.status, ["queued", "running"]),
+      ),
+    );
+  for (const run of activeRuns) {
+    await terminalizeMailSyncRun(
+      {
+        runId: run.id,
+        message: input.message,
+        failedAt: input.failedAt,
+      },
+      database,
+    );
+  }
+
+  await database
+    .update(workflowSteps)
+    .set({
+      status: "failed",
+      lastError: input.message,
+      completedAt: input.failedAt,
+      updatedAt: input.failedAt,
+    })
+    .where(
+      and(
+        eq(workflowSteps.accountId, input.accountId),
+        inArray(workflowSteps.stepType, [...gmailConnectedAccountStepTypes]),
+        inArray(workflowSteps.status, ["queued", "running"]),
+      ),
+    );
+  const [account] = await database
+    .update(connectedAccounts)
+    .set({
+      status: "reconnect_required",
+      syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{mailSync}', to_jsonb(${"failed"}::text), true)`,
+      updatedAt: input.failedAt,
+    })
+    .where(
+      and(
+        eq(connectedAccounts.id, input.accountId),
+        not(eq(connectedAccounts.status, "disconnected")),
+      ),
+    )
+    .returning({
+      id: connectedAccounts.id,
+      syncState: connectedAccounts.syncState,
+    });
+  if (!account) return false;
+  await database
+    .update(gmailReplicaStates)
+    .set({ state: "failed", lastError: input.message, updatedAt: input.failedAt })
+    .where(eq(gmailReplicaStates.accountId, input.accountId));
+  if (activeRuns.length === 0) {
+    await database.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.accountId, state: account.syncState.indexing })})`,
+    );
+  }
+  return true;
+}
+
+export async function markGmailAccountReconnectRequired(
+  input: { accountId: string; errorCode: string },
+  database: Database = getDatabase(),
+): Promise<boolean> {
+  const message = toPostgresTextProjection(input.errorCode);
+  return database.transaction((transaction) =>
+    terminalizeGmailAccountForReconnect(
+      { accountId: input.accountId, message, failedAt: new Date() },
+      transaction as unknown as Database,
+    ),
+  );
 }
 
 export function queueNameForStepType(stepType: string): QueueName {
@@ -421,6 +594,28 @@ export async function markWorkflowStepRunning(
       and(
         eq(workflowSteps.id, stepId),
         inArray(workflowSteps.status, ["queued", "running"]),
+        or(
+          not(
+            inArray(workflowSteps.stepType, [
+              ...gmailConnectedAccountStepTypes,
+            ]),
+          ),
+          sql`exists (
+            select 1
+            from ${connectedAccounts}
+            where ${connectedAccounts.id} = ${workflowSteps.accountId}
+              and ${connectedAccounts.status} = 'connected'
+          )`,
+        ),
+        or(
+          isNull(workflowSteps.runId),
+          sql`exists (
+            select 1
+            from ${mailSyncRuns}
+            where ${mailSyncRuns.id} = ${workflowSteps.runId}
+              and ${mailSyncRuns.status} in ('queued', 'running')
+          )`,
+        ),
       ),
     )
     .returning({ id: workflowSteps.id });
@@ -515,6 +710,7 @@ export async function failWorkflowStep(
     step: WorkflowStepJob;
     message: string;
     terminal: boolean;
+    reconnectRequired?: boolean;
   },
   database: Database = getDatabase(),
 ) {
@@ -534,12 +730,31 @@ export async function failWorkflowStep(
       .where(
         and(
           eq(workflowSteps.id, input.step.id),
-          ne(workflowSteps.status, "complete"),
+          inArray(workflowSteps.status, ["queued", "running"]),
         ),
       )
       .returning({ id: workflowSteps.id });
 
     if (!updatedStep) return false;
+    if (input.terminal && input.step.accountId && input.reconnectRequired) {
+      await terminalizeGmailAccountForReconnect(
+        {
+          accountId: input.step.accountId,
+          message,
+          failedAt,
+        },
+        executor,
+      );
+    } else if (input.terminal && input.step.runId) {
+      await terminalizeMailSyncRun(
+        {
+          runId: input.step.runId,
+          message,
+          failedAt,
+        },
+        executor,
+      );
+    }
     if (input.step.stepType === "gmail.account.cleanup") {
       const cleanupId =
         typeof input.step.payload.cleanupId === "string"
@@ -559,10 +774,9 @@ export async function failWorkflowStep(
     }
     if (
       input.terminal &&
+      !input.reconnectRequired &&
       input.step.accountId &&
-      ["gmail.history.catchup", "gmail.watch.renew", "gmail.replica.audit"].includes(
-        input.step.stepType,
-      )
+      gmailReplicaStepTypeSet.has(input.step.stepType)
     ) {
       await transaction
         .update(gmailReplicaStates)
@@ -572,9 +786,17 @@ export async function failWorkflowStep(
           updatedAt: failedAt,
         })
         .where(eq(gmailReplicaStates.accountId, input.step.accountId));
+      await transaction
+        .update(connectedAccounts)
+        .set({
+          syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{mailSync}', to_jsonb(${"failed"}::text), true)`,
+          updatedAt: failedAt,
+        })
+        .where(eq(connectedAccounts.id, input.step.accountId));
     }
     if (
       input.terminal &&
+      !input.reconnectRequired &&
       input.step.stepType === "gmail.watch.renew" &&
       input.step.accountId
     ) {
@@ -711,6 +933,12 @@ export async function startMailSyncRun(
           eq(mailSyncRuns.id, runId),
           eq(mailSyncRuns.accountId, accountId),
           inArray(mailSyncRuns.status, ["queued", "running"]),
+          sql`exists (
+            select 1
+            from ${connectedAccounts}
+            where ${connectedAccounts.id} = ${accountId}
+              and ${connectedAccounts.status} = 'connected'
+          )`,
         ),
       )
       .returning({ accountId: mailSyncRuns.accountId });
@@ -721,7 +949,12 @@ export async function startMailSyncRun(
         syncState: { mailSync: "running", indexing: "pending", memory: "pending" },
         updatedAt: new Date(),
       })
-      .where(eq(connectedAccounts.id, run.accountId));
+      .where(
+        and(
+          eq(connectedAccounts.id, run.accountId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      );
     return true;
   });
 }
@@ -1041,14 +1274,20 @@ export async function failMailSyncItem(
       .returning({ id: gmailSyncItems.id });
     if (!item) return false;
     if (input.terminal) {
-      await failMailSyncRun(
+      const run = await terminalizeMailSyncRun(
         {
           runId: input.runId,
           message,
-          reconnectRequired: input.reconnectRequired,
+          failedAt: new Date(),
         },
         executor,
       );
+      if (run && input.reconnectRequired) {
+        await terminalizeGmailAccountForReconnect(
+          { accountId: run.accountId, message, failedAt: new Date() },
+          executor,
+        );
+      }
     }
     return true;
   });
@@ -1059,35 +1298,23 @@ export async function failMailSyncRun(
   database: Database = getDatabase(),
 ) {
   const message = toPostgresTextProjection(input.message);
-  const [run] = await database
-    .update(mailSyncRuns)
-    .set({
-      status: "failed",
-      lastError: message,
-      completedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(mailSyncRuns.id, input.runId),
-        inArray(mailSyncRuns.status, ["queued", "running"]),
-      ),
-    )
-    .returning({ accountId: mailSyncRuns.accountId });
-  if (!run) return;
   await database.transaction(async (transaction) => {
-    await transaction
-      .update(connectedAccounts)
-      .set({
-        status: input.reconnectRequired ? "reconnect_required" : "connected",
-        syncState: { mailSync: "failed", indexing: "pending", memory: "pending" },
-        updatedAt: new Date(),
-      })
-      .where(eq(connectedAccounts.id, run.accountId));
-    await transaction
-      .update(gmailReplicaStates)
-      .set({ state: "failed", lastError: message, updatedAt: new Date() })
-      .where(eq(gmailReplicaStates.accountId, run.accountId));
+    const executor = transaction as unknown as Database;
+    const failedAt = new Date();
+    const run = await terminalizeMailSyncRun(
+      {
+        runId: input.runId,
+        message,
+        failedAt,
+      },
+      executor,
+    );
+    if (run && input.reconnectRequired) {
+      await terminalizeGmailAccountForReconnect(
+        { accountId: run.accountId, message, failedAt },
+        executor,
+      );
+    }
   });
 }
 
@@ -1106,8 +1333,13 @@ export async function completeMailSyncRun(
         replicaState: gmailReplicaStates.state,
         replicaCursor: gmailReplicaStates.historyCursor,
         replicaLastAuditAt: gmailReplicaStates.lastAuditAt,
+        accountStatus: connectedAccounts.status,
       })
       .from(mailSyncRuns)
+      .innerJoin(
+        connectedAccounts,
+        eq(connectedAccounts.id, mailSyncRuns.accountId),
+      )
       .innerJoin(
         gmailReplicaStates,
         eq(gmailReplicaStates.accountId, mailSyncRuns.accountId),
@@ -1117,7 +1349,8 @@ export async function completeMailSyncRun(
       .limit(1);
     if (
       !run ||
-      (run.status !== "queued" && run.status !== "running")
+      (run.status !== "queued" && run.status !== "running") ||
+      run.accountStatus !== "connected"
     ) {
       return false;
     }
@@ -1175,6 +1408,56 @@ export async function completeMailSyncRun(
         labels,
       }),
       executor,
+    );
+    return true;
+  });
+}
+
+export async function completeGmailSynchronizationRecovery(
+  input: { accountId: string; historyCursor: string },
+  database: Database = getDatabase(),
+): Promise<boolean> {
+  return database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({
+        status: connectedAccounts.status,
+        replicaState: gmailReplicaStates.state,
+        historyCursor: gmailReplicaStates.historyCursor,
+        lastAuditAt: gmailReplicaStates.lastAuditAt,
+      })
+      .from(connectedAccounts)
+      .innerJoin(
+        gmailReplicaStates,
+        eq(gmailReplicaStates.accountId, connectedAccounts.id),
+      )
+      .where(eq(connectedAccounts.id, input.accountId))
+      .for("update")
+      .limit(1);
+    if (
+      !account ||
+      account.status !== "connected" ||
+      account.replicaState !== "ready" ||
+      account.historyCursor !== input.historyCursor ||
+      !account.lastAuditAt
+    ) {
+      return false;
+    }
+
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{mailSync}', to_jsonb(${"complete"}::text), true)`,
+        lastSyncedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      );
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.accountId, state: "pending" })})`,
     );
     return true;
   });
