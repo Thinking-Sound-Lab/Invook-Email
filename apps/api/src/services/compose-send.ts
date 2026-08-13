@@ -7,6 +7,7 @@ import {
   completeGmailDraftWrite,
   enqueueGmailHistoryCatchup,
   prepareGmailDraftSend,
+  withGmailDraftSendLock,
   type BeginGmailDraftWriteResult,
   type GmailDraftWriteResult,
 } from "@invook/database";
@@ -36,6 +37,7 @@ export interface SendComposeDraftInput {
 }
 
 export interface ComposeSendDependencies {
+  withSendLock: typeof withGmailDraftSendLock;
   beginWrite: typeof beginGmailDraftWrite;
   prepareSend: typeof prepareGmailDraftSend;
   completeWrite: typeof completeGmailDraftWrite;
@@ -47,6 +49,7 @@ export interface ComposeSendDependencies {
 }
 
 const defaultDependencies: ComposeSendDependencies = {
+  withSendLock: withGmailDraftSendLock,
   beginWrite: beginGmailDraftWrite,
   prepareSend: prepareGmailDraftSend,
   completeWrite: completeGmailDraftWrite,
@@ -243,9 +246,9 @@ async function recoverPreparedSend(
   );
 }
 
-export async function sendComposeDraft(
+async function sendComposeDraftWithLock(
   input: SendComposeDraftInput,
-  dependencies: ComposeSendDependencies = defaultDependencies,
+  dependencies: ComposeSendDependencies,
 ): Promise<GmailComposeSendResponse> {
   const write = await dependencies.beginWrite({
     userId: input.userId,
@@ -267,5 +270,15 @@ export async function sendComposeDraft(
     input,
     { ...write, result: write.result },
     dependencies,
+  );
+}
+
+export async function sendComposeDraft(
+  input: SendComposeDraftInput,
+  dependencies: ComposeSendDependencies = defaultDependencies,
+): Promise<GmailComposeSendResponse> {
+  return dependencies.withSendLock(
+    { userId: input.userId, idempotencyKey: input.idempotencyKey },
+    () => sendComposeDraftWithLock(input, dependencies),
   );
 }

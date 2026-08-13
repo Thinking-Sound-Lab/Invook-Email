@@ -44,8 +44,24 @@ function memoryDependencies(input: {
 } {
   let stored: BeginGmailDraftWriteResult | null = null;
   let isSent = false;
+  let precedingLock = Promise.resolve();
   const counts = { send: 0, catchup: 0 };
   const dependencies: ComposeSendDependencies = {
+    withSendLock: async (_lockInput, operation) => {
+      const preceding = precedingLock;
+      let releaseLock = (): void => {
+        throw new Error("The test send lock was not initialized.");
+      };
+      precedingLock = new Promise<void>((resolve) => {
+        releaseLock = resolve;
+      });
+      await preceding;
+      try {
+        return await operation();
+      } finally {
+        releaseLock();
+      }
+    },
     beginWrite: async () => {
       if (stored) return stored;
       stored = { outcome: "claimed", operationId: "operation-1" };
@@ -122,6 +138,18 @@ test("an exact send retry does not send the Gmail draft twice", async () => {
   assert.equal(first.message.providerMessageId, "provider-sent-message");
   assert.equal(counts.send, 1);
   assert.equal(counts.catchup, 2);
+});
+
+test("concurrent exact sends are serialized before the provider write", async () => {
+  const { dependencies, counts } = memoryDependencies();
+
+  const [first, duplicate] = await Promise.all([
+    sendComposeDraft(sendInput, dependencies),
+    sendComposeDraft(sendInput, dependencies),
+  ]);
+
+  assert.deepEqual(duplicate, first);
+  assert.equal(counts.send, 1);
 });
 
 test("a catch-up retry reuses the completed provider send", async () => {

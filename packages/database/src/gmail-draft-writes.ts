@@ -1,4 +1,4 @@
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 
 import {
   getDatabase,
@@ -32,6 +32,20 @@ export class GmailDraftWriteConflictError extends Error {
     super("The idempotency key was already used for a different Gmail draft write.");
     this.name = "GmailDraftWriteConflictError";
   }
+}
+
+export async function withGmailDraftSendLock<Result>(
+  input: { userId: string; idempotencyKey: string },
+  operation: () => Promise<Result>,
+  database: Database = getDatabase(),
+): Promise<Result> {
+  const lockKey = `gmail-draft-send:${input.userId}:${input.idempotencyKey}`;
+  return database.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`,
+    );
+    return operation();
+  });
 }
 
 export async function beginGmailDraftWrite(
