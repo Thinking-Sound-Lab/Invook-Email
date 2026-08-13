@@ -19,11 +19,18 @@ export type EmbeddingContinuationDecision =
   | { stage: "failed"; continuation: null }
   | {
       stage: "running";
-      continuation: {
-        reason: "next" | "retry";
-        includeFailed: boolean;
-        batchAttempt: number;
-      };
+      continuation:
+        | {
+            reason: "next";
+            includeFailed: false;
+            batchAttempt: 1;
+          }
+        | {
+            reason: "retry";
+            includeFailed: true;
+            batchAttempt: number;
+            messageIds: string[];
+          };
     };
 
 export function areIndexingPrerequisitesReady(
@@ -77,9 +84,9 @@ export function deriveIndexingProgress(input: {
 
 export function decideEmbeddingContinuation(input: {
   prerequisites: IndexingPrerequisiteState;
-  hasMore: boolean;
   incompleteMessageCount: number;
   failedMessageCount: number;
+  currentFailedMessageIds: string[];
   batchAttempt: number;
   batchAttemptLimit: number;
 }): EmbeddingContinuationDecision {
@@ -89,17 +96,24 @@ export function decideEmbeddingContinuation(input: {
   if (input.incompleteMessageCount === 0) {
     return { stage: "complete", continuation: null };
   }
-  if (input.failedMessageCount > 0) {
-    return input.batchAttempt < input.batchAttemptLimit
-      ? {
-          stage: "running",
-          continuation: {
-            reason: "retry",
-            includeFailed: true,
-            batchAttempt: input.batchAttempt + 1,
-          },
-        }
-      : { stage: "failed", continuation: null };
+  if (
+    input.currentFailedMessageIds.length > 0 &&
+    input.batchAttempt < input.batchAttemptLimit
+  ) {
+    return {
+      stage: "running",
+      continuation: {
+        reason: "retry",
+        includeFailed: true,
+        batchAttempt: input.batchAttempt + 1,
+        messageIds: input.currentFailedMessageIds,
+      },
+    };
+  }
+  const pendingMessageCount =
+    input.incompleteMessageCount - input.failedMessageCount;
+  if (pendingMessageCount <= 0) {
+    return { stage: "failed", continuation: null };
   }
   return {
     stage: "running",

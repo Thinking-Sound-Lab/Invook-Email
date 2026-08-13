@@ -4139,9 +4139,9 @@ export async function finalizeEmbeddingBatchSubmission(
       progress.totalMessageCount - progress.completedMessageCount;
     const decision = decideEmbeddingContinuation({
       prerequisites,
-      hasMore: submission.hasMore,
       incompleteMessageCount,
       failedMessageCount: progress.failedMessageCount,
+      currentFailedMessageIds: input.failedValues.map((value) => value.messageId),
       batchAttempt: submission.batchAttempt,
       batchAttemptLimit: input.batchAttemptLimit,
     });
@@ -4156,6 +4156,9 @@ export async function finalizeEmbeddingBatchSubmission(
               indexVersion: submission.indexVersion,
               includeFailed: decision.continuation.includeFailed,
               batchAttempt: decision.continuation.batchAttempt,
+              ...(decision.continuation.reason === "retry"
+                ? { messageIds: decision.continuation.messageIds }
+                : {}),
             },
             idempotencyKey: `embedding.backfill.continue:${decision.continuation.reason}:${submission.providerBatchId}`,
           },

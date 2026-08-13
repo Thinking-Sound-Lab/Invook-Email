@@ -134,6 +134,13 @@
       "when": 1786630851933,
       "tag": "0018_left_gorgon",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786635291678,
+      "tag": "0019_sweet_talkback",
+      "breakpoints": true
     }
   ]
 }

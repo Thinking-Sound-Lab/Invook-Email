@@ -18,9 +18,9 @@ test("a completed 2,000-item batch durably continues when current messages remai
   assert.deepEqual(
     decideEmbeddingContinuation({
       prerequisites: readyPrerequisites,
-      hasMore: true,
       incompleteMessageCount: 573,
       failedMessageCount: 0,
+      currentFailedMessageIds: [],
       batchAttempt: 1,
       batchAttemptLimit: 3,
     }),
@@ -54,12 +54,13 @@ test("duplicate webhook delivery uses one durable correlation key", () => {
 });
 
 test("provider request failures retry with a bounded batch attempt", () => {
+  const failedMessageIds = ["failed-message-1", "failed-message-2"];
   assert.deepEqual(
     decideEmbeddingContinuation({
       prerequisites: readyPrerequisites,
-      hasMore: false,
-      incompleteMessageCount: 2_000,
-      failedMessageCount: 2_000,
+      incompleteMessageCount: 2,
+      failedMessageCount: 2,
+      currentFailedMessageIds: failedMessageIds,
       batchAttempt: 1,
       batchAttemptLimit: 3,
     }),
@@ -69,15 +70,16 @@ test("provider request failures retry with a bounded batch attempt", () => {
         reason: "retry",
         includeFailed: true,
         batchAttempt: 2,
+        messageIds: failedMessageIds,
       },
     },
   );
   assert.deepEqual(
     decideEmbeddingContinuation({
       prerequisites: readyPrerequisites,
-      hasMore: false,
-      incompleteMessageCount: 2_000,
-      failedMessageCount: 2_000,
+      incompleteMessageCount: 2,
+      failedMessageCount: 2,
+      currentFailedMessageIds: failedMessageIds,
       batchAttempt: 3,
       batchAttemptLimit: 3,
     }),
@@ -85,13 +87,56 @@ test("provider request failures retry with a bounded batch attempt", () => {
   );
 });
 
+test("each failure slice receives its own retry budget", () => {
+  const firstFailureSlice = ["first-slice-message"];
+  const secondFailureSlice = ["second-slice-message"];
+
+  assert.deepEqual(
+    decideEmbeddingContinuation({
+      prerequisites: readyPrerequisites,
+      incompleteMessageCount: 4_000,
+      failedMessageCount: 2_000,
+      currentFailedMessageIds: firstFailureSlice,
+      batchAttempt: 3,
+      batchAttemptLimit: 3,
+    }),
+    {
+      stage: "running",
+      continuation: {
+        reason: "next",
+        includeFailed: false,
+        batchAttempt: 1,
+      },
+    },
+  );
+  assert.deepEqual(
+    decideEmbeddingContinuation({
+      prerequisites: readyPrerequisites,
+      incompleteMessageCount: 4_000,
+      failedMessageCount: 4_000,
+      currentFailedMessageIds: secondFailureSlice,
+      batchAttempt: 1,
+      batchAttemptLimit: 3,
+    }),
+    {
+      stage: "running",
+      continuation: {
+        reason: "retry",
+        includeFailed: true,
+        batchAttempt: 2,
+        messageIds: secondFailureSlice,
+      },
+    },
+  );
+});
+
 test("zero candidates and no incomplete messages complete indexing", () => {
   assert.deepEqual(
     decideEmbeddingContinuation({
       prerequisites: readyPrerequisites,
-      hasMore: false,
       incompleteMessageCount: 0,
       failedMessageCount: 0,
+      currentFailedMessageIds: [],
       batchAttempt: 1,
       batchAttemptLimit: 3,
     }),

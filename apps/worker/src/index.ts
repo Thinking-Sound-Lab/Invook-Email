@@ -1695,7 +1695,11 @@ async function runEmbeddingBackfill(job: WorkflowStepJob) {
   }
   const account = await getWorkerAccount(job.accountId);
   if (!account) throw new Error("The embedding account is unavailable.");
-  const batchAttempt =
+  const retryMessageIds = optionalStringArray(
+    job.payload.messageIds,
+    "embedding retry message IDs",
+  );
+  let batchAttempt =
     job.payload.batchAttempt === undefined
       ? 1
       : requiredInteger(job.payload.batchAttempt, "embedding batch attempt");
@@ -1743,13 +1747,24 @@ async function runEmbeddingBackfill(job: WorkflowStepJob) {
   await setIndexingSyncStage(job.accountId, "running");
 
   if (!submission?.inputFileId && !submission?.providerBatchId) {
-    const candidates = await getEmbeddingCandidates({
+    let candidates = await getEmbeddingCandidates({
       accountId: job.accountId,
       modelId: config.modelId,
       indexVersion: MAIL_INDEX_VERSION,
       limit: embeddingBatchRequestLimit + 1,
+      messageIds: retryMessageIds,
       includeFailed: job.payload.includeFailed !== false,
     });
+    if (retryMessageIds && candidates.length === 0) {
+      candidates = await getEmbeddingCandidates({
+        accountId: job.accountId,
+        modelId: config.modelId,
+        indexVersion: MAIL_INDEX_VERSION,
+        limit: embeddingBatchRequestLimit + 1,
+        includeFailed: false,
+      });
+      batchAttempt = 1;
+    }
     if (candidates.length === 0) {
       const result = await finalizeEmptyEmbeddingBackfill({
         accountId: job.accountId,
@@ -2121,6 +2136,18 @@ function requiredString(value: unknown, name: string): string {
 function requiredInteger(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
     throw new Error(`${name} is invalid in the batch job.`);
+  }
+  return value;
+}
+
+function optionalStringArray(value: unknown, name: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((entry) => typeof entry !== "string" || !entry.trim())
+  ) {
+    throw new Error(`${name} are invalid in the batch job.`);
   }
   return value;
 }

@@ -47,11 +47,9 @@ export const registerIndexingEventRoutes: FastifyPluginAsync = async (api) => {
     ? await listenForAccountSyncNotifications((payload) => {
         const accountId = parseNotification(payload);
         if (!accountId) return;
-        void broadcastDurableProgress(accountId).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : "Unknown failure";
+        void broadcastDurableProgress(accountId).catch(() => {
           console.error("api: indexing progress notification failed", {
             accountId,
-            message,
           });
         });
       })
