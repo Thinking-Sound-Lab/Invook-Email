@@ -47,7 +47,9 @@ export function parseGmailComposeDraftRequest(
     return null;
   }
   const validation = validateGmailComposeDraftFields({
-    recipients: body.recipients as string[],
+    recipients: body.recipients.filter(
+      (recipient): recipient is string => typeof recipient === "string",
+    ),
     subject: body.subject,
     body: body.body,
   });
