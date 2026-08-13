@@ -20,6 +20,8 @@ import {
   initials,
 } from "./mail-format";
 import { DraftComposer } from "./draft-composer";
+import { buildEmailHtmlDocument } from "./email-html-document";
+import { EmailHtmlFrame } from "./email-html-frame";
 import { SmartLabelControls } from "./smart-label-controls";
 import type { MailboxView, SelectedThread } from "./types";
 
@@ -101,9 +103,18 @@ export function ThreadReader({
                         </time>
                       </div>
 
-                      <div className="mt-5 whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/88">
-                        {formatMailBody(message.bodyText) || "This email has no indexed plain-text body."}
-                      </div>
+                      {message.bodyHtml ? (
+                        <div className="mt-5 overflow-hidden rounded-lg bg-white p-5">
+                          <EmailHtmlFrame
+                            document={buildEmailHtmlDocument(message.bodyHtml, message.id)}
+                            frameId={message.id}
+                          />
+                        </div>
+                      ) : (
+                        <div className="mt-5 whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/88">
+                          {formatMailBody(message.bodyText) || "This email has no readable body."}
+                        </div>
+                      )}
 
                       {message.attachments.length > 0 ? (
                         <div className="mt-5 flex flex-wrap gap-2" aria-label="Attachments">
