@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createDailyGmailWatchRenewalStep } from "./gmail-watch";
+import {
+  createDailyGmailWatchRenewalStep,
+  createGmailWatchRecoveryStep,
+} from "./gmail-watch";
 import {
   createPostSyncDerivationSteps,
   queueNameForStepType,
@@ -28,6 +31,35 @@ test("daily Gmail watch renewal is deterministic and scheduled one day later", (
     "gmail-watch-renew:22222222-2222-4222-8222-222222222222:daily:2026-08-14",
   );
   assert.equal(queueNameForStepType(first.stepType), "gmail-control");
+});
+
+test("terminal watch recovery schedules a unique bounded daily successor", () => {
+  const step = createGmailWatchRecoveryStep({
+    userId: "11111111-1111-4111-8111-111111111111",
+    accountId: "22222222-2222-4222-8222-222222222222",
+    expectedExpirationAt: new Date("2026-08-20T10:00:00.000Z"),
+    recoveryKey: "failed:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    now: new Date("2026-08-13T10:00:00.000Z"),
+  });
+
+  assert.equal(step.payload?.reason, "terminal_failure_recovery");
+  assert.equal(step.payload?.runAt, "2026-08-14T10:00:00.000Z");
+  assert.equal(
+    step.idempotencyKey,
+    "gmail-watch-renew:22222222-2222-4222-8222-222222222222:recovery:failed:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  );
+});
+
+test("terminal watch recovery runs immediately when expiration is within a day", () => {
+  const step = createGmailWatchRecoveryStep({
+    userId: "11111111-1111-4111-8111-111111111111",
+    accountId: "22222222-2222-4222-8222-222222222222",
+    expectedExpirationAt: new Date("2026-08-13T20:00:00.000Z"),
+    recoveryKey: "near-expiration",
+    now: new Date("2026-08-13T10:00:00.000Z"),
+  });
+
+  assert.equal(step.payload?.runAt, "2026-08-13T10:00:00.000Z");
 });
 
 test("audited-ready derivations fan out to independent BullMQ queues", () => {

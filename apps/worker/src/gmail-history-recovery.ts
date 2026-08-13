@@ -1,5 +1,15 @@
 import { GmailApiError } from "@invook/gmail";
 
+export function shouldRepairNonReadyGmailReplica(input: {
+  isFailed: boolean;
+  resumeNonReady?: boolean;
+  resumeFailedReplica?: boolean;
+}): boolean {
+  return Boolean(
+    input.resumeNonReady || (input.resumeFailedReplica && input.isFailed),
+  );
+}
+
 export async function applyGmailHistoryWithExpiredCursorRepair<
   AppliedResult,
   RepairedResult,

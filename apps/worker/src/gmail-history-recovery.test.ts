@@ -3,7 +3,27 @@ import { test } from "node:test";
 
 import { GmailApiError } from "@invook/gmail";
 
-import { applyGmailHistoryWithExpiredCursorRepair } from "./gmail-history-recovery";
+import {
+  applyGmailHistoryWithExpiredCursorRepair,
+  shouldRepairNonReadyGmailReplica,
+} from "./gmail-history-recovery";
+
+test("watch recovery repairs failed replicas without repairing an active initial sync", () => {
+  assert.equal(
+    shouldRepairNonReadyGmailReplica({
+      isFailed: true,
+      resumeFailedReplica: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldRepairNonReadyGmailReplica({
+      isFailed: false,
+      resumeFailedReplica: true,
+    }),
+    false,
+  );
+});
 
 test("an expired Gmail history cursor enters the full repair path", async () => {
   let repairCalls = 0;

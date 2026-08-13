@@ -7,7 +7,7 @@ export async function runDailyGmailWatchRenewal<
   scheduleNext: (watch: Watch) => Promise<string>;
 }): Promise<{ watch: Watch; catchup: Catchup; nextRenewalStepId: string }> {
   const watch = await input.renew();
-  const catchup = await input.catchUp();
   const nextRenewalStepId = await input.scheduleNext(watch);
+  const catchup = await input.catchUp();
   return { watch, catchup, nextRenewalStepId };
 }

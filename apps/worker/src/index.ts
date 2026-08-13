@@ -51,6 +51,7 @@ import {
   DRAFT_FEEDBACK_VERSION,
   encryptGoogleCredential,
   enqueueDailyGmailWatchRenewal,
+  ensureDailyGmailWatchRenewals,
   enqueuePendingAnalysisWorkflowSteps,
   enqueueLabelBackfillContinuation,
   enqueueLabelBatchRetry,
@@ -151,7 +152,10 @@ import {
   findGmailLabelMembershipMismatches,
   type GmailLabelMembershipSnapshot,
 } from "./gmail-label-membership";
-import { applyGmailHistoryWithExpiredCursorRepair } from "./gmail-history-recovery";
+import {
+  applyGmailHistoryWithExpiredCursorRepair,
+  shouldRepairNonReadyGmailReplica,
+} from "./gmail-history-recovery";
 import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
@@ -1187,13 +1191,18 @@ async function catchUpGmailHistory(options: {
   accountId: string;
   pushEventId?: string | null;
   resumeNonReady?: boolean;
+  resumeFailedReplica?: boolean;
   markStoredPushEventsProcessed?: boolean;
 }) {
   for (let conflictAttempt = 0; conflictAttempt < 3; conflictAttempt += 1) {
     const replica = await getGmailReplicaContext(options.accountId);
     if (!replica) throw new Error("The Gmail replica state was not found.");
     if (replica.state !== "ready") {
-      if (options.resumeNonReady) {
+      if (shouldRepairNonReadyGmailReplica({
+        isFailed: replica.state === "failed",
+        resumeNonReady: options.resumeNonReady,
+        resumeFailedReplica: options.resumeFailedReplica,
+      })) {
         const { account, credential } = await getMailSyncContext(options.accountId);
         const expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
         const repaired = await repairExpiredHistory({
@@ -1369,6 +1378,7 @@ async function runGmailWatchRenewal(job: WorkflowStepJob) {
     catchUp: () => catchUpGmailHistory({
       accountId: account.id,
       resumeNonReady: job.attempts > 1,
+      resumeFailedReplica: true,
     }),
     scheduleNext: (renewedWatch) => enqueueDailyGmailWatchRenewal({
       userId: account.userId,
@@ -2931,6 +2941,12 @@ async function persistWorkflowFailure(
 ) {
   const stepUpdated = await failWorkflowStep({ step: job, message, terminal });
   if (!stepUpdated) return;
+  if (terminal && job.stepType === "gmail.watch.renew" && job.accountId) {
+    await ensureDailyGmailWatchRenewals({
+      accountId: job.accountId,
+      recoveryForStepId: job.id,
+    });
+  }
   if (job.stepType === "gmail.sync.message" && job.runId) {
     await failMailSyncItem({
       runId: job.runId,
@@ -3203,6 +3219,7 @@ async function run() {
   try {
     await enqueueMissingMailSyncRuns();
     await enqueueReadyMailSyncFinalizers();
+    await ensureDailyGmailWatchRenewals();
     await enqueuePostSyncWorkflowSteps();
     await enqueuePendingAnalysisWorkflowSteps();
     await reconcileSubmittedEmbeddingBatches();
