@@ -108,6 +108,14 @@ Stop it with:
 make down
 ```
 
+To clear local signup, mailbox, workflow, queue and object-storage data without deleting schemas, migrations, buckets or Docker volumes, use:
+
+```bash
+make reset-local
+```
+
+The command stops application services, refuses non-local or unknown Docker configurations, restarts the normal stack and prints zero-state evidence. See [Reset local signup and mailbox data](./docs/local-development-reset.md) for its exact scope and safeguards.
+
 ## Run application processes outside Docker
 
 Use the same root `.env.local`:

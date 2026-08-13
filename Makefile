@@ -1,10 +1,13 @@
-.PHONY: dev down verify
+.PHONY: dev down reset-local verify
 
 dev:
 	./docker/dev-local.sh
 
 down:
 	docker compose -f docker/compose.yml down
+
+reset-local:
+	./docker/reset-local.sh --confirm invook-local-data
 
 verify:
 	pnpm typecheck
