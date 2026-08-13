@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs watch src/index.ts",
     "start": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs src/index.ts",
-    "test": "node --import tsx --test src/app.test.ts",
+    "test": "node --import tsx --test src/app.test.ts src/mail-agent.test.ts src/services/drafts.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

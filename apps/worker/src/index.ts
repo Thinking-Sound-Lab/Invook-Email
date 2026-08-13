@@ -37,12 +37,14 @@ import {
 } from "@invook/ai";
 import {
   claimNextJob,
+  claimMailboxActionTarget,
   clearPendingMemoryEvidence,
   applyGmailHistoryBatch,
   beginGmailReplicaAudit,
   completeGmailReplicaAudit,
   failGmailReplicaAudit,
   completeJob,
+  completeMailboxActionTarget,
   deleteIndexedMessage,
   completeMailSyncItem,
   completeMailSyncRun,
@@ -59,10 +61,13 @@ import {
   enqueueEmbeddingBackfillContinuation,
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
+  enqueueWorkflowStep,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
   deferJobWithoutAttempt,
   failAnalysisJob,
+  failMailboxActionProposalExecution,
+  failMailboxActionTarget,
   failMailSyncItem,
   failMailSyncRun,
   failWorkflowStep,
@@ -79,6 +84,8 @@ import {
   getUserAuthoredMemories,
   getWorkerAccount,
   getGmailReplicaContext,
+  getMailboxActionExecution,
+  getAiReplyDraftForGmailSave,
   getGmailReplicaInventory,
   getGmailWatchContext,
   GmailLabelCatalogMismatchError,
@@ -92,6 +99,7 @@ import {
   MAIL_INDEX_VERSION,
   listGmailObjectKeysForAccount,
   markGmailAccountCleanupRunning,
+  markMailboxActionTargetsStale,
   listSubmittedEmbeddingBatchIds,
   markGmailReplicaReady,
   markMailSyncItemRunning,
@@ -109,6 +117,7 @@ import {
   setMemorySyncStage,
   toPostgresTextProjection,
   publishOutboxBatch,
+  finalizeMailboxActionProposal,
   replaceGmailDraftResources,
   replaceGmailLabelCatalog,
   prepareEmbeddingBatchSubmission,
@@ -127,6 +136,8 @@ import {
   type WorkflowStepJob,
 } from "@invook/database";
 import {
+  composePlainTextGmailReply,
+  createGmailDraft,
   extractEmailAddress,
   gmailHistoryChanges,
   getGmailDraft,
@@ -139,10 +150,12 @@ import {
   listGmailHistory,
   listGmailLabels,
   listGmailMessages,
+  modifyGmailMessageLabels,
   parseGmailMessage,
   refreshGoogleAccessToken,
   startGmailWatch,
   stopGmailWatch,
+  trashGmailMessage,
   type ParsedGmailMessage,
 } from "@invook/gmail";
 import { createObjectStorage } from "@invook/object-storage";
@@ -156,6 +169,10 @@ import {
   findGmailLabelMembershipMismatches,
   type GmailLabelMembershipSnapshot,
 } from "./gmail-label-membership";
+import {
+  MailboxActionTargetError,
+  runMailboxActionExecution,
+} from "./mailbox-action-execution";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
@@ -1342,6 +1359,178 @@ async function runGmailFinalize(job: WorkflowStepJob) {
   if (!completed) return { status: "inactive", runId };
   await enqueueAnalysisJobsForIndexedAccounts();
   return { status: "complete", runId, historyCursor, auditId };
+}
+
+function mailboxActionProviderError(error: GmailApiError): MailboxActionTargetError {
+  if (error.status === 404) {
+    return new MailboxActionTargetError("provider_target_missing", error.message);
+  }
+  if (error.status === 400 || error.status === 409) {
+    return new MailboxActionTargetError("provider_write_rejected", error.message);
+  }
+  if (error.status === 403) {
+    return new MailboxActionTargetError("provider_permission_denied", error.message);
+  }
+  if (error.status === 0 || error.status === 429 || error.status >= 500) {
+    return new MailboxActionTargetError("provider_unavailable", error.message);
+  }
+  return new MailboxActionTargetError("provider_write_failed", error.message);
+}
+
+function mailboxActionLabelChanges(
+  operation: Exclude<
+    NonNullable<Awaited<ReturnType<typeof getMailboxActionExecution>>>["operation"],
+    "trash" | "save_draft_to_gmail"
+  >,
+  providerLabelId: string | null,
+) {
+  switch (operation) {
+    case "archive":
+      return { removeLabelIds: ["INBOX"] };
+    case "mark_read":
+      return { removeLabelIds: ["UNREAD"] };
+    case "mark_unread":
+      return { addLabelIds: ["UNREAD"] };
+    case "apply_gmail_label":
+      if (!providerLabelId) {
+        throw new MailboxActionTargetError(
+          "gmail_label_stale",
+          "The approved Gmail label target is unavailable.",
+        );
+      }
+      return { addLabelIds: [providerLabelId] };
+    case "remove_gmail_label":
+      if (!providerLabelId) {
+        throw new MailboxActionTargetError(
+          "gmail_label_stale",
+          "The approved Gmail label target is unavailable.",
+        );
+      }
+      return { removeLabelIds: [providerLabelId] };
+  }
+}
+
+async function runGmailMailboxAction(job: WorkflowStepJob) {
+  if (!job.accountId || !job.userId) {
+    throw new Error("The Gmail action job has no authenticated account owner.");
+  }
+  const proposalId = requiredString(
+    job.payload.proposalId,
+    "Mailbox action proposal ID",
+  );
+  const proposal = await getMailboxActionExecution({
+    proposalId,
+    userId: job.userId,
+    accountId: job.accountId,
+  });
+  if (!proposal) return { status: "inactive", proposalId };
+
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  return runMailboxActionExecution({
+    load: async () => proposal,
+    claim: (target, operation) =>
+      claimMailboxActionTarget({ proposalId, targetId: target.id, operation }),
+    execute: async (target, operation) => {
+      try {
+        if (operation === "save_draft_to_gmail") {
+          if (!target.draftId) {
+            throw new MailboxActionTargetError(
+              "target_stale",
+              "The approved AI draft is no longer available.",
+            );
+          }
+          const draft = await getAiReplyDraftForGmailSave({
+            userId: account.userId,
+            draftId: target.draftId,
+          });
+          if (
+            !draft ||
+            draft.updatedAt.getTime() !== target.expectedUpdatedAt.getTime() ||
+            !draft.replyTarget
+          ) {
+            throw new MailboxActionTargetError(
+              "target_stale",
+              "The approved AI draft changed or no longer has a reply target.",
+            );
+          }
+          const raw = composePlainTextGmailReply({
+            accountEmail: draft.accountEmail,
+            subject: draft.subject,
+            currentText: draft.currentText,
+            replyTarget: draft.replyTarget,
+          });
+          if (!raw) {
+            throw new MailboxActionTargetError(
+              "draft_recipient_missing",
+              "The approved AI draft has no valid reply recipient.",
+            );
+          }
+          const created = await createGmailDraft(credential.accessToken, {
+            raw,
+            threadId: draft.providerThreadId,
+          });
+          return {
+            providerDraftId: created.id,
+            providerMessageId: created.message.id,
+          };
+        }
+
+        if (!target.providerMessageId) {
+          throw new MailboxActionTargetError(
+            "target_stale",
+            "The approved Gmail message target is unavailable.",
+          );
+        }
+        const providerMessage =
+          operation === "trash"
+            ? await trashGmailMessage(
+                credential.accessToken,
+                target.providerMessageId,
+              )
+            : await modifyGmailMessageLabels(
+                credential.accessToken,
+                target.providerMessageId,
+                mailboxActionLabelChanges(operation, proposal.providerLabelId),
+              );
+        return {
+          providerMessageId: providerMessage.id,
+          providerHistoryId: providerMessage.historyId ?? null,
+        };
+      } catch (error) {
+        if (error instanceof GmailApiError) {
+          const isTransient =
+            error.status === 0 || error.status === 429 || error.status >= 500;
+          if (error.status === 401 || (isTransient && operation !== "save_draft_to_gmail")) {
+            throw error;
+          }
+          if (isTransient && operation === "save_draft_to_gmail") {
+            throw new MailboxActionTargetError(
+              "provider_outcome_uncertain",
+              error.message,
+            );
+          }
+          throw mailboxActionProviderError(error);
+        }
+        throw error;
+      }
+    },
+    shouldAbort: (error) => error instanceof GmailApiError,
+    complete: (targetId, evidence) =>
+      completeMailboxActionTarget({ targetId, evidence }),
+    fail: (targetId, errorCode) =>
+      failMailboxActionTarget({ targetId, errorCode }),
+    markRemainingStale: (errorCode) =>
+      markMailboxActionTargetsStale({ proposalId, errorCode }),
+    enqueueHistoryCatchup: () =>
+      enqueueWorkflowStep({
+        userId: account.userId,
+        accountId: account.id,
+        stepType: "gmail.history.catchup",
+        payload: { reason: "provider_write", proposalId },
+        idempotencyKey: `gmail-action-history:${proposalId}`,
+      }),
+    finalize: () => finalizeMailboxActionProposal(proposalId),
+  });
 }
 
 async function runGmailHistoryCatchup(job: WorkflowStepJob) {
@@ -2999,7 +3188,18 @@ async function persistWorkflowFailure(
 ) {
   const stepUpdated = await failWorkflowStep({ step: job, message, terminal });
   if (!stepUpdated) return;
-  if (job.stepType === "gmail.sync.message" && job.runId) {
+  if (job.stepType === "gmail.action.execute" && terminal) {
+    const proposalId =
+      typeof job.payload.proposalId === "string" ? job.payload.proposalId : null;
+    if (proposalId) {
+      await failMailboxActionProposalExecution({
+        proposalId,
+        errorCode: reconnectRequired
+          ? "provider_authentication_failed"
+          : "execution_failed",
+      });
+    }
+  } else if (job.stepType === "gmail.sync.message" && job.runId) {
     await failMailSyncItem({
       runId: job.runId,
       providerMessageId: requiredString(
@@ -3090,6 +3290,9 @@ function processGmailControl(bullJob: WorkflowJob) {
       }
       if (job.stepType === "gmail.watch.renew") return runGmailWatchRenewal(job);
       if (job.stepType === "gmail.replica.audit") return runGmailReplicaAudit(job);
+      if (job.stepType === "gmail.action.execute") {
+        return runGmailMailboxAction(job);
+      }
       if (job.stepType === "gmail.account.cleanup") {
         return runGmailAccountCleanup(job);
       }

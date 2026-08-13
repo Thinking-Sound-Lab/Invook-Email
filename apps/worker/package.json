@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@invook/ai": "workspace:*",
+    "@invook/contracts": "workspace:*",
     "@invook/database": "workspace:*",
     "@invook/gmail": "workspace:*",
     "@invook/object-storage": "workspace:*",

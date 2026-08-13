@@ -82,6 +82,7 @@ function queueNameForStepType(stepType: string): QueueName {
     case "gmail.watch.renew":
     case "gmail.replica.audit":
     case "gmail.account.cleanup":
+    case "gmail.action.execute":
       return "gmail-control";
     case "embedding.backfill":
     case "embedding.batch.event":

@@ -703,9 +703,16 @@ export async function searchMailbox(
     })
     .from(messages)
     .innerJoin(threads, eq(threads.id, messages.threadId))
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
     .where(
       and(
         eq(messages.userId, input.userId),
+        eq(connectedAccounts.status, "connected"),
+        eq(gmailReplicaStates.state, "ready"),
         or(fullTextMatch, metadataMatch),
       ),
     )
@@ -731,9 +738,16 @@ export async function searchMailbox(
     .from(messageAttachments)
     .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
     .innerJoin(threads, eq(threads.id, messages.threadId))
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
     .where(
       and(
         eq(messageAttachments.userId, input.userId),
+        eq(connectedAccounts.status, "connected"),
+        eq(gmailReplicaStates.state, "ready"),
         sql`${messageAttachments.filenameSearchDocument} @@ ${tsQuery}`,
       ),
     )
@@ -755,9 +769,16 @@ export async function searchMailbox(
         .from(messageEmbeddings)
         .innerJoin(messages, eq(messages.id, messageEmbeddings.messageId))
         .innerJoin(threads, eq(threads.id, messages.threadId))
+        .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
+        .innerJoin(
+          gmailReplicaStates,
+          eq(gmailReplicaStates.accountId, connectedAccounts.id),
+        )
         .where(
           and(
             eq(messageEmbeddings.userId, input.userId),
+            eq(connectedAccounts.status, "connected"),
+            eq(gmailReplicaStates.state, "ready"),
             eq(messageEmbeddings.modelId, input.embedding.modelId),
             eq(messageEmbeddings.dimensions, input.embedding.dimensions),
             eq(messageEmbeddings.indexVersion, input.embedding.indexVersion),
@@ -867,7 +888,19 @@ export async function getMailboxThreadForAgent(
       participants: threads.participants,
     })
     .from(threads)
-    .where(and(eq(threads.id, threadId), eq(threads.userId, userId)))
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
+    .where(
+      and(
+        eq(threads.id, threadId),
+        eq(threads.userId, userId),
+        eq(connectedAccounts.status, "connected"),
+        eq(gmailReplicaStates.state, "ready"),
+      ),
+    )
     .limit(1);
   if (!thread) return null;
 
@@ -931,11 +964,18 @@ export async function listMailboxThreadAttachments(
     .from(messageAttachments)
     .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
     .innerJoin(threads, eq(threads.id, messages.threadId))
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
     .where(
       and(
         eq(messageAttachments.userId, userId),
         eq(threads.id, threadId),
         eq(threads.userId, userId),
+        eq(connectedAccounts.status, "connected"),
+        eq(gmailReplicaStates.state, "ready"),
       ),
     )
     .orderBy(asc(messageAttachments.filename));
@@ -3700,7 +3740,18 @@ export async function getReplyDraftContext(
     })
     .from(threads)
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
-    .where(and(eq(threads.id, threadId), eq(threads.userId, userId)))
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
+    .where(
+      and(
+        eq(threads.id, threadId),
+        eq(threads.userId, userId),
+        eq(connectedAccounts.status, "connected"),
+        eq(gmailReplicaStates.state, "ready"),
+      ),
+    )
     .limit(1);
   if (!thread) return null;
 

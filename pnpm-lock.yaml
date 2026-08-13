@@ -136,6 +136,9 @@ importers:
       '@invook/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@invook/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@invook/database':
         specifier: workspace:*
         version: link:../../packages/database
@@ -217,6 +220,9 @@ importers:
       drizzle-kit:
         specifier: ^0.31.10
         version: 0.31.10
+      tsx:
+        specifier: ^4.20.0
+        version: 4.23.11
       typescript:
         specifier: ^5.9.0
         version: 5.9.3
