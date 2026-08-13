@@ -10,7 +10,11 @@ import {
   sql,
 } from "drizzle-orm";
 
-import { getDatabase, type Database } from "./client";
+import {
+  getDatabase,
+  type Database,
+  type DatabaseExecutor,
+} from "./client";
 import {
   connectedAccounts,
   embeddingBatchSubmissions,
@@ -103,7 +107,7 @@ function queueNameForStepType(stepType: string): QueueName {
 
 async function enqueueWorkflowStepsWithExecutor(
   inputs: WorkflowStepInput[],
-  database: Database,
+  database: DatabaseExecutor,
 ): Promise<Array<{ id: string; idempotencyKey: string }>> {
   if (inputs.length === 0) return [];
   const inserted = await database
@@ -140,32 +144,38 @@ async function enqueueWorkflowStepsWithExecutor(
   return inserted;
 }
 
+export async function enqueueWorkflowStepWithExecutor(
+  input: WorkflowStepInput,
+  database: DatabaseExecutor,
+): Promise<string> {
+  const [inserted] = await enqueueWorkflowStepsWithExecutor([input], database);
+  if (inserted) return inserted.id;
+
+  const [existing] = await database
+    .select({ id: workflowSteps.id, status: workflowSteps.status })
+    .from(workflowSteps)
+    .where(eq(workflowSteps.idempotencyKey, input.idempotencyKey))
+    .limit(1);
+  if (!existing) throw new Error("The workflow step could not be created.");
+  if (existing.status === "queued" || existing.status === "running") {
+    await database
+      .insert(queueOutbox)
+      .values({
+        workflowStepId: existing.id,
+        queueName: queueNameForStepType(input.stepType),
+      })
+      .onConflictDoNothing({ target: queueOutbox.workflowStepId });
+  }
+  return existing.id;
+}
+
 export async function enqueueWorkflowStep(
   input: WorkflowStepInput,
   database: Database = getDatabase(),
 ): Promise<string> {
-  return database.transaction(async (transaction) => {
-    const executor = transaction as unknown as Database;
-    const [inserted] = await enqueueWorkflowStepsWithExecutor([input], executor);
-    if (inserted) return inserted.id;
-
-    const [existing] = await transaction
-      .select({ id: workflowSteps.id, status: workflowSteps.status })
-      .from(workflowSteps)
-      .where(eq(workflowSteps.idempotencyKey, input.idempotencyKey))
-      .limit(1);
-    if (!existing) throw new Error("The workflow step could not be created.");
-    if (existing.status === "queued" || existing.status === "running") {
-      await transaction
-        .insert(queueOutbox)
-        .values({
-          workflowStepId: existing.id,
-          queueName: queueNameForStepType(input.stepType),
-        })
-        .onConflictDoNothing({ target: queueOutbox.workflowStepId });
-    }
-    return existing.id;
-  });
+  return database.transaction((transaction) =>
+    enqueueWorkflowStepWithExecutor(input, transaction),
+  );
 }
 
 export async function createInitialMailSyncRun(

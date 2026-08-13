@@ -18,7 +18,11 @@ import type {
 } from "@invook/contracts";
 import { validate as validateUuid } from "uuid";
 
-import { getDatabase, type Database } from "./client";
+import {
+  getDatabase,
+  type Database,
+  type DatabaseExecutor,
+} from "./client";
 import {
   connectedAccounts,
   drafts,
@@ -32,7 +36,7 @@ import {
   threadLabels,
   threads,
 } from "./schema";
-import { enqueueWorkflowStep } from "./workflows";
+import { enqueueWorkflowStepWithExecutor } from "./workflows";
 
 export type QueryInvookMailboxInput = {
   userId: string;
@@ -325,7 +329,11 @@ function requestFingerprint(input: CreateMailboxActionProposalInput): string {
     .digest("hex");
 }
 
-async function getProposal(proposalId: string, database: Database, userId?: string) {
+async function getProposal(
+  proposalId: string,
+  database: DatabaseExecutor,
+  userId?: string,
+) {
   const conditions = [eq(mailboxActionProposals.id, proposalId)];
   if (userId) conditions.push(eq(mailboxActionProposals.userId, userId));
   const [proposal] = await database
@@ -373,7 +381,6 @@ export async function createMailboxActionProposal(
   }
 
   return database.transaction(async (transaction) => {
-    const executor = transaction as unknown as Database;
     const [account] = await transaction
       .select({ id: connectedAccounts.id })
       .from(connectedAccounts)
@@ -535,12 +542,12 @@ export async function createMailboxActionProposal(
           "The Agent tool call cannot be reused with different action targets.",
         );
       }
-      return getProposal(conflict.id, executor, input.userId);
+      return getProposal(conflict.id, transaction, input.userId);
     }
     await transaction.insert(mailboxActionTargets).values(
       targetValues.map((target) => ({ ...target, proposalId: proposal.id })),
     );
-    return getProposal(proposal.id, executor, input.userId);
+    return getProposal(proposal.id, transaction, input.userId);
   });
 }
 
@@ -549,7 +556,6 @@ export async function approveMailboxActionProposal(
   database: Database = getDatabase(),
 ) {
   return database.transaction(async (transaction) => {
-    const executor = transaction as unknown as Database;
     const [proposal] = await transaction
       .select({
         id: mailboxActionProposals.id,
@@ -571,16 +577,16 @@ export async function approveMailboxActionProposal(
     if (decision === "cancelled") {
       return {
         outcome: "cancelled" as const,
-        proposal: await getProposal(proposal.id, executor, input.userId),
+        proposal: await getProposal(proposal.id, transaction, input.userId),
       };
     }
     if (decision === "already_approved") {
       return {
         outcome: "already_approved" as const,
-        proposal: await getProposal(proposal.id, executor, input.userId),
+        proposal: await getProposal(proposal.id, transaction, input.userId),
       };
     }
-    const workflowStepId = await enqueueWorkflowStep(
+    const workflowStepId = await enqueueWorkflowStepWithExecutor(
       {
         userId: proposal.userId,
         accountId: proposal.accountId,
@@ -588,7 +594,7 @@ export async function approveMailboxActionProposal(
         payload: { proposalId: proposal.id },
         idempotencyKey: `gmail-action:${proposal.id}`,
       },
-      executor,
+      transaction,
     );
     await transaction
       .update(mailboxActionProposals)
@@ -601,7 +607,7 @@ export async function approveMailboxActionProposal(
       .where(eq(mailboxActionProposals.id, proposal.id));
     return {
       outcome: "approved" as const,
-      proposal: await getProposal(proposal.id, executor, input.userId),
+      proposal: await getProposal(proposal.id, transaction, input.userId),
     };
   });
 }
@@ -611,7 +617,6 @@ export async function cancelMailboxActionProposal(
   database: Database = getDatabase(),
 ) {
   return database.transaction(async (transaction) => {
-    const executor = transaction as unknown as Database;
     const [proposal] = await transaction
       .select({ id: mailboxActionProposals.id, status: mailboxActionProposals.status })
       .from(mailboxActionProposals)
@@ -627,7 +632,7 @@ export async function cancelMailboxActionProposal(
     if (proposal.status !== "pending") {
       return {
         outcome: "not_pending" as const,
-        proposal: await getProposal(proposal.id, executor, input.userId),
+        proposal: await getProposal(proposal.id, transaction, input.userId),
       };
     }
     await transaction
@@ -636,7 +641,7 @@ export async function cancelMailboxActionProposal(
       .where(eq(mailboxActionProposals.id, proposal.id));
     return {
       outcome: "cancelled" as const,
-      proposal: await getProposal(proposal.id, executor, input.userId),
+      proposal: await getProposal(proposal.id, transaction, input.userId),
     };
   });
 }
