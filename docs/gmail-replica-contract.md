@@ -51,7 +51,7 @@ A permanent Google credential rejection immediately marks the account `reconnect
 
 ## Continuous synchronization
 
-Google Pub/Sub sends authenticated OIDC push requests to `/v1/webhooks/google-pubsub`. The API validates the token audience, verified service-account email, and exact subscription. It commits the unique Pub/Sub message ID and a catch-up workflow step before returning `204`.
+Google Pub/Sub sends authenticated OIDC push requests to `/v1/webhooks/google-pubsub`. The API validates the token audience, verified service-account email, and exact subscription. A notification for an active connected account commits the unique Pub/Sub message ID and a catch-up workflow step before returning `204`. A notification without a matching connected account is acknowledged without retaining its email address or raw payload.
 
 The worker serializes Gmail control work per account with a PostgreSQL advisory lock while allowing different accounts to progress concurrently, and always rereads the stored replica cursor. Duplicate and out-of-order deliveries are safe because history application uses an expected-cursor comparison and idempotent provider identifiers. Message/tombstone/label membership changes, cursor advancement, push-event completion, and the durable mailbox-change event commit in one PostgreSQL transaction. The web client listens to authenticated `/v1/mailbox/events` SSE and refreshes on committed mailbox changes.
 
