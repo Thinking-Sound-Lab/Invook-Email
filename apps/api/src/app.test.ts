@@ -370,6 +370,16 @@ test("mailbox change events require an authenticated session", async () => {
   assert.equal(response.json().title, "Authentication required");
 });
 
+test("account sync progress events require an authenticated session", async () => {
+  const response = await api.inject({
+    method: "GET",
+    url: "/v1/account-sync/events",
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().title, "Authentication required");
+});
+
 test("Gmail provider writes require an authenticated session", async () => {
   const requests = [
     { method: "POST", url: "/v1/gmail/labels" },

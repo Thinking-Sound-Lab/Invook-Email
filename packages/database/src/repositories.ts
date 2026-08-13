@@ -5,6 +5,7 @@ import {
   systemLabelDefinitions,
   type IndexingProgress,
   type LabelAnalysisState,
+  type MailSyncProgress,
   type MailboxView,
   type SystemLabelKey,
 } from "@invook/contracts";
@@ -41,6 +42,7 @@ import {
   type IndexingPrerequisiteState,
 } from "./embedding-indexing";
 import { enqueueDailyGmailWatchRenewal } from "./gmail-watch";
+import { deriveMailSyncProgress } from "./mail-sync-progress";
 import {
   accountSecrets,
   auditEvents,
@@ -80,7 +82,6 @@ import {
   enqueueWorkflowStep,
   enqueueWorkflowStepWithExecutor,
   enqueueWorkflowStepsWithExecutor,
-  getLatestMemoryBatchSubmission,
   getWorkflowStepSubmission,
 } from "./workflows";
 import {
@@ -1373,15 +1374,9 @@ export async function getMailboxWorkspace(
     updatedAt: memory.updatedAt.toISOString(),
   }));
 
-  const memoryBatchSubmission = await getLatestMemoryBatchSubmission(
-    account.id,
-    database,
-  );
-
   if (!selectedThread) {
     return {
       account,
-      memoryBatchSubmission,
       memories: serializedMemories,
       labels: serializedLabels,
       pagination,
@@ -1503,7 +1498,6 @@ export async function getMailboxWorkspace(
 
   return {
     account,
-    memoryBatchSubmission,
     memories: serializedMemories,
     labels: serializedLabels,
     pagination,
@@ -1559,6 +1553,44 @@ export async function getMailboxWorkspace(
       ),
     },
   };
+}
+
+export async function getMailSyncProgressForAccount(
+  input: { accountId: string },
+  database: Database = getDatabase(),
+): Promise<MailSyncProgress | null> {
+  const [account] = await database
+    .select({ syncState: connectedAccounts.syncState })
+    .from(connectedAccounts)
+    .where(eq(connectedAccounts.id, input.accountId))
+    .limit(1);
+  if (!account) return null;
+
+  const isActive =
+    account.syncState.mailSync === "pending" ||
+    account.syncState.mailSync === "running";
+  const runStatusCondition = isActive
+    ? inArray(mailSyncRuns.status, ["queued", "running"])
+    : eq(
+        mailSyncRuns.status,
+        account.syncState.mailSync === "complete" ? "complete" : "failed",
+      );
+  const [run] = await database
+    .select({
+      discoveryComplete: mailSyncRuns.discoveryComplete,
+      discoveredMessageCount: mailSyncRuns.discoveredMessageCount,
+      processedMessageCount: mailSyncRuns.processedMessageCount,
+      failedMessageCount: mailSyncRuns.failedMessageCount,
+    })
+    .from(mailSyncRuns)
+    .where(and(eq(mailSyncRuns.accountId, input.accountId), runStatusCondition))
+    .orderBy(desc(mailSyncRuns.createdAt))
+    .limit(1);
+
+  return deriveMailSyncProgress({
+    state: account.syncState.mailSync,
+    run: run ?? null,
+  });
 }
 
 async function getIndexingProgressWithExecutor(

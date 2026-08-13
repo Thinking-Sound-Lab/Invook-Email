@@ -1,9 +1,10 @@
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 
-import type { IndexingProgress, IndexingStatusEvent } from "@invook/contracts";
+import type { AccountSyncStatusEvent } from "@invook/contracts";
 import {
   getIndexingProgressForAccount,
   getIndexingProgressForUser,
+  getMailSyncProgressForAccount,
   listenForAccountSyncNotifications,
   MAIL_INDEX_VERSION,
 } from "@invook/database";
@@ -11,7 +12,7 @@ import {
 import { requireSession } from "../access";
 import { sendProblem } from "../responses";
 
-function parseNotification(payload: string) {
+function parseNotification(payload: string): string | null {
   try {
     const value = JSON.parse(payload) as Record<string, unknown>;
     return typeof value.accountId === "string" ? value.accountId : null;
@@ -22,20 +23,28 @@ function parseNotification(payload: string) {
 
 type EventResponse = FastifyReply["raw"];
 
-function writeEvent(response: EventResponse, progress: IndexingProgress) {
-  const event: IndexingStatusEvent = progress;
-  response.write(`event: indexing\ndata: ${JSON.stringify(event)}\n\n`);
+function writeEvent(response: EventResponse, progress: AccountSyncStatusEvent) {
+  response.write(`event: account-sync\ndata: ${JSON.stringify(progress)}\n\n`);
 }
 
-export const registerIndexingEventRoutes: FastifyPluginAsync = async (api) => {
+export const registerAccountSyncEventRoutes: FastifyPluginAsync = async (api) => {
   const streams = new Map<string, Set<EventResponse>>();
   const modelId = process.env.OPENAI_EMBEDDING_MODEL?.trim() || null;
+  const getDurableProgress = async (
+    accountId: string,
+  ): Promise<AccountSyncStatusEvent | null> => {
+    const [mailSync, indexing] = await Promise.all([
+      getMailSyncProgressForAccount({ accountId }),
+      getIndexingProgressForAccount({
+        accountId,
+        modelId,
+        indexVersion: MAIL_INDEX_VERSION,
+      }),
+    ]);
+    return mailSync && indexing ? { mailSync, indexing } : null;
+  };
   const broadcastDurableProgress = async (accountId: string) => {
-    const progress = await getIndexingProgressForAccount({
-      accountId,
-      modelId,
-      indexVersion: MAIL_INDEX_VERSION,
-    });
+    const progress = await getDurableProgress(accountId);
     if (!progress) return;
     for (const response of streams.get(accountId) ?? []) {
       if (!response.destroyed && !response.writableEnded) {
@@ -48,7 +57,7 @@ export const registerIndexingEventRoutes: FastifyPluginAsync = async (api) => {
         const accountId = parseNotification(payload);
         if (!accountId) return;
         void broadcastDurableProgress(accountId).catch(() => {
-          console.error("api: indexing progress notification failed", {
+          console.error("api: account sync progress notification failed", {
             accountId,
           });
         });
@@ -64,7 +73,7 @@ export const registerIndexingEventRoutes: FastifyPluginAsync = async (api) => {
   });
 
   api.get(
-    "/v1/indexing/events",
+    "/v1/account-sync/events",
     { onRequest: requireSession },
     async (request, reply) => {
       const session = request.invookSession;
@@ -75,6 +84,13 @@ export const registerIndexingEventRoutes: FastifyPluginAsync = async (api) => {
         indexVersion: MAIL_INDEX_VERSION,
       });
       if (!indexing) {
+        await sendProblem(request, reply, 404, "Connected Gmail account not found");
+        return;
+      }
+      const mailSync = await getMailSyncProgressForAccount({
+        accountId: indexing.accountId,
+      });
+      if (!mailSync) {
         await sendProblem(request, reply, 404, "Connected Gmail account not found");
         return;
       }
@@ -98,7 +114,7 @@ export const registerIndexingEventRoutes: FastifyPluginAsync = async (api) => {
       };
       request.raw.once("close", removeStream);
       reply.raw.once("close", removeStream);
-      writeEvent(reply.raw, indexing.progress);
+      writeEvent(reply.raw, { mailSync, indexing: indexing.progress });
     },
   );
 };

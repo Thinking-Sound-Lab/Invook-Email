@@ -30,6 +30,7 @@ import {
   workflowSteps,
 } from "./schema";
 import { createGmailWatchRecoveryStep } from "./gmail-watch-schedule";
+import { hasMailSyncPercentageAdvanced } from "./mail-sync-progress";
 import type {
   QueueName,
   WorkflowStepInput,
@@ -1088,6 +1089,12 @@ export async function recordMailSyncPage(
       })
       .where(eq(mailSyncRuns.id, input.runId));
 
+    if (input.nextPageToken === null) {
+      await transaction.execute(
+        sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.accountId })})`,
+      );
+    }
+
     if (input.nextPageToken === null && insertedItems.length === 0) {
       await enqueueFinalizeIfReady(input.runId, executor);
     }
@@ -1153,6 +1160,7 @@ async function enqueueFinalizeIfReady(runId: string, database: Database) {
       accountId: mailSyncRuns.accountId,
       status: mailSyncRuns.status,
       discoveryComplete: mailSyncRuns.discoveryComplete,
+      processedMessageCount: mailSyncRuns.processedMessageCount,
     })
     .from(mailSyncRuns)
     .where(eq(mailSyncRuns.id, runId))
@@ -1176,6 +1184,18 @@ async function enqueueFinalizeIfReady(runId: string, database: Database) {
       updatedAt: new Date(),
     })
     .where(eq(mailSyncRuns.id, runId));
+  if (
+    hasMailSyncPercentageAdvanced({
+      discoveryComplete: run.discoveryComplete,
+      discoveredMessageCount: counts.total,
+      previousProcessedMessageCount: run.processedMessageCount,
+      processedMessageCount: counts.complete,
+    })
+  ) {
+    await database.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: run.accountId })})`,
+    );
+  }
   if (counts.failed > 0 || counts.complete !== counts.total) return false;
 
   await enqueueWorkflowStep(
@@ -1538,24 +1558,4 @@ export async function getWorkflowStepSubmission(
     )
     .limit(1);
   return step ?? null;
-}
-
-export async function getLatestMemoryBatchSubmission(
-  accountId: string,
-  database: Database = getDatabase(),
-) {
-  const [step] = await database
-    .select({ result: workflowSteps.result })
-    .from(workflowSteps)
-    .where(
-      and(
-        eq(workflowSteps.accountId, accountId),
-        eq(workflowSteps.status, "complete"),
-        inArray(workflowSteps.stepType, ["memory.extract", "memory.batch.retry"]),
-        sql`${workflowSteps.result}->>'status' = 'submitted'`,
-      ),
-    )
-    .orderBy(desc(workflowSteps.updatedAt))
-    .limit(1);
-  return step?.result ?? null;
 }

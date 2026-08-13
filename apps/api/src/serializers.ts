@@ -1,138 +1,32 @@
 import {
-  getBatchRequestProgress,
   isAiConfigured,
   isMemoryBatchConfigured,
-  memoryBatchProviders,
-  type MemoryBatchProvider,
 } from "@invook/ai";
 import type {
   MailboxWorkspace,
   MemoryEntry,
-  MemoryGenerationProgress,
   AiReplyDraft,
 } from "@invook/contracts";
 import {
   getIndexingProgressForAccount,
+  getMailSyncProgressForAccount,
   getMailboxWorkspace,
   MAIL_INDEX_VERSION,
 } from "@invook/database";
 
-function resultNumber(
-  value: Record<string, unknown> | null,
-  key: string,
-): number | null {
-  const candidate = value?.[key];
-  return typeof candidate === "number" && Number.isFinite(candidate)
-    ? candidate
-    : null;
-}
-
-async function serializeMemoryProgress(
-  workspace: NonNullable<Awaited<ReturnType<typeof getMailboxWorkspace>>>,
-): Promise<MemoryGenerationProgress> {
-  const memoryCount = workspace.memories.length;
-  const submission = workspace.memoryBatchSubmission;
-  const requestCount = resultNumber(submission, "requestCount");
-  const evidenceMessageCount = resultNumber(submission, "evidenceMessageCount");
-
-  if (
-    workspace.account.syncState.mailSync === "pending" ||
-    workspace.account.syncState.mailSync === "running"
-  ) {
-    return {
-      stage: "waiting_for_mail",
-      completedRequestCount: null,
-      failedRequestCount: null,
-      totalRequestCount: null,
-      evidenceMessageCount,
-      memoryCount,
-    };
-  }
-  if (workspace.account.syncState.memory === "complete") {
-    return {
-      stage: "complete",
-      completedRequestCount: null,
-      failedRequestCount: null,
-      totalRequestCount: requestCount,
-      evidenceMessageCount,
-      memoryCount,
-    };
-  }
-  if (workspace.account.syncState.memory === "failed") {
-    return {
-      stage: "failed",
-      completedRequestCount: null,
-      failedRequestCount: null,
-      totalRequestCount: requestCount,
-      evidenceMessageCount,
-      memoryCount,
-    };
-  }
-
-  const provider = submission?.provider;
-  const providerBatchId = submission?.providerBatchId;
-  if (
-    typeof provider !== "string" ||
-    !memoryBatchProviders.includes(provider as MemoryBatchProvider) ||
-    typeof providerBatchId !== "string" ||
-    !providerBatchId
-  ) {
-    return {
-      stage: "preparing",
-      completedRequestCount: null,
-      failedRequestCount: null,
-      totalRequestCount: requestCount,
-      evidenceMessageCount,
-      memoryCount,
-    };
-  }
-
-  try {
-    const progress = await getBatchRequestProgress({
-      provider: provider as MemoryBatchProvider,
-      providerBatchId,
-    });
-    const stage =
-      progress.state === "validating"
-        ? "validating"
-        : progress.state === "in_progress"
-          ? "analyzing"
-          : progress.state === "finalizing" ||
-              progress.state === "completed" ||
-              progress.state === "cancelling"
-            ? "finalizing"
-            : "failed";
-
-    return {
-      stage,
-      completedRequestCount: progress.completedRequestCount,
-      failedRequestCount: progress.failedRequestCount,
-      totalRequestCount: progress.totalRequestCount ?? requestCount,
-      evidenceMessageCount,
-      memoryCount,
-    };
-  } catch {
-    return {
-      stage: "validating",
-      completedRequestCount: null,
-      failedRequestCount: null,
-      totalRequestCount: requestCount,
-      evidenceMessageCount,
-      memoryCount,
-    };
-  }
-}
-
 export async function serializeWorkspace(
   workspace: NonNullable<Awaited<ReturnType<typeof getMailboxWorkspace>>>,
 ): Promise<MailboxWorkspace> {
-  const indexingProgress = await getIndexingProgressForAccount({
-    accountId: workspace.account.id,
-    modelId: process.env.OPENAI_EMBEDDING_MODEL?.trim() || null,
-    indexVersion: MAIL_INDEX_VERSION,
-  });
-  if (!indexingProgress) {
-    throw new Error("The indexing account is unavailable.");
+  const [mailSyncProgress, indexingProgress] = await Promise.all([
+    getMailSyncProgressForAccount({ accountId: workspace.account.id }),
+    getIndexingProgressForAccount({
+      accountId: workspace.account.id,
+      modelId: process.env.OPENAI_EMBEDDING_MODEL?.trim() || null,
+      indexVersion: MAIL_INDEX_VERSION,
+    }),
+  ]);
+  if (!mailSyncProgress || !indexingProgress) {
+    throw new Error("The account synchronization state is unavailable.");
   }
   return {
     aiConfigured: isAiConfigured(),
@@ -145,6 +39,7 @@ export async function serializeWorkspace(
         ...workspace.account.syncState,
         indexing: indexingProgress.state,
       },
+      mailSyncProgress,
       indexingProgress,
       lastSyncedAt: workspace.account.lastSyncedAt?.toISOString() ?? null,
       replica: {
@@ -154,7 +49,6 @@ export async function serializeWorkspace(
           workspace.account.replicaLastAuditAt?.toISOString() ?? null,
       },
     },
-    memoryProgress: await serializeMemoryProgress(workspace),
     memories: workspace.memories,
     labels: workspace.labels,
     pagination: workspace.pagination,
