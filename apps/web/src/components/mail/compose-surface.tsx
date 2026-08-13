@@ -3,6 +3,7 @@
 import {
   CheckmarkCircle02Icon,
   MailAdd01Icon,
+  MailSend02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -24,6 +25,7 @@ import {
 import { SurfaceHeader } from "@/components/mail/surface-header";
 import {
   createGmailComposeDraft,
+  sendGmailComposeDraft,
   updateGmailComposeDraft,
 } from "@/lib/api/compose-drafts";
 import { apiErrorMessage } from "@/lib/http-error";
@@ -35,7 +37,17 @@ export function ComposeSurface() {
     () => createComposeDraftState(uuidv4()),
   );
   const isSaving = state.status === "saving";
-  const isSaved = state.status === "saved";
+  const isSending = state.status === "sending";
+  const isSent = state.status === "sent";
+  const isReconnectRequired = state.status === "reconnect_required";
+  const isLocked = isSaving || isSending || isSent || isReconnectRequired;
+  const isCurrentDraftSaved = Boolean(
+    state.providerDraft &&
+      !["editing", "saving", "error"].includes(state.status),
+  );
+  const canRequestSend =
+    Boolean(state.providerDraft && state.sendIdempotencyKey) &&
+    ["saved", "send_error"].includes(state.status);
 
   function handleEdit(
     field: "recipients" | "subject" | "body",
@@ -68,11 +80,41 @@ export function ComposeSurface() {
             request,
           )
         : await createGmailComposeDraft(request);
-      dispatch({ type: "saved", draft: result.draft });
+      dispatch({
+        type: "saved",
+        draft: result.draft,
+        sendIdempotencyKey: uuidv4(),
+      });
     } catch (error) {
+      const message = apiErrorMessage(
+        error,
+        "Invook could not save this draft to Gmail.",
+      );
       dispatch({
         type: "error",
-        message: apiErrorMessage(error, "Invook could not save this draft to Gmail."),
+        message,
+        isReconnectRequired: message === "Gmail account must be reconnected",
+      });
+    }
+  }
+
+  async function handleSend(): Promise<void> {
+    if (!state.providerDraft || !state.sendIdempotencyKey) return;
+    dispatch({ type: "sending" });
+    try {
+      await sendGmailComposeDraft(state.providerDraft.providerDraftId, {
+        idempotencyKey: state.sendIdempotencyKey,
+      });
+      dispatch({ type: "sent" });
+    } catch (error) {
+      const message = apiErrorMessage(
+        error,
+        "Invook could not send this Gmail draft.",
+      );
+      dispatch({
+        type: "send_error",
+        message,
+        isReconnectRequired: message === "Gmail account must be reconnected",
       });
     }
   }
@@ -95,7 +137,7 @@ export function ComposeSurface() {
               onChange={(event) => handleEdit("recipients", event.target.value)}
               placeholder="person@example.com, teammate@example.com"
               autoComplete="off"
-              disabled={isSaving}
+              disabled={isLocked}
               required
             />
           </div>
@@ -108,7 +150,7 @@ export function ComposeSurface() {
               value={state.subject}
               onChange={(event) => handleEdit("subject", event.target.value)}
               maxLength={GMAIL_COMPOSE_MAX_SUBJECT_LENGTH}
-              disabled={isSaving}
+              disabled={isLocked}
             />
           </div>
         </div>
@@ -122,37 +164,105 @@ export function ComposeSurface() {
           onChange={(event) => handleEdit("body", event.target.value)}
           placeholder="Write your message"
           maxLength={GMAIL_COMPOSE_MAX_BODY_LENGTH}
-          disabled={isSaving}
+          disabled={isLocked}
           required
           className="mt-6 min-h-64 flex-1 resize-none bg-card/35 px-4 py-4 text-[15px] leading-7"
         />
 
-        <div className="mt-5 flex flex-wrap items-center justify-between gap-4">
+        <div className="mt-5 flex flex-wrap items-end justify-between gap-4">
           <div className="max-w-lg text-xs leading-5 text-muted-foreground">
-            <p>Sending isn&apos;t available here. This action only saves a draft in Gmail.</p>
             {state.message ? (
               <p
-                className={state.status === "error" ? "mt-1 text-destructive" : "mt-1 text-success"}
-                role={state.status === "error" ? "alert" : "status"}
+                className={
+                  ["error", "send_error", "reconnect_required"].includes(
+                    state.status,
+                  )
+                    ? "text-destructive"
+                    : "text-success"
+                }
+                role={
+                  ["error", "send_error", "reconnect_required"].includes(
+                    state.status,
+                  )
+                    ? "alert"
+                    : "status"
+                }
                 aria-live="polite"
               >
                 {state.message}
               </p>
             ) : null}
+            {isReconnectRequired ? (
+              <div className="mt-2">
+                <Button asChild variant="outline" size="sm">
+                  <a href="/v1/auth/google/start">Reconnect Gmail</a>
+                </Button>
+              </div>
+            ) : null}
           </div>
-          <Button type="submit" disabled={isSaving || isSaved}>
-            <HugeiconsIcon
-              icon={isSaved ? CheckmarkCircle02Icon : MailAdd01Icon}
-              size={14}
-            />
-            {isSaving
-              ? "Saving to Gmail…"
-              : isSaved
-                ? "Saved to Gmail drafts"
-                : state.providerDraft
-                  ? "Update Gmail draft"
-                  : "Save to Gmail drafts"}
-          </Button>
+          {state.status === "confirming_send" ? (
+            <div
+              role="alertdialog"
+              aria-label="Confirm Gmail send"
+              className="flex flex-wrap items-center justify-end gap-2 rounded-xl bg-card px-3 py-2"
+            >
+              <p className="mr-1 text-xs text-muted-foreground">
+                Send now to {state.recipients}?
+              </p>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => dispatch({ type: "cancel_send" })}
+              >
+                Cancel
+              </Button>
+              <Button type="button" onClick={() => void handleSend()}>
+                <HugeiconsIcon icon={MailSend02Icon} size={14} />
+                Send now
+              </Button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {!isSent ? (
+                <Button
+                  type="submit"
+                  variant="outline"
+                  disabled={isLocked || isCurrentDraftSaved}
+                >
+                  <HugeiconsIcon
+                    icon={isCurrentDraftSaved ? CheckmarkCircle02Icon : MailAdd01Icon}
+                    size={14}
+                  />
+                  {isSaving
+                    ? "Saving to Gmail…"
+                    : isCurrentDraftSaved
+                      ? "Saved to Gmail drafts"
+                      : state.providerDraft
+                        ? "Update Gmail draft"
+                        : "Save to Gmail drafts"}
+                </Button>
+              ) : null}
+              {state.providerDraft ? (
+                <Button
+                  type="button"
+                  disabled={!canRequestSend || isSending || isSent}
+                  onClick={() => dispatch({ type: "confirm_send" })}
+                >
+                  <HugeiconsIcon
+                    icon={isSent ? CheckmarkCircle02Icon : MailSend02Icon}
+                    size={14}
+                  />
+                  {isSending
+                    ? "Sending with Gmail…"
+                    : isSent
+                      ? "Sent with Gmail"
+                      : state.status === "send_error"
+                        ? "Retry send"
+                        : "Send"}
+                </Button>
+              ) : null}
+            </div>
+          )}
         </div>
       </form>
     </section>

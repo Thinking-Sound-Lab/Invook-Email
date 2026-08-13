@@ -1,7 +1,7 @@
 # Invook product requirements
 
 **Status:** Mailbox-replica and Memory implementation
-**Updated:** August 12, 2026
+**Updated:** August 13, 2026
 
 ## Product statement
 
@@ -77,7 +77,7 @@ The left sidebar contains:
 
 The center pane shows Important mail first, then a divider, then the remaining mail. Selecting a thread replaces the list with the real thread.
 
-The right pane is the action agent for Find and Write. It reads and selects targets only from the fully synchronized Invook replica. Archive, read-state, Trash, Gmail-label, and save-to-Gmail-draft requests create an exact frozen proposal; no Gmail mutation occurs until the current user approves its card. Sending, recurring Inbox Zero, and standing approvals remain unavailable.
+The right pane is the action agent for Find and Write. It reads and selects targets only from the fully synchronized Invook replica. Archive, read-state, Trash, Gmail-label, and save-to-Gmail-draft requests create an exact frozen proposal; no Gmail mutation occurs until the current user approves its card. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
 
 ### Label settings
 
@@ -152,9 +152,9 @@ When the user requests a draft, the API builds context from:
 
 Unrelated contact memory is never supplied. The model returns the draft, the IDs of memories that materially affected it, and whether scheduling was relevant. Invook persists that provenance with the editable draft.
 
-Sending is outside the current slice. The UI may explicitly save an AI reply as a Gmail Draft; that creates a separate provider resource and keeps the AI draft/evidence unchanged. It must not imply that a message was sent.
+The UI may explicitly save an AI reply as a Gmail Draft; that creates a separate provider resource and keeps the AI draft/evidence unchanged. Saving must not imply that a message was sent.
 
-New-message Compose accepts explicit recipient email addresses, subject, and plain-text body, and saves or updates a Gmail Draft. Gmail is written first; Invook then schedules stored-cursor history catch-up so the provider-owned draft converges into the local replica. Compose does not expose a Send action in this phase.
+New-message Compose accepts explicit recipient email addresses, subject, and plain-text body, and saves or updates a Gmail Draft. Gmail is written first; Invook then schedules stored-cursor history catch-up so the provider-owned draft converges into the local replica. After a successful save, Compose exposes a separate confirmation step that sends that exact Gmail Draft only after the user clicks **Send now**. The send uses a durable idempotency key, does not repeat an ambiguous or completed provider write, and schedules stored-cursor history catch-up for the sent message. Compose never sends autonomously.
 
 ## Feedback
 

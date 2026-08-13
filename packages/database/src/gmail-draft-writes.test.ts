@@ -7,9 +7,11 @@ import postgres from "postgres";
 import { v4 as uuidv4 } from "uuid";
 
 import {
+  abandonUnpreparedGmailDraftSend,
   beginGmailDraftWrite,
   completeGmailDraftWrite,
   GmailDraftWriteConflictError,
+  prepareGmailDraftSend,
 } from "./gmail-draft-writes";
 import { enqueueGmailHistoryCatchup } from "./replica";
 import {
@@ -54,6 +56,7 @@ test(
       assert.deepEqual(pending, {
         outcome: "pending",
         operationId: claimed.operationId,
+        result: null,
       });
 
       const result = {
@@ -83,6 +86,54 @@ test(
         ),
         GmailDraftWriteConflictError,
       );
+
+      const sendInput = {
+        ...input,
+        operation: "send" as const,
+        idempotencyKey: uuidv4(),
+        requestFingerprint: "send-fingerprint",
+      };
+      const sendClaimed = await beginGmailDraftWrite(sendInput, database);
+      assert.equal(sendClaimed.outcome, "claimed");
+      await prepareGmailDraftSend(
+        {
+          operationId: sendClaimed.operationId,
+          userId,
+          result,
+        },
+        database,
+      );
+      const preparedSend = await beginGmailDraftWrite(sendInput, database);
+      assert.deepEqual(preparedSend, {
+        outcome: "pending",
+        operationId: sendClaimed.operationId,
+        result,
+      });
+      await completeGmailDraftWrite(
+        { operationId: sendClaimed.operationId, userId, result },
+        database,
+      );
+
+      const unpreparedSendInput = {
+        ...sendInput,
+        idempotencyKey: uuidv4(),
+      };
+      const unpreparedSend = await beginGmailDraftWrite(
+        unpreparedSendInput,
+        database,
+      );
+      assert.equal(
+        await abandonUnpreparedGmailDraftSend(
+          { operationId: unpreparedSend.operationId, userId },
+          database,
+        ),
+        true,
+      );
+      const reclaimedSend = await beginGmailDraftWrite(
+        unpreparedSendInput,
+        database,
+      );
+      assert.equal(reclaimedSend.outcome, "claimed");
 
       const catchupInput = {
         userId,

@@ -23,6 +23,10 @@ export type CreateGmailComposeDraftRequest = GmailComposeDraftFields & {
 
 export type UpdateGmailComposeDraftRequest = CreateGmailComposeDraftRequest;
 
+export type SendGmailComposeDraftRequest = {
+  idempotencyKey: string;
+};
+
 export type GmailComposeDraft = {
   providerDraftId: string;
   providerMessageId: string;
@@ -31,6 +35,16 @@ export type GmailComposeDraft = {
 
 export type GmailComposeDraftResponse = {
   draft: GmailComposeDraft;
+  stepId: string;
+};
+
+export type GmailComposeSentMessage = {
+  providerMessageId: string;
+  providerThreadId: string;
+};
+
+export type GmailComposeSendResponse = {
+  message: GmailComposeSentMessage;
   stepId: string;
 };
 

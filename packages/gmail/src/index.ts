@@ -18,6 +18,7 @@ export {
   listGmailMessages,
   modifyGmailMessageLabels,
   refreshGoogleAccessToken,
+  sendGmailDraft,
   startGmailWatch,
   stopGmailWatch,
   trashGmailMessage,

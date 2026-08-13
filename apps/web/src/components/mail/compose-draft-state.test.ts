@@ -21,6 +21,7 @@ test("a failed save preserves the idempotency key for an exact retry", () => {
 test("editing after a save rotates the key and retains the provider draft identity", () => {
   const saved = composeDraftReducer(createComposeDraftState("save-key-1"), {
     type: "saved",
+    sendIdempotencyKey: "send-key-1",
     draft: {
       providerDraftId: "provider-draft",
       providerMessageId: "provider-message",
@@ -35,6 +36,7 @@ test("editing after a save rotates the key and retains the provider draft identi
   });
 
   assert.equal(edited.idempotencyKey, "save-key-2");
+  assert.equal(edited.sendIdempotencyKey, null);
   assert.equal(edited.status, "editing");
   assert.equal(edited.providerDraft?.providerDraftId, "provider-draft");
 });
@@ -42,6 +44,7 @@ test("editing after a save rotates the key and retains the provider draft identi
 test("a successful save exposes an explicit convergence state", () => {
   const saved = composeDraftReducer(createComposeDraftState("save-key-1"), {
     type: "saved",
+    sendIdempotencyKey: "send-key-1",
     draft: {
       providerDraftId: "provider-draft",
       providerMessageId: "provider-message",
@@ -51,4 +54,49 @@ test("a successful save exposes an explicit convergence state", () => {
 
   assert.equal(saved.status, "saved");
   assert.match(saved.message ?? "", /Gmail history catches up/);
+});
+
+test("send confirmation is explicit and an error preserves its idempotency key", () => {
+  const saved = composeDraftReducer(createComposeDraftState("save-key-1"), {
+    type: "saved",
+    sendIdempotencyKey: "send-key-1",
+    draft: {
+      providerDraftId: "provider-draft",
+      providerMessageId: "provider-message",
+      providerThreadId: "provider-thread",
+    },
+  });
+  const confirming = composeDraftReducer(saved, { type: "confirm_send" });
+  const sending = composeDraftReducer(confirming, { type: "sending" });
+  const failed = composeDraftReducer(sending, {
+    type: "send_error",
+    message: "Gmail is unavailable.",
+    isReconnectRequired: false,
+  });
+
+  assert.equal(confirming.status, "confirming_send");
+  assert.equal(failed.status, "send_error");
+  assert.equal(failed.sendIdempotencyKey, "send-key-1");
+});
+
+test("a successful send is terminal and a permanent auth failure requests reconnect", () => {
+  const saved = composeDraftReducer(createComposeDraftState("save-key-1"), {
+    type: "saved",
+    sendIdempotencyKey: "send-key-1",
+    draft: {
+      providerDraftId: "provider-draft",
+      providerMessageId: "provider-message",
+      providerThreadId: "provider-thread",
+    },
+  });
+  const sent = composeDraftReducer(saved, { type: "sent" });
+  const reconnect = composeDraftReducer(saved, {
+    type: "send_error",
+    message: "Gmail account must be reconnected",
+    isReconnectRequired: true,
+  });
+
+  assert.equal(sent.status, "sent");
+  assert.match(sent.message ?? "", /Sent with Gmail/);
+  assert.equal(reconnect.status, "reconnect_required");
 });

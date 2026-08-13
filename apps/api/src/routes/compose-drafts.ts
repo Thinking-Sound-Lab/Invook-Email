@@ -4,9 +4,17 @@ import { validate as validateUuid } from "uuid";
 import {
   validateGmailComposeDraftFields,
   type CreateGmailComposeDraftRequest,
+  type SendGmailComposeDraftRequest,
 } from "@invook/contracts";
-import { GmailDraftWriteConflictError } from "@invook/database";
-import { GmailApiError } from "@invook/gmail";
+import {
+  GmailDraftWriteConflictError,
+  markGmailAccountReconnectRequired,
+} from "@invook/database";
+import {
+  GmailApiError,
+  GOOGLE_REAUTHENTICATION_REQUIRED_ERROR_CODE,
+  isGoogleReauthenticationRequired,
+} from "@invook/gmail";
 
 import { mutationAccessHooks } from "../access";
 import { sendJson, sendProblem } from "../responses";
@@ -14,6 +22,10 @@ import {
   GmailDraftWritePendingError,
   saveComposeDraft,
 } from "../services/compose-drafts";
+import {
+  GmailDraftSendPendingError,
+  sendComposeDraft,
+} from "../services/compose-send";
 import {
   getGmailProviderAccessForRequest,
   sendGmailWriteProblem,
@@ -60,12 +72,27 @@ export function parseGmailComposeDraftRequest(
   };
 }
 
+export function parseGmailComposeSendRequest(
+  body: unknown,
+): SendGmailComposeDraftRequest | null {
+  if (
+    !isRecord(body) ||
+    Object.keys(body).some((key) => key !== "idempotencyKey") ||
+    typeof body.idempotencyKey !== "string" ||
+    !validateUuid(body.idempotencyKey)
+  ) {
+    return null;
+  }
+  return { idempotencyKey: body.idempotencyKey };
+}
+
 function isProviderDraftId(value: string): boolean {
   return /^[A-Za-z0-9_-]{1,256}$/.test(value);
 }
 
 async function sendComposeDraftError(
   error: unknown,
+  accountId: string,
   request: Parameters<typeof sendProblem>[0],
   reply: Parameters<typeof sendProblem>[1],
 ): Promise<boolean> {
@@ -77,7 +104,19 @@ async function sendComposeDraftError(
     await sendProblem(request, reply, 409, "Previous Gmail draft save is still being resolved");
     return true;
   }
+  if (error instanceof GmailDraftSendPendingError) {
+    await sendProblem(request, reply, 409, "Previous Gmail draft send is still being resolved");
+    return true;
+  }
   if (error instanceof GmailApiError) {
+    if (isGoogleReauthenticationRequired(error)) {
+      await markGmailAccountReconnectRequired({
+        accountId,
+        errorCode: GOOGLE_REAUTHENTICATION_REQUIRED_ERROR_CODE,
+      });
+      await sendProblem(request, reply, 409, "Gmail account must be reconnected");
+      return true;
+    }
     await sendGmailWriteProblem(error, request, reply);
     return true;
   }
@@ -112,7 +151,7 @@ export const registerComposeDraftRoutes: FastifyPluginAsync = async (api) => {
         });
         await sendJson(reply, 201, result);
       } catch (error) {
-        if (await sendComposeDraftError(error, request, reply)) return;
+        if (await sendComposeDraftError(error, access.accountId, request, reply)) return;
         throw error;
       }
     },
@@ -150,7 +189,39 @@ export const registerComposeDraftRoutes: FastifyPluginAsync = async (api) => {
         });
         await sendJson(reply, 200, result);
       } catch (error) {
-        if (await sendComposeDraftError(error, request, reply)) return;
+        if (await sendComposeDraftError(error, access.accountId, request, reply)) return;
+        throw error;
+      }
+    },
+  );
+
+  api.post<{ Params: ProviderDraftParams; Body: unknown }>(
+    "/v1/gmail/compose-drafts/:providerDraftId/send",
+    { onRequest: mutationAccessHooks },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      if (!isProviderDraftId(request.params.providerDraftId)) {
+        await sendProblem(request, reply, 400, "Gmail provider draft ID is invalid");
+        return;
+      }
+      const send = parseGmailComposeSendRequest(request.body);
+      if (!send) {
+        await sendProblem(request, reply, 400, "Gmail compose send input is invalid");
+        return;
+      }
+      const access = await getGmailProviderAccessForRequest(request, reply);
+      if (!access) return;
+      try {
+        const result = await sendComposeDraft({
+          userId: session.userId,
+          access,
+          idempotencyKey: send.idempotencyKey,
+          providerDraftId: request.params.providerDraftId,
+        });
+        await sendJson(reply, 200, result);
+      } catch (error) {
+        if (await sendComposeDraftError(error, access.accountId, request, reply)) return;
         throw error;
       }
     },

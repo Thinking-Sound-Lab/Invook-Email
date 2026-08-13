@@ -860,7 +860,9 @@ export const gmailDraftWriteOperations = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    operation: text("operation").$type<"create" | "update">().notNull(),
+    operation: text("operation")
+      .$type<"create" | "update" | "send">()
+      .notNull(),
     status: text("status").$type<"pending" | "complete">().notNull(),
     idempotencyKey: uuid("idempotency_key").notNull(),
     requestFingerprint: text("request_fingerprint").notNull(),
@@ -886,7 +888,7 @@ export const gmailDraftWriteOperations = pgTable(
     ),
     check(
       "gmail_draft_write_operations_operation_check",
-      sql`${table.operation} in ('create', 'update')`,
+      sql`${table.operation} in ('create', 'update', 'send')`,
     ),
     check(
       "gmail_draft_write_operations_status_check",
@@ -894,7 +896,7 @@ export const gmailDraftWriteOperations = pgTable(
     ),
     check(
       "gmail_draft_write_operations_result_check",
-      sql`(${table.status} = 'pending' and ${table.providerDraftId} is null and ${table.providerMessageId} is null and ${table.providerThreadId} is null and ${table.completedAt} is null) or (${table.status} = 'complete' and ${table.providerDraftId} is not null and ${table.providerMessageId} is not null and ${table.providerThreadId} is not null and ${table.completedAt} is not null)`,
+      sql`(${table.status} = 'pending' and ${table.completedAt} is null and ((${table.providerDraftId} is null and ${table.providerMessageId} is null and ${table.providerThreadId} is null) or (${table.providerDraftId} is not null and ${table.providerMessageId} is not null and ${table.providerThreadId} is not null))) or (${table.status} = 'complete' and ${table.providerDraftId} is not null and ${table.providerMessageId} is not null and ${table.providerThreadId} is not null and ${table.completedAt} is not null)`,
     ),
   ],
 );

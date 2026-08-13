@@ -380,6 +380,10 @@ test("Gmail provider writes require an authenticated session", async () => {
     { method: "DELETE", url: "/v1/gmail/drafts/not-a-uuid" },
     { method: "POST", url: "/v1/gmail/compose-drafts" },
     { method: "PUT", url: "/v1/gmail/compose-drafts/provider-draft" },
+    {
+      method: "POST",
+      url: "/v1/gmail/compose-drafts/provider-draft/send",
+    },
     { method: "POST", url: "/v1/drafts/not-a-uuid/save-to-gmail" },
   ] as const;
 
