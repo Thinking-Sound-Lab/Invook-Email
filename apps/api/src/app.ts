@@ -4,6 +4,10 @@ import { v4 as uuidv4 } from "uuid";
 
 import { registerAuthRoutes } from "./routes/auth";
 import { registerAgentRoutes } from "./routes/agent";
+import {
+  registerAttachmentRoutes,
+  type AttachmentRouteDependencies,
+} from "./routes/attachments";
 import { registerBatchWebhookRoutes } from "./routes/batch-webhook";
 import { registerDraftRoutes } from "./routes/drafts";
 import { registerGmailProviderRoutes } from "./routes/gmail-provider";
@@ -30,7 +34,9 @@ function isInvalidBodyError(error: unknown): boolean {
   );
 }
 
-export async function buildApi() {
+export async function buildApi(options: {
+  attachmentRoutes?: AttachmentRouteDependencies;
+} = {}) {
   const api = Fastify({
     bodyLimit: MAXIMUM_REQUEST_BODY_BYTES,
     exposeHeadRoutes: false,
@@ -71,6 +77,7 @@ export async function buildApi() {
   await api.register(registerHealthRoutes);
   await api.register(registerAuthRoutes);
   await api.register(registerSessionRoutes);
+  await api.register(registerAttachmentRoutes(options.attachmentRoutes));
   await api.register(registerAgentRoutes);
   await api.register(registerIndexingEventRoutes);
   await api.register(registerMailboxEventRoutes);

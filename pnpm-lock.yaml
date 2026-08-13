@@ -29,6 +29,9 @@ importers:
       '@invook/gmail':
         specifier: workspace:*
         version: link:../../packages/gmail
+      '@invook/object-storage':
+        specifier: workspace:*
+        version: link:../../packages/object-storage
       ai:
         specifier: ^7.0.58
         version: 7.0.58(zod@4.4.3)

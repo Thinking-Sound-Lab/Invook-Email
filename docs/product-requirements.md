@@ -63,6 +63,8 @@ Signing out clears only the browser session cookie. It does not revoke Google cr
 
 The first connection follows every Gmail result page with Spam and Trash included, stores exact raw MIME and attachment bytes in S3-compatible storage, and stores complete headers, text/HTML, normalized provider labels, Gmail Draft resources, tombstones, cursor/watch state, and audit state in PostgreSQL. It replays history from H0 and passes a completeness audit before indexing or Memory can start. Authenticated Pub/Sub pushes durably queue serialized history catch-up from the stored cursor. An expired cursor triggers watch renewal, full snapshot repair, replay, label/draft refresh, and another audit. Gmail remains canonical. The detailed boundary is defined in `docs/gmail-replica-contract.md`.
 
+Each connected account also has one durable daily watch-renewal action. A successful renewal catches up from the stored cursor and schedules its successor; routine renewal never runs the full-mailbox/object audit. Complete audits remain limited to initial readiness, expired-history repair, and explicit manual audit.
+
 ### Mail workspace
 
 The left sidebar contains:
@@ -77,7 +79,7 @@ The right pane is the action agent for Find and Write. It reads and selects targ
 
 ### Label settings
 
-Settings lists each label, its classification description, real analysis progress, and a delete control. Every label, including a built-in label, can be deleted. Deletion also removes that label's automatic and manual thread decisions and analysis history. Creating a label requires both a name and description. If native Batch is configured and Gmail indexing is complete, creation queues a durable PostgreSQL backfill job that checks every indexed thread. If Batch is unavailable, the label remains in an honest pending state.
+Settings lists each label, its classification description, real analysis progress, and a delete control. Every label, including a built-in label, can be deleted. Deletion also removes that label's automatic and manual thread decisions and analysis history. Creating a label requires both a name and description. If native Batch is configured and Gmail indexing is complete, creation queues a durable BullMQ backfill through the transactional PostgreSQL outbox that checks every indexed thread. If Batch is unavailable, the label remains in an honest pending state.
 
 Creating a label is deliberately different from processing new mail: a new definition has no prior decisions, so it scans every indexed thread once. After that backfill, newly indexed mail invalidates and recomputes label decisions only for the affected threads.
 
@@ -193,8 +195,7 @@ Worker
   -> BullMQ queues in persistent Redis
   -> Gmail snapshot, history replay, Pub/Sub catch-up, watch renewal, and audits
   -> S3-compatible raw MIME and attachment object storage
-  -> BullMQ search indexing and initial Memory
-  -> PostgreSQL jobs for Invook-label backfills and incremental Memory
+  -> BullMQ search indexing, Invook-label analysis, and initial or incremental Memory
   -> selected OpenAI or Azure OpenAI Batch provider for labels and Memory
   -> configured model endpoint for feedback and drafts
   -> validated results in PostgreSQL
@@ -239,7 +240,7 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `queue_outbox`
 - `audit_events`
 
-BullMQ owns queue locks, retries, and stalled-job recovery in Redis. PostgreSQL workflow tables retain user-visible progress, page-level resumability, provider-Batch correlation, and reliable publication across the PostgreSQL/Redis boundary. New tables should be added only for a working feature and demonstrated query need.
+BullMQ is the only job executor and owns queue locks, retries, and stalled-job recovery in Redis. PostgreSQL workflow tables retain user-visible progress, page-level resumability, provider-Batch correlation, and reliable publication across the PostgreSQL/Redis boundary. New tables should be added only for a working feature and demonstrated query need.
 
 ## API requirements
 
@@ -251,6 +252,7 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `POST` | `/v1/mailbox/sync` | Durably queue Gmail history catch-up from the stored replica cursor |
 | `POST` | `/v1/mailbox/audit` | Durably queue a manual completeness audit and repair |
 | `DELETE` | `/v1/mailbox/account` | Stop the watch, clean object storage, then delete the connected account |
+| `GET` | `/v1/attachments/:id/download` | Authorize the attachment and download its private stored bytes |
 | `GET` | `/v1/mailbox/events` | Stream authenticated durable mailbox-change events over SSE |
 | `POST` | `/v1/webhooks/google-pubsub` | Authenticate and durably deduplicate a Gmail Pub/Sub push |
 | `POST` | `/v1/labels` | Create a label and queue its full indexed-mailbox backfill |

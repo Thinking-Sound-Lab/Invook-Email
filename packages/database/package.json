@@ -10,7 +10,7 @@
     "db:generate": "node ../../scripts/run-with-root-env.mjs node_modules/drizzle-kit/bin.cjs generate",
     "db:migrate": "node ../../scripts/run-with-root-env.mjs node_modules/drizzle-kit/bin.cjs migrate",
     "db:studio": "node ../../scripts/run-with-root-env.mjs node_modules/drizzle-kit/bin.cjs studio",
-    "test": "node --import tsx --test src/mailbox-actions.test.ts",
+    "test": "node --import tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

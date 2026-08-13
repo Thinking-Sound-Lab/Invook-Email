@@ -5,6 +5,7 @@ import axios, {
 } from "axios";
 
 const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
+export const GMAIL_MESSAGE_LIST_MAX_RESULTS = 500;
 
 export type GmailProfile = {
   emailAddress: string;
@@ -294,13 +295,12 @@ export function listGmailMessages(
   accessToken: string,
   options: {
     labelId?: string;
-    maxResults: number;
     pageToken?: string;
   },
 ): Promise<GmailMessagePage> {
   const search = new URLSearchParams({
     includeSpamTrash: "true",
-    maxResults: String(options.maxResults),
+    maxResults: String(GMAIL_MESSAGE_LIST_MAX_RESULTS),
   });
   if (options.labelId) search.set("labelIds", options.labelId);
   if (options.pageToken) search.set("pageToken", options.pageToken);

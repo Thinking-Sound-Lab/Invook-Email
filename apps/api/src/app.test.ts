@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { after, before, test } from "node:test";
 
 import type { FastifyInstance } from "fastify";
 import { validate as validateUuid } from "uuid";
 
 import { composePlainTextGmailReply } from "@invook/gmail";
+import { ObjectStorageObjectNotFoundError } from "@invook/object-storage";
 
 import { buildApi } from "./app";
+import { createSessionCookie } from "./auth/session";
 import { parseGmailNotification } from "./routes/google-pubsub";
 
 let api: FastifyInstance;
@@ -16,6 +19,15 @@ const originalGooglePubSubAudience = process.env.GOOGLE_PUBSUB_PUSH_AUDIENCE;
 const originalGooglePubSubServiceAccountEmail =
   process.env.GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL;
 const originalGooglePubSubSubscription = process.env.GOOGLE_PUBSUB_SUBSCRIPTION;
+const originalTokenEncryptionKey = process.env.TOKEN_ENCRYPTION_KEY;
+const attachmentOwnerId = "11111111-1111-4111-8111-111111111111";
+const otherUserId = "22222222-2222-4222-8222-222222222222";
+const attachmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const missingObjectAttachmentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const absentAttachmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const attachmentBytes = Buffer.from([0, 1, 2, 253, 254, 255]);
+const attachmentChecksum = createHash("sha256").update(attachmentBytes).digest("hex");
+let attachmentObjectReadCount = 0;
 
 before(async () => {
   process.env.APP_URL = "http://localhost:3000";
@@ -23,7 +35,51 @@ before(async () => {
   delete process.env.GOOGLE_PUBSUB_PUSH_AUDIENCE;
   delete process.env.GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL;
   delete process.env.GOOGLE_PUBSUB_SUBSCRIPTION;
-  api = await buildApi();
+  process.env.TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+  api = await buildApi({
+    attachmentRoutes: {
+      getAttachment: async ({ userId, attachmentId: requestedAttachmentId }) => {
+        if (userId !== attachmentOwnerId || requestedAttachmentId === absentAttachmentId) {
+          return null;
+        }
+        if (
+          requestedAttachmentId !== attachmentId &&
+          requestedAttachmentId !== missingObjectAttachmentId
+        ) {
+          return null;
+        }
+        return {
+          id: requestedAttachmentId,
+          filename: 'folder/résumé\r\n".pdf',
+          mimeType: "text/html",
+          objectKey:
+            requestedAttachmentId === missingObjectAttachmentId
+              ? "attachments/missing"
+              : "attachments/owned",
+          checksumSha256: attachmentChecksum,
+          contentLength: attachmentBytes.byteLength,
+          etag: null,
+        };
+      },
+      readObject: async (objectKey) => {
+        attachmentObjectReadCount += 1;
+        if (objectKey === "attachments/missing") {
+          throw new ObjectStorageObjectNotFoundError();
+        }
+        return attachmentBytes;
+      },
+    },
+  });
+  api.get<{ Querystring: { userId: string } }>(
+    "/__test/session",
+    async (request, reply) => {
+      createSessionCookie(reply, {
+        userId: request.query.userId,
+        googleSubject: `subject:${request.query.userId}`,
+      });
+      await reply.send({ authenticated: true });
+    },
+  );
 });
 
 after(async () => {
@@ -54,7 +110,23 @@ after(async () => {
   } else {
     process.env.GOOGLE_PUBSUB_SUBSCRIPTION = originalGooglePubSubSubscription;
   }
+  if (originalTokenEncryptionKey === undefined) {
+    delete process.env.TOKEN_ENCRYPTION_KEY;
+  } else {
+    process.env.TOKEN_ENCRYPTION_KEY = originalTokenEncryptionKey;
+  }
 });
+
+async function sessionCookie(userId: string): Promise<string> {
+  const response = await api.inject({
+    method: "GET",
+    url: `/__test/session?userId=${encodeURIComponent(userId)}`,
+  });
+  const header = response.headers["set-cookie"];
+  const value = Array.isArray(header) ? header[0] : header;
+  assert.ok(value);
+  return value.split(";", 1)[0] ?? "";
+}
 
 test("liveness uses the existing response contract", async () => {
   const response = await api.inject({ method: "GET", url: "/health/live" });
@@ -134,6 +206,90 @@ test("mailbox audit and deletion require an authenticated session", async () => 
     assert.equal(response.statusCode, 401);
     assert.equal(response.json().title, "Authentication required");
   }
+});
+
+test("attachment downloads require authentication and a valid attachment ID", async () => {
+  const anonymous = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${attachmentId}/download`,
+  });
+  assert.equal(anonymous.statusCode, 401);
+
+  const invalid = await api.inject({
+    method: "GET",
+    url: "/v1/attachments/not-a-uuid/download",
+    headers: { cookie: await sessionCookie(attachmentOwnerId) },
+  });
+  assert.equal(invalid.statusCode, 400);
+  assert.equal(invalid.json().title, "Invalid attachment ID");
+});
+
+test("attachment downloads return exact stored bytes and safe private headers", async () => {
+  const response = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${attachmentId}/download`,
+    headers: { cookie: await sessionCookie(attachmentOwnerId) },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.rawPayload, attachmentBytes);
+  assert.equal(response.headers["content-type"], "application/octet-stream");
+  assert.equal(response.headers["content-length"], String(attachmentBytes.byteLength));
+  assert.equal(response.headers.etag, `"${attachmentChecksum}"`);
+  assert.equal(response.headers["cache-control"], "private, no-cache");
+  assert.equal(response.headers["x-content-type-options"], "nosniff");
+  assert.match(
+    response.headers["content-disposition"] ?? "",
+    /^attachment; filename="r_sum__\.pdf"; filename\*=UTF-8''r%C3%A9sum%C3%A9%22\.pdf$/,
+  );
+});
+
+test("attachment lookup denies cross-user access before object storage", async () => {
+  const readsBefore = attachmentObjectReadCount;
+  const response = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${attachmentId}/download`,
+    headers: { cookie: await sessionCookie(otherUserId) },
+  });
+
+  assert.equal(response.statusCode, 404);
+  assert.equal(response.json().title, "Attachment not found");
+  assert.equal(attachmentObjectReadCount, readsBefore);
+});
+
+test("attachment downloads report absent rows and missing stored objects", async () => {
+  const cookie = await sessionCookie(attachmentOwnerId);
+  const absent = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${absentAttachmentId}/download`,
+    headers: { cookie },
+  });
+  assert.equal(absent.statusCode, 404);
+  assert.equal(absent.json().title, "Attachment not found");
+
+  const missingObject = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${missingObjectAttachmentId}/download`,
+    headers: { cookie },
+  });
+  assert.equal(missingObject.statusCode, 404);
+  assert.equal(missingObject.json().title, "Stored attachment not found");
+});
+
+test("attachment ETags revalidate after authorization without reading storage", async () => {
+  const readsBefore = attachmentObjectReadCount;
+  const response = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${attachmentId}/download`,
+    headers: {
+      cookie: await sessionCookie(attachmentOwnerId),
+      "if-none-match": `"${attachmentChecksum}"`,
+    },
+  });
+
+  assert.equal(response.statusCode, 304);
+  assert.equal(response.headers.etag, `"${attachmentChecksum}"`);
+  assert.equal(attachmentObjectReadCount, readsBefore);
 });
 
 test("unknown routes use the API problem contract", async () => {

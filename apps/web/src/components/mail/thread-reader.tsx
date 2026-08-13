@@ -1,5 +1,6 @@
 import {
   ArrowLeft02Icon,
+  Download01Icon,
   MoreHorizontalIcon,
   StarIcon,
 } from "@hugeicons/core-free-icons";
@@ -101,6 +102,30 @@ export function ThreadReader({
                       <div className="mt-5 whitespace-pre-wrap break-words text-[15px] leading-7 text-foreground/88">
                         {formatMailBody(message.bodyText) || "This email has no indexed plain-text body."}
                       </div>
+
+                      {message.attachments.length > 0 ? (
+                        <div className="mt-5 flex flex-wrap gap-2" aria-label="Attachments">
+                          {message.attachments.map((attachment) => (
+                            <Button
+                              key={attachment.id}
+                              asChild
+                              variant="secondary"
+                              size="sm"
+                              className="max-w-full"
+                            >
+                              <a
+                                href={`/v1/attachments/${encodeURIComponent(attachment.id)}/download`}
+                                download
+                              >
+                                <HugeiconsIcon icon={Download01Icon} size={15} />
+                                <span className="truncate">
+                                  {formatMailText(attachment.filename) || "Attachment"}
+                                </span>
+                              </a>
+                            </Button>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </article>

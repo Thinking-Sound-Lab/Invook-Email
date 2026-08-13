@@ -845,47 +845,6 @@ export const gmailDrafts = pgTable(
   ],
 );
 
-export const jobs = pgTable(
-  "jobs",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id").references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id").references(() => connectedAccounts.id, {
-      onDelete: "cascade",
-    }),
-    jobType: text("job_type").notNull(),
-    status: text("status")
-      .$type<"queued" | "running" | "retry" | "complete" | "failed">()
-      .notNull()
-      .default("queued"),
-    payload: jsonb("payload").$type<JsonObject>().notNull().default({}),
-    result: jsonb("result").$type<JsonObject>(),
-    attempts: integer("attempts").notNull().default(0),
-    maxAttempts: integer("max_attempts").notNull().default(5),
-    lockedAt: timestampWithTimezone("locked_at"),
-    lockedBy: text("locked_by"),
-    lastError: text("last_error"),
-    idempotencyKey: text("idempotency_key"),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    uniqueIndex("jobs_idempotency_key_idx").on(table.idempotencyKey),
-    index("jobs_ready_idx")
-      .on(table.status, table.createdAt)
-      .where(sql`${table.status} in ('queued', 'retry')`),
-    check(
-      "jobs_status_check",
-      sql`${table.status} in ('queued', 'running', 'retry', 'complete', 'failed')`,
-    ),
-    check("jobs_attempts_check", sql`${table.attempts} >= 0`),
-    check("jobs_max_attempts_check", sql`${table.maxAttempts} > 0`),
-  ],
-);
-
 export const mailSyncRuns = pgTable(
   "mail_sync_runs",
   {
@@ -1071,6 +1030,8 @@ export const queueOutbox = pgTable(
         | "mail-memory-submit"
         | "mail-memory-events"
         | "mail-memory-feedback"
+        | "mail-label-submit"
+        | "mail-label-events"
       >()
       .notNull(),
     publishAttempts: integer("publish_attempts").notNull().default(0),
@@ -1090,7 +1051,7 @@ export const queueOutbox = pgTable(
     check("queue_outbox_publish_attempts_check", sql`${table.publishAttempts} >= 0`),
     check(
       "queue_outbox_queue_name_check",
-      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback')`,
+      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit', 'mail-label-events')`,
     ),
   ],
 );
