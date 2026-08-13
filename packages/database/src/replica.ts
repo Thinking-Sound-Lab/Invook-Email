@@ -506,7 +506,10 @@ export async function ingestGmailPushEvent(
     payload: Record<string, unknown>;
   },
   database: Database = getDatabase(),
-): Promise<{ duplicate: boolean; accountId: string | null }> {
+): Promise<
+  | { status: "ignored"; accountId: null }
+  | { status: "duplicate" | "stored"; accountId: string }
+> {
   return database.transaction(async (transaction) => {
     const [account] = await transaction
       .select({ id: connectedAccounts.id, userId: connectedAccounts.userId })
@@ -519,29 +522,29 @@ export async function ingestGmailPushEvent(
         ),
       )
       .limit(1);
+    if (!account) return { status: "ignored", accountId: null };
+
     const [event] = await transaction
       .insert(gmailPushEvents)
       .values({
         ...input,
-        accountId: account?.id ?? null,
+        accountId: account.id,
       })
       .onConflictDoNothing({ target: gmailPushEvents.providerEventId })
       .returning({ id: gmailPushEvents.id });
-    if (!event) return { duplicate: true, accountId: account?.id ?? null };
+    if (!event) return { status: "duplicate", accountId: account.id };
 
-    if (account) {
-      await enqueueWorkflowStep(
-        {
-          userId: account.userId,
-          accountId: account.id,
-          stepType: "gmail.history.catchup",
-          payload: { pushEventId: event.id },
-          idempotencyKey: `gmail-history-push:${event.id}`,
-        },
-        transaction as unknown as Database,
-      );
-    }
-    return { duplicate: false, accountId: account?.id ?? null };
+    await enqueueWorkflowStep(
+      {
+        userId: account.userId,
+        accountId: account.id,
+        stepType: "gmail.history.catchup",
+        payload: { pushEventId: event.id },
+        idempotencyKey: `gmail-history-push:${event.id}`,
+      },
+      transaction as unknown as Database,
+    );
+    return { status: "stored", accountId: account.id };
   });
 }
 
