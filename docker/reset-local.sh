@@ -120,9 +120,6 @@ compose run --rm --no-deps --entrypoint /bin/sh minio-init -c '
   }
 '
 
-echo "Data stores cleared; restarting the normal local stack."
-compose up -d --build --wait
-
 compose exec -T db sh -c "$psql_command" <<'SQL'
 DO $$
 DECLARE
@@ -202,4 +199,6 @@ echo "drizzle_migrations_preserved=$migration_count_after"
 echo "redis_keys_after_flush=$redis_keys_after_flush"
 echo "$queue_evidence"
 echo "mailbox_objects=0"
+echo "Data stores cleared and verified; restarting the normal local stack."
+compose up -d --build --wait
 echo "Local reset complete. Open http://localhost:3000 to start a new Google signup."

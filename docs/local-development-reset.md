@@ -16,6 +16,6 @@ Before mutation, the command stops `web`, `api` and `worker` and verifies that t
 
 It does not drop PostgreSQL schemas or the `drizzle.__drizzle_migrations` table, delete the MinIO bucket, remove Docker named volumes, or change `.env.local`, credentials, configuration, migrations or source files.
 
-After clearing the stores, the command rebuilds and restarts the normal stack. It fails unless all product tables, requested BullMQ job states and mailbox objects remain empty after restart, and unless the Drizzle migration row count is unchanged. Its final output includes zero counts for profiles, connected accounts, messages, embeddings, drafts, memories, workflows and queued jobs.
+After clearing the stores, the command verifies the zero-data state while API, web, and worker services are still stopped, so an authenticated inbound webhook cannot race the destructive operation's result. It fails unless all product tables, requested BullMQ job states and mailbox objects are empty and the Drizzle migration row count is unchanged. It then rebuilds and restarts the normal stack. Its final output includes zero counts for profiles, connected accounts, messages, embeddings, drafts, memories, workflows and queued jobs.
 
 Open [http://localhost:3000](http://localhost:3000) after completion. A clean state presents the `Sign in with Google` entry action. The reset does not perform Google OAuth or create mailbox data.
