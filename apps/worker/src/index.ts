@@ -42,6 +42,7 @@ import {
   clearPendingMemoryEvidence,
   applyGmailHistoryBatch,
   beginGmailReplicaAudit,
+  areIndexingPrerequisitesReady,
   completeGmailReplicaAudit,
   failGmailReplicaAudit,
   completeMailboxActionTarget,
@@ -49,9 +50,8 @@ import {
   completeMailSyncItem,
   completeMailSyncRun,
   completeGmailSynchronizationRecovery,
-  completeEmbeddingBatchSubmission,
+  completeIncrementalEmbedding,
   completeWorkflowStep,
-  countFailedEmbeddings,
   decryptGoogleCredential,
   DRAFT_FEEDBACK_VERSION,
   encryptGoogleCredential,
@@ -61,7 +61,6 @@ import {
   enqueueLabelBackfillContinuation,
   enqueueLabelBatchRetry,
   enqueueBatchEvent,
-  enqueueEmbeddingBackfillContinuation,
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
   enqueueWorkflowStep,
@@ -71,9 +70,12 @@ import {
   failMailboxActionTarget,
   failMailSyncItem,
   failWorkflowStep,
+  finalizeEmbeddingBatchSubmission,
+  finalizeEmptyEmbeddingBackfill,
   getActiveEmbeddingBatchSubmissionForAccount,
   getEmbeddingCandidates,
   getEmbeddingBatchSubmissionForStep,
+  getIndexingProgressForAccount,
   getDraftFeedbackSamples,
   getIndexedMessageIds,
   getLabelBatchSubmission,
@@ -107,9 +109,6 @@ import {
   MEMORY_SCHEMA_VERSION,
   markDraftFeedbackAnalyzed,
   markEmbeddingBatchSubmitted,
-  markMessageEmbeddingsFailed,
-  countIncompleteEmbeddings,
-  saveMessageEmbeddings,
   saveExtractedMemories,
   saveGmailWatchState,
   setGmailReplicaState,
@@ -1694,14 +1693,39 @@ async function runEmbeddingBackfill(job: WorkflowStepJob) {
   if (!job.accountId || !job.userId) {
     throw new Error("The embedding backfill has no connected account.");
   }
-  const config = getEmbeddingConfiguration();
+  const account = await getWorkerAccount(job.accountId);
+  if (!account) throw new Error("The embedding account is unavailable.");
   const batchAttempt =
     job.payload.batchAttempt === undefined
       ? 1
       : requiredInteger(job.payload.batchAttempt, "embedding batch attempt");
-  await setIndexingSyncStage(job.accountId, "running");
+  if (
+    !areIndexingPrerequisitesReady({
+      accountStatus: account.status,
+      mailSyncStage: account.syncState.mailSync,
+      replicaState: account.replicaState,
+    })
+  ) {
+    await setIndexingSyncStage(job.accountId, "failed");
+    return { status: "failed", reason: "mailbox_unavailable" };
+  }
+  const config = getEmbeddingConfiguration();
   let submission = await getEmbeddingBatchSubmissionForStep(job.id);
   let preparedBatch: Awaited<ReturnType<typeof prepareEmbeddingBatch>> = null;
+
+  if (submission?.status === "complete") {
+    const progress = await getIndexingProgressForAccount({
+      accountId: job.accountId,
+      modelId: config.modelId,
+      indexVersion: MAIL_INDEX_VERSION,
+    });
+    if (!progress) throw new Error("The embedding account is unavailable.");
+    return {
+      status: progress.state,
+      incompleteCount:
+        progress.totalMessageCount - progress.completedMessageCount,
+    };
+  }
 
   if (!submission) {
     const activeSubmission = await getActiveEmbeddingBatchSubmissionForAccount(
@@ -1716,6 +1740,8 @@ async function runEmbeddingBackfill(job: WorkflowStepJob) {
     }
   }
 
+  await setIndexingSyncStage(job.accountId, "running");
+
   if (!submission?.inputFileId && !submission?.providerBatchId) {
     const candidates = await getEmbeddingCandidates({
       accountId: job.accountId,
@@ -1725,33 +1751,32 @@ async function runEmbeddingBackfill(job: WorkflowStepJob) {
       includeFailed: job.payload.includeFailed !== false,
     });
     if (candidates.length === 0) {
-      const incompleteCount = await countIncompleteEmbeddings({
+      const result = await finalizeEmptyEmbeddingBackfill({
         accountId: job.accountId,
         modelId: config.modelId,
         indexVersion: MAIL_INDEX_VERSION,
+        submissionId: submission?.id,
       });
-      if (submission) {
-        await completeEmbeddingBatchSubmission({
-          submissionId: submission.id,
-          providerState: "not_submitted",
-          error: null,
-        });
-      }
-      await setIndexingSyncStage(
-        job.accountId,
-        incompleteCount === 0 ? "complete" : "failed",
-      );
       return {
-        status: incompleteCount === 0 ? "complete" : "failed",
-        incompleteCount,
+        status: result.stage,
+        incompleteCount: result.incompleteMessageCount,
       };
     }
 
     const batchCandidates = candidates.slice(0, embeddingBatchRequestLimit);
     preparedBatch = await prepareEmbeddingBatch({ messages: batchCandidates });
     if (!preparedBatch) {
-      await setIndexingSyncStage(job.accountId, "complete");
-      return { status: "complete", requestCount: 0 };
+      const result = await finalizeEmptyEmbeddingBackfill({
+        accountId: job.accountId,
+        modelId: config.modelId,
+        indexVersion: MAIL_INDEX_VERSION,
+        submissionId: submission?.id,
+      });
+      return {
+        status: result.stage,
+        requestCount: 0,
+        incompleteCount: result.incompleteMessageCount,
+      };
     }
     const hasMore =
       candidates.length > embeddingBatchRequestLimit ||
@@ -1865,6 +1890,18 @@ async function runIncrementalEmbedding(job: WorkflowStepJob) {
   if (!job.accountId) {
     throw new Error("The incremental embedding job has no connected account.");
   }
+  const account = await getWorkerAccount(job.accountId);
+  if (!account) throw new Error("The embedding account is unavailable.");
+  if (
+    !areIndexingPrerequisitesReady({
+      accountStatus: account.status,
+      mailSyncStage: account.syncState.mailSync,
+      replicaState: account.replicaState,
+    })
+  ) {
+    await setIndexingSyncStage(job.accountId, "failed");
+    return { status: "failed", reason: "mailbox_unavailable" };
+  }
   const messageId = requiredString(job.payload.messageId, "message ID");
   const config = getEmbeddingConfiguration();
   const candidates = await getEmbeddingCandidates({
@@ -1874,11 +1911,12 @@ async function runIncrementalEmbedding(job: WorkflowStepJob) {
     messageIds: [messageId],
   });
   if (candidates.length === 0) return { status: "current", messageId };
+  await setIndexingSyncStage(job.accountId, "running");
 
   const result = await embedMailboxTexts(
     candidates.map((candidate) => buildEmbeddingInput(candidate)),
   );
-  const savedCount = await saveMessageEmbeddings({
+  const completion = await completeIncrementalEmbedding({
     accountId: job.accountId,
     modelId: result.modelId,
     dimensions: result.dimensions,
@@ -1890,13 +1928,12 @@ async function runIncrementalEmbedding(job: WorkflowStepJob) {
       embedding: result.embeddings[index]!,
     })),
   });
-  const incompleteCount = await countIncompleteEmbeddings({
-    accountId: job.accountId,
-    modelId: result.modelId,
-    indexVersion: MAIL_INDEX_VERSION,
-  });
-  if (incompleteCount === 0) await setIndexingSyncStage(job.accountId, "complete");
-  return { status: "complete", messageId, savedCount, incompleteCount };
+  return {
+    status: completion.stage,
+    messageId,
+    savedCount: completion.savedCount,
+    incompleteCount: completion.incompleteMessageCount,
+  };
 }
 
 async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
@@ -1922,6 +1959,20 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
   if (!submission.providerBatchId || !submission.inputFileId) {
     throw new Error("The embedding batch submission is missing provider files.");
   }
+  if (submission.status === "complete") {
+    const progress = await getIndexingProgressForAccount({
+      accountId: submission.accountId,
+      modelId: submission.modelId,
+      indexVersion: submission.indexVersion,
+    });
+    if (!progress) throw new Error("The embedding account is unavailable.");
+    return {
+      status: progress.state,
+      duplicate: true,
+      incompleteCount:
+        progress.totalMessageCount - progress.completedMessageCount,
+    };
+  }
   const batch = await readEmbeddingBatch({
     providerBatchId: submission.providerBatchId,
     expectedKeys: submission.manifest.map((entry) => entry.key),
@@ -1939,12 +1990,8 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
   const manifestByKey = new Map(
     submission.manifest.map((entry) => [entry.key, entry]),
   );
-  const savedCount = await saveMessageEmbeddings({
-    accountId: submission.accountId,
-    modelId: submission.modelId,
-    dimensions: submission.dimensions,
-    indexVersion: submission.indexVersion,
-    values: [...batch.embeddingsByKey].flatMap(([key, embedding]) => {
+  const embeddingValues = [...batch.embeddingsByKey].flatMap(
+    ([key, embedding]) => {
       const entry = manifestByKey.get(key);
       return entry
         ? [{
@@ -1954,80 +2001,20 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
             embedding,
           }]
         : [];
-    }),
-  });
+    },
+  );
   const failedEntries = batch.failedKeys.flatMap((key) => {
     const entry = manifestByKey.get(key);
     return entry ? [{ messageId: entry.messageId, contentHash: entry.contentHash }] : [];
   });
-  if (failedEntries.length > 0) {
-    await markMessageEmbeddingsFailed({
-      modelId: submission.modelId,
-      indexVersion: submission.indexVersion,
-      values: failedEntries,
-      error: batch.providerError ?? `OpenAI embedding batch ended as ${batch.state}.`,
-    });
-  }
-
-  await completeEmbeddingBatchSubmission({
+  const completion = await finalizeEmbeddingBatchSubmission({
     submissionId: submission.id,
     providerState: batch.state,
-    error: batch.providerError,
+    providerError: batch.providerError,
+    values: embeddingValues,
+    failedValues: failedEntries,
+    batchAttemptLimit: embeddingBatchAttemptLimit,
   });
-
-  const [incompleteCount, failedCount, submittedBatchIds] = await Promise.all([
-    countIncompleteEmbeddings({
-      accountId: submission.accountId,
-      modelId: submission.modelId,
-      indexVersion: submission.indexVersion,
-    }),
-    countFailedEmbeddings({
-      accountId: submission.accountId,
-      modelId: submission.modelId,
-      indexVersion: submission.indexVersion,
-    }),
-    listSubmittedEmbeddingBatchIds({ accountId: submission.accountId }),
-  ]);
-  const continuationJobIds: string[] = [];
-  const providerCapacityAvailable = submittedBatchIds.length === 0;
-  const continueFailedEmbeddings =
-    providerCapacityAvailable &&
-    failedCount > 0 &&
-    (failedEntries.length === 0 ||
-      submission.batchAttempt < embeddingBatchAttemptLimit);
-  if (continueFailedEmbeddings) {
-    const retryJobId = await enqueueEmbeddingBackfillContinuation({
-      userId: submission.userId,
-      accountId: submission.accountId,
-      modelId: submission.modelId,
-      indexVersion: submission.indexVersion,
-      predecessorBatchId: submission.providerBatchId,
-      includeFailed: true,
-      batchAttempt:
-        failedEntries.length > 0 ? submission.batchAttempt + 1 : 1,
-      reason: "retry",
-    });
-    if (retryJobId) continuationJobIds.push(retryJobId);
-  } else if (providerCapacityAvailable && failedCount === 0 && incompleteCount > 0) {
-    const nextJobId = await enqueueEmbeddingBackfillContinuation({
-      userId: submission.userId,
-      accountId: submission.accountId,
-      modelId: submission.modelId,
-      indexVersion: submission.indexVersion,
-      predecessorBatchId: submission.providerBatchId,
-      includeFailed: false,
-      batchAttempt: 1,
-      reason: "next",
-    });
-    if (nextJobId) continuationJobIds.push(nextJobId);
-  }
-  const indexingStage =
-    incompleteCount === 0
-      ? "complete"
-      : submittedBatchIds.length > 0 || continuationJobIds.length > 0
-        ? "running"
-        : "failed";
-  await setIndexingSyncStage(submission.accountId, indexingStage);
 
   const inputFileDeleted = await deleteEmbeddingBatchInputFile(
     submission.inputFileId,
@@ -2039,9 +2026,9 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
   }
   return {
     status:
-      indexingStage === "complete"
+      completion.stage === "complete"
         ? "complete"
-        : indexingStage === "failed"
+        : completion.stage === "failed"
           ? "failed"
           : "continuing",
     providerState: batch.state,
@@ -2049,10 +2036,12 @@ async function runEmbeddingBatchEvent(job: WorkflowStepJob) {
     outputFileId: batch.outputFileId,
     errorFileId: batch.errorFileId,
     batchAttempt: submission.batchAttempt,
-    savedCount,
+    savedCount: completion.savedCount,
     failedRequestCount: failedEntries.length,
-    incompleteCount,
-    continuationJobIds,
+    incompleteCount: completion.incompleteMessageCount,
+    continuationJobIds: completion.continuationJobId
+      ? [completion.continuationJobId]
+      : [],
   };
 }
 

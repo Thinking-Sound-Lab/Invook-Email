@@ -10,9 +10,14 @@ export type AccountSyncState = {
   memory: AccountSyncStage;
 };
 
-export type IndexingStatusEvent = {
+export type IndexingProgress = {
   state: AccountSyncStage;
+  completedMessageCount: number;
+  failedMessageCount: number;
+  totalMessageCount: number;
 };
+
+export type IndexingStatusEvent = IndexingProgress;
 
 export const mailboxViews = [
   "all",
@@ -191,6 +196,7 @@ export type MailboxAccount = {
   email: string;
   status: "connected" | "reconnect_required" | "disconnected";
   syncState: AccountSyncState;
+  indexingProgress: IndexingProgress;
   lastSyncedAt: string | null;
   replica: {
     state:

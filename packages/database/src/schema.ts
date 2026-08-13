@@ -393,6 +393,7 @@ export const messages = pgTable(
     subject: text("subject").notNull().default(""),
     snippet: text("snippet").notNull().default(""),
     bodyText: text("body_text").notNull().default(""),
+    embeddingContentHash: text("embedding_content_hash").notNull(),
     bodyHtml: text("body_html"),
     rawObjectKey: text("raw_object_key"),
     rawChecksumSha256: text("raw_checksum_sha256"),
@@ -440,6 +441,10 @@ export const messages = pgTable(
     check(
       "messages_raw_content_length_check",
       sql`${table.rawContentLength} is null or ${table.rawContentLength} >= 0`,
+    ),
+    check(
+      "messages_embedding_content_hash_check",
+      sql`${table.embeddingContentHash} ~ '^[0-9a-f]{64}$'`,
     ),
   ],
 );

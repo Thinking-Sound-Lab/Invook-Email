@@ -13,6 +13,7 @@ export {
   type GoogleCredential,
 } from "./credentials";
 export * from "./gmail-draft-writes";
+export * from "./embedding-indexing";
 export * from "./mailbox-actions";
 export * from "./gmail-watch";
 export * from "./repositories";

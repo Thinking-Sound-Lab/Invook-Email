@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   MAIL_EMBEDDING_DIMENSIONS,
   systemLabelDefinitions,
+  type IndexingProgress,
   type LabelAnalysisState,
   type MailboxView,
   type SystemLabelKey,
@@ -26,7 +27,19 @@ import {
 } from "drizzle-orm";
 import { validate as validateUuid } from "uuid";
 
-import { getDatabase, type Database } from "./client";
+import {
+  getDatabase,
+  type Database,
+  type DatabaseExecutor,
+  type DatabaseTransaction,
+} from "./client";
+import {
+  areIndexingPrerequisitesReady,
+  createBatchEventIdempotencyKey,
+  decideEmbeddingContinuation,
+  deriveIndexingProgress,
+  type IndexingPrerequisiteState,
+} from "./embedding-indexing";
 import { enqueueDailyGmailWatchRenewal } from "./gmail-watch";
 import {
   accountSecrets,
@@ -65,6 +78,7 @@ import type {
 import {
   createInitialMailSyncRun,
   enqueueWorkflowStep,
+  enqueueWorkflowStepWithExecutor,
   enqueueWorkflowStepsWithExecutor,
   getLatestMemoryBatchSubmission,
   getWorkflowStepSubmission,
@@ -1547,28 +1561,118 @@ export async function getMailboxWorkspace(
   };
 }
 
-export async function getIndexingSyncStateForUser(
-  userId: string,
-  database: Database = getDatabase(),
-): Promise<{ accountId: string; state: AccountSyncState["indexing"] } | null> {
+async function getIndexingProgressWithExecutor(
+  input: {
+    accountId: string;
+    modelId: string | null;
+    indexVersion: number;
+  },
+  database: DatabaseExecutor,
+): Promise<IndexingProgress | null> {
   const [account] = await database
     .select({
       accountId: connectedAccounts.id,
+      accountStatus: connectedAccounts.status,
       syncState: connectedAccounts.syncState,
+      replicaState: gmailReplicaStates.state,
     })
+    .from(connectedAccounts)
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
+    .where(eq(connectedAccounts.id, input.accountId))
+    .limit(1);
+  if (!account) return null;
+
+  const [counts] = input.modelId
+    ? await database
+        .select({
+          totalMessageCount: count(messages.id),
+          completedMessageCount: count(
+            sql`case when ${messageEmbeddings.status} = 'complete'
+              and ${messageEmbeddings.contentHash} = ${messages.embeddingContentHash}
+              and ${messageEmbeddings.dimensions} = ${MAIL_EMBEDDING_DIMENSIONS}
+              and ${messageEmbeddings.embedding} is not null
+              then 1 end`,
+          ),
+          failedMessageCount: count(
+            sql`case when ${messageEmbeddings.status} = 'failed'
+              and ${messageEmbeddings.contentHash} = ${messages.embeddingContentHash}
+              and ${messageEmbeddings.dimensions} = ${MAIL_EMBEDDING_DIMENSIONS}
+              then 1 end`,
+          ),
+        })
+        .from(messages)
+        .leftJoin(
+          messageEmbeddings,
+          and(
+            eq(messageEmbeddings.messageId, messages.id),
+            eq(messageEmbeddings.modelId, input.modelId),
+            eq(messageEmbeddings.indexVersion, input.indexVersion),
+          ),
+        )
+        .where(eq(messages.accountId, input.accountId))
+    : await database
+        .select({
+          totalMessageCount: count(messages.id),
+          completedMessageCount: sql<number>`0`,
+          failedMessageCount: sql<number>`0`,
+        })
+        .from(messages)
+        .where(eq(messages.accountId, input.accountId));
+  const prerequisites: IndexingPrerequisiteState = {
+    accountStatus: account.accountStatus,
+    mailSyncStage: account.syncState.mailSync,
+    replicaState: account.replicaState,
+  };
+  return deriveIndexingProgress({
+    persistedStage: account.syncState.indexing,
+    prerequisites,
+    isModelConfigured: input.modelId !== null,
+    completedMessageCount: counts?.completedMessageCount ?? 0,
+    failedMessageCount: counts?.failedMessageCount ?? 0,
+    totalMessageCount: counts?.totalMessageCount ?? 0,
+  });
+}
+
+export async function getIndexingProgressForAccount(
+  input: {
+    accountId: string;
+    modelId: string | null;
+    indexVersion: number;
+  },
+  database: Database = getDatabase(),
+): Promise<IndexingProgress | null> {
+  return getIndexingProgressWithExecutor(input, database);
+}
+
+export async function getIndexingProgressForUser(
+  input: { userId: string; modelId: string | null; indexVersion: number },
+  database: Database = getDatabase(),
+): Promise<{ accountId: string; progress: IndexingProgress } | null> {
+  const [account] = await database
+    .select({ accountId: connectedAccounts.id })
     .from(connectedAccounts)
     .where(
       and(
-        eq(connectedAccounts.userId, userId),
+        eq(connectedAccounts.userId, input.userId),
         not(eq(connectedAccounts.status, "disconnected")),
       ),
     )
     .orderBy(desc(connectedAccounts.createdAt))
     .limit(1);
 
-  return account
-    ? { accountId: account.accountId, state: account.syncState.indexing }
-    : null;
+  if (!account) return null;
+  const progress = await getIndexingProgressWithExecutor(
+    {
+      accountId: account.accountId,
+      modelId: input.modelId,
+      indexVersion: input.indexVersion,
+    },
+    database,
+  );
+  return progress ? { accountId: account.accountId, progress } : null;
 }
 
 export async function getWorkerAccount(
@@ -1580,6 +1684,7 @@ export async function getWorkerAccount(
       id: connectedAccounts.id,
       userId: connectedAccounts.userId,
       email: connectedAccounts.email,
+      status: connectedAccounts.status,
       historyCursor: gmailReplicaStates.historyCursor,
       initialHistoryId: gmailReplicaStates.initialHistoryId,
       replicaState: gmailReplicaStates.state,
@@ -1620,12 +1725,10 @@ export async function setAccountSyncState(
       .set({ syncState, updatedAt: new Date() })
       .where(eq(connectedAccounts.id, accountId));
     await transaction.execute(
-      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId, state: syncState.indexing })})`,
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId })})`,
     );
   });
 }
-
-type DatabaseTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
 async function invalidateThreadAnalysis(
   transaction: DatabaseTransaction,
@@ -1693,6 +1796,15 @@ async function refreshIndexedThread(
   return true;
 }
 
+async function lockEmbeddingIndex(
+  transaction: DatabaseTransaction,
+  accountId: string,
+): Promise<void> {
+  await transaction.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`embedding-index:${accountId}`}, 0))`,
+  );
+}
+
 export async function upsertIndexedMessage(
   input: IndexedMessage,
   database: Database = getDatabase(),
@@ -1718,6 +1830,9 @@ export async function upsertIndexedMessage(
         .for("update")
         .limit(1);
       if (!activeRun) throw new InactiveMailSyncRunError(activeRunId);
+    }
+    if (input.ingestionMode === "incremental") {
+      await lockEmbeddingIndex(transaction, input.accountId);
     }
     await transaction.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerThreadId}`}, 0))`,
@@ -1852,6 +1967,7 @@ export async function upsertIndexedMessage(
           subject: input.subject,
           snippet: input.snippet,
           bodyText: input.bodyText,
+          embeddingContentHash: createMessageContentHash(input),
           bodyHtml: input.bodyHtml,
           rawObjectKey: input.rawObject?.key ?? null,
           rawChecksumSha256: input.rawObject?.checksumSha256 ?? null,
@@ -1873,6 +1989,7 @@ export async function upsertIndexedMessage(
             subject: input.subject,
             snippet: input.snippet,
             bodyText: input.bodyText,
+            embeddingContentHash: createMessageContentHash(input),
             bodyHtml: input.bodyHtml,
             rawObjectKey: input.rawObject?.key ?? null,
             rawChecksumSha256: input.rawObject?.checksumSha256 ?? null,
@@ -2027,6 +2144,31 @@ export async function upsertIndexedMessage(
             },
             transaction as unknown as Database,
           );
+          const [indexingChanged] = await transaction
+            .update(connectedAccounts)
+            .set({
+              syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{indexing}', to_jsonb(${"running"}::text), true)`,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(connectedAccounts.id, input.accountId),
+                sql`${connectedAccounts.syncState}->>'mailSync' = 'complete'`,
+                sql`${connectedAccounts.syncState}->>'indexing' = 'complete'`,
+                sql`exists (
+                  select 1
+                  from ${gmailReplicaStates}
+                  where ${gmailReplicaStates.accountId} = ${input.accountId}
+                    and ${gmailReplicaStates.state} = 'ready'
+                )`,
+              ),
+            )
+            .returning({ id: connectedAccounts.id });
+          if (indexingChanged) {
+            await transaction.execute(
+              sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.accountId })})`,
+            );
+          }
         }
       }
     }
@@ -2048,6 +2190,7 @@ export async function deleteIndexedMessage(
   database: Database = getDatabase(),
 ) {
   return database.transaction(async (transaction) => {
+    await lockEmbeddingIndex(transaction, input.accountId);
     const [storedMessage] = await transaction
       .select({
         id: messages.id,
@@ -3245,7 +3388,7 @@ export async function setIndexingSyncStage(
       })
       .where(eq(connectedAccounts.id, accountId));
     await transaction.execute(
-      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId, state: stage })})`,
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId })})`,
     );
   });
 }
@@ -3268,8 +3411,11 @@ export async function getEmbeddingCandidates(
       userId: messages.userId,
       subject: messages.subject,
       bodyText: messages.bodyText,
+      contentHash: messages.embeddingContentHash,
       embeddingStatus: messageEmbeddings.status,
       embeddedContentHash: messageEmbeddings.contentHash,
+      embeddingDimensions: messageEmbeddings.dimensions,
+      hasEmbedding: sql<boolean>`${messageEmbeddings.embedding} is not null`,
     })
     .from(messages)
     .innerJoin(threads, eq(threads.id, messages.threadId))
@@ -3287,6 +3433,12 @@ export async function getEmbeddingCandidates(
         input.messageIds ? inArray(messages.id, input.messageIds) : undefined,
         or(
           isNull(messageEmbeddings.id),
+          ne(messageEmbeddings.contentHash, messages.embeddingContentHash),
+          ne(messageEmbeddings.dimensions, MAIL_EMBEDDING_DIMENSIONS),
+          and(
+            eq(messageEmbeddings.status, "complete"),
+            isNull(messageEmbeddings.embedding),
+          ),
           input.includeFailed === false
             ? not(
                 inArray(messageEmbeddings.status, [
@@ -3299,21 +3451,28 @@ export async function getEmbeddingCandidates(
         ),
       ),
     )
-    .orderBy(asc(messages.sentAt))
+    .orderBy(asc(messages.sentAt), asc(messages.id))
     .limit(input.limit ?? 50_000);
 
   return rows.flatMap((row) => {
-    const contentHash = createMessageContentHash(row);
+    const isCurrentContract =
+      row.embeddedContentHash === row.contentHash &&
+      row.embeddingDimensions === MAIL_EMBEDDING_DIMENSIONS;
     if (
-      row.embeddedContentHash === contentHash &&
-      (row.embeddingStatus === "complete" || row.embeddingStatus === "submitted")
+      isCurrentContract &&
+      (row.embeddingStatus === "submitted" ||
+        (row.embeddingStatus === "complete" && row.hasEmbedding))
     ) {
       return [];
     }
-    if (row.embeddingStatus === "failed" && input.includeFailed === false) {
+    if (
+      isCurrentContract &&
+      row.embeddingStatus === "failed" &&
+      input.includeFailed === false
+    ) {
       return [];
     }
-    return [{ ...row, contentHash }];
+    return [row];
   });
 }
 
@@ -3488,24 +3647,79 @@ export async function recordEmbeddingProviderBatch(
   return submission;
 }
 
-export async function completeEmbeddingBatchSubmission(
+export async function finalizeEmptyEmbeddingBackfill(
   input: {
-    submissionId: string;
-    providerState: string;
-    error: string | null;
+    accountId: string;
+    modelId: string;
+    indexVersion: number;
+    submissionId?: string;
   },
   database: Database = getDatabase(),
-) {
-  await database
-    .update(embeddingBatchSubmissions)
-    .set({
-      status: "complete",
-      providerState: input.providerState,
-      lastError: input.error,
-      completedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(embeddingBatchSubmissions.id, input.submissionId));
+): Promise<{
+  stage: AccountSyncState["indexing"];
+  incompleteMessageCount: number;
+}> {
+  return database.transaction(async (transaction) => {
+    await lockEmbeddingIndex(transaction, input.accountId);
+    if (input.submissionId) {
+      await transaction
+        .update(embeddingBatchSubmissions)
+        .set({
+          status: "complete",
+          providerState: "not_submitted",
+          lastError: null,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(embeddingBatchSubmissions.id, input.submissionId),
+            eq(embeddingBatchSubmissions.accountId, input.accountId),
+            eq(embeddingBatchSubmissions.status, "preparing"),
+          ),
+        );
+    }
+    const [account] = await transaction
+      .select({
+        accountStatus: connectedAccounts.status,
+        syncState: connectedAccounts.syncState,
+        replicaState: gmailReplicaStates.state,
+      })
+      .from(connectedAccounts)
+      .innerJoin(
+        gmailReplicaStates,
+        eq(gmailReplicaStates.accountId, connectedAccounts.id),
+      )
+      .where(eq(connectedAccounts.id, input.accountId))
+      .limit(1);
+    const progress = await getIndexingProgressWithExecutor(input, transaction);
+    if (!account || !progress) {
+      throw new Error("The embedding account is unavailable.");
+    }
+    const prerequisites: IndexingPrerequisiteState = {
+      accountStatus: account.accountStatus,
+      mailSyncStage: account.syncState.mailSync,
+      replicaState: account.replicaState,
+    };
+    const incompleteMessageCount =
+      progress.totalMessageCount - progress.completedMessageCount;
+    const stage =
+      areIndexingPrerequisitesReady(prerequisites) &&
+      incompleteMessageCount === 0
+        ? "complete"
+        : "failed";
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{indexing}', to_jsonb(${stage}::text), true)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, input.accountId));
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.accountId })})`,
+    );
+    return { stage, incompleteMessageCount };
+  });
 }
 
 export async function markEmbeddingBatchSubmitted(
@@ -3520,36 +3734,77 @@ export async function markEmbeddingBatchSubmitted(
   database: Database = getDatabase(),
 ) {
   if (input.messages.length === 0) return;
-  await database
-    .insert(messageEmbeddings)
-    .values(
-      input.messages.map((message) => ({
-        userId: message.userId,
-        accountId: input.accountId,
-        messageId: message.messageId,
-        modelId: input.modelId,
-        dimensions: input.dimensions,
-        indexVersion: input.indexVersion,
-        contentHash: message.contentHash,
-        status: "submitted" as const,
-        providerBatchId: input.providerBatchId,
-      })),
-    )
-    .onConflictDoUpdate({
-      target: [
-        messageEmbeddings.messageId,
-        messageEmbeddings.modelId,
-        messageEmbeddings.indexVersion,
-      ],
-      set: {
-        dimensions: input.dimensions,
-        contentHash: sql`excluded.content_hash`,
-        status: "submitted",
-        providerBatchId: input.providerBatchId,
-        lastError: null,
-        updatedAt: new Date(),
-      },
-    });
+  await database.transaction(async (transaction) => {
+    await lockEmbeddingIndex(transaction, input.accountId);
+    const [activeSubmission] = await transaction
+      .select({ id: embeddingBatchSubmissions.id })
+      .from(embeddingBatchSubmissions)
+      .where(
+        and(
+          eq(embeddingBatchSubmissions.accountId, input.accountId),
+          eq(embeddingBatchSubmissions.providerBatchId, input.providerBatchId),
+          eq(embeddingBatchSubmissions.status, "submitted"),
+        ),
+      )
+      .limit(1);
+    if (!activeSubmission) return;
+    const currentMessages = await transaction
+      .select({
+        id: messages.id,
+        contentHash: messages.embeddingContentHash,
+      })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.accountId, input.accountId),
+          inArray(
+            messages.id,
+            input.messages.map((message) => message.messageId),
+          ),
+        ),
+      );
+    const currentHashes = new Map(
+      currentMessages.map((message) => [message.id, message.contentHash]),
+    );
+    const currentBatchMessages = input.messages.filter(
+      (message) => currentHashes.get(message.messageId) === message.contentHash,
+    );
+    if (currentBatchMessages.length === 0) return;
+    await transaction
+      .insert(messageEmbeddings)
+      .values(
+        currentBatchMessages.map((message) => ({
+          userId: message.userId,
+          accountId: input.accountId,
+          messageId: message.messageId,
+          modelId: input.modelId,
+          dimensions: input.dimensions,
+          indexVersion: input.indexVersion,
+          contentHash: message.contentHash,
+          status: "submitted" as const,
+          providerBatchId: input.providerBatchId,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [
+          messageEmbeddings.messageId,
+          messageEmbeddings.modelId,
+          messageEmbeddings.indexVersion,
+        ],
+        set: {
+          dimensions: input.dimensions,
+          contentHash: sql`excluded.content_hash`,
+          status: "submitted",
+          providerBatchId: input.providerBatchId,
+          lastError: null,
+          updatedAt: new Date(),
+        },
+        setWhere: or(
+          ne(messageEmbeddings.status, "complete"),
+          ne(messageEmbeddings.contentHash, sql`excluded.content_hash`),
+        ),
+      });
+  });
 }
 
 export async function listSubmittedEmbeddingBatchIds(
@@ -3575,51 +3830,33 @@ export async function listSubmittedEmbeddingBatchIds(
   );
 }
 
-export async function countFailedEmbeddings(
-  input: { accountId: string; modelId: string; indexVersion: number },
-  database: Database = getDatabase(),
-): Promise<number> {
-  const [result] = await database
-    .select({ value: count(messageEmbeddings.id) })
-    .from(messageEmbeddings)
-    .where(
-      and(
-        eq(messageEmbeddings.accountId, input.accountId),
-        eq(messageEmbeddings.modelId, input.modelId),
-        eq(messageEmbeddings.indexVersion, input.indexVersion),
-        eq(messageEmbeddings.status, "failed"),
-      ),
-    );
-  return result?.value ?? 0;
-}
+type MessageEmbeddingValue = {
+  messageId: string;
+  userId: string;
+  contentHash: string;
+  embedding: number[];
+};
 
-export async function saveMessageEmbeddings(
+async function saveMessageEmbeddingsWithExecutor(
   input: {
     accountId: string;
     modelId: string;
     dimensions: number;
     indexVersion: number;
-    values: Array<{
-      messageId: string;
-      userId: string;
-      contentHash: string;
-      embedding: number[];
-    }>;
+    values: MessageEmbeddingValue[];
   },
-  database: Database = getDatabase(),
+  database: DatabaseExecutor,
 ): Promise<number> {
   if (input.values.length === 0) return 0;
   const currentMessages = await database
     .select({
       id: messages.id,
-      subject: messages.subject,
-      bodyText: messages.bodyText,
+      contentHash: messages.embeddingContentHash,
     })
     .from(messages)
-    .innerJoin(threads, eq(threads.id, messages.threadId))
     .where(
       and(
-        eq(threads.accountId, input.accountId),
+        eq(messages.accountId, input.accountId),
         inArray(
           messages.id,
           input.values.map((value) => value.messageId),
@@ -3627,10 +3864,7 @@ export async function saveMessageEmbeddings(
       ),
     );
   const currentHashes = new Map(
-    currentMessages.map((message) => [
-      message.id,
-      createMessageContentHash(message),
-    ]),
+    currentMessages.map((message) => [message.id, message.contentHash]),
   );
   const values = input.values.filter(
     (value) => currentHashes.get(value.messageId) === value.contentHash,
@@ -3671,15 +3905,79 @@ export async function saveMessageEmbeddings(
   return values.length;
 }
 
-export async function markMessageEmbeddingsFailed(
+export async function completeIncrementalEmbedding(
   input: {
+    accountId: string;
+    modelId: string;
+    dimensions: number;
+    indexVersion: number;
+    values: MessageEmbeddingValue[];
+  },
+  database: Database = getDatabase(),
+): Promise<{
+  savedCount: number;
+  incompleteMessageCount: number;
+  stage: AccountSyncState["indexing"];
+}> {
+  return database.transaction(async (transaction) => {
+    await lockEmbeddingIndex(transaction, input.accountId);
+    const savedCount = await saveMessageEmbeddingsWithExecutor(input, transaction);
+    const [account] = await transaction
+      .select({
+        accountStatus: connectedAccounts.status,
+        syncState: connectedAccounts.syncState,
+        replicaState: gmailReplicaStates.state,
+      })
+      .from(connectedAccounts)
+      .innerJoin(
+        gmailReplicaStates,
+        eq(gmailReplicaStates.accountId, connectedAccounts.id),
+      )
+      .where(eq(connectedAccounts.id, input.accountId))
+      .limit(1);
+    const progress = await getIndexingProgressWithExecutor(input, transaction);
+    if (!account || !progress) {
+      throw new Error("The embedding account is unavailable.");
+    }
+    const prerequisites: IndexingPrerequisiteState = {
+      accountStatus: account.accountStatus,
+      mailSyncStage: account.syncState.mailSync,
+      replicaState: account.replicaState,
+    };
+    const incompleteMessageCount =
+      progress.totalMessageCount - progress.completedMessageCount;
+    const stage = !areIndexingPrerequisitesReady(prerequisites)
+      ? "failed"
+      : incompleteMessageCount === 0
+        ? "complete"
+        : progress.failedMessageCount > 0 &&
+            account.syncState.indexing === "failed"
+          ? "failed"
+          : "running";
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{indexing}', to_jsonb(${stage}::text), true)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, input.accountId));
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.accountId })})`,
+    );
+    return { savedCount, incompleteMessageCount, stage };
+  });
+}
+
+async function markMessageEmbeddingsFailedWithExecutor(
+  input: {
+    accountId: string;
     modelId: string;
     indexVersion: number;
     values: Array<{ messageId: string; contentHash: string }>;
     error: string;
   },
-  database: Database = getDatabase(),
-) {
+  database: DatabaseExecutor,
+): Promise<void> {
   for (const value of input.values) {
     await database
       .update(messageEmbeddings)
@@ -3695,81 +3993,194 @@ export async function markMessageEmbeddingsFailed(
           eq(messageEmbeddings.modelId, input.modelId),
           eq(messageEmbeddings.indexVersion, input.indexVersion),
           eq(messageEmbeddings.contentHash, value.contentHash),
+          sql`exists (
+            select 1
+            from ${messages}
+            where ${messages.id} = ${value.messageId}
+              and ${messages.accountId} = ${input.accountId}
+              and ${messages.embeddingContentHash} = ${value.contentHash}
+          )`,
         ),
       );
   }
 }
 
-export async function countIncompleteEmbeddings(
-  input: { accountId: string; modelId: string; indexVersion: number },
-  database: Database = getDatabase(),
-): Promise<number> {
-  const [result] = await database
-    .select({ value: count(messages.id) })
-    .from(messages)
-    .innerJoin(threads, eq(threads.id, messages.threadId))
-    .leftJoin(
-      messageEmbeddings,
-      and(
-        eq(messageEmbeddings.messageId, messages.id),
-        eq(messageEmbeddings.modelId, input.modelId),
-        eq(messageEmbeddings.indexVersion, input.indexVersion),
-        eq(messageEmbeddings.status, "complete"),
-      ),
-    )
-    .where(
-      and(
-        eq(threads.accountId, input.accountId),
-        sql`${messageEmbeddings.id} is null`,
-      ),
-    );
-  return result?.value ?? 0;
-}
-
-export async function enqueueEmbeddingBackfillContinuation(
+export async function finalizeEmbeddingBatchSubmission(
   input: {
-    userId: string;
-    accountId: string;
-    modelId: string;
-    indexVersion: number;
-    predecessorBatchId: string;
-    includeFailed: boolean;
-    batchAttempt: number;
-    reason: "next" | "retry";
+    submissionId: string;
+    providerState: string;
+    providerError: string | null;
+    values: MessageEmbeddingValue[];
+    failedValues: Array<{ messageId: string; contentHash: string }>;
+    batchAttemptLimit: number;
   },
   database: Database = getDatabase(),
-): Promise<string | null> {
-  if (input.reason === "retry") {
-    const [activeRetry] = await database
-      .select({ id: workflowSteps.id })
-      .from(workflowSteps)
+): Promise<{
+  alreadyFinalized: boolean;
+  stage: AccountSyncState["indexing"];
+  savedCount: number;
+  incompleteMessageCount: number;
+  failedMessageCount: number;
+  continuationJobId: string | null;
+}> {
+  return database.transaction(async (transaction) => {
+    const [submissionIdentity] = await transaction
+      .select({ accountId: embeddingBatchSubmissions.accountId })
+      .from(embeddingBatchSubmissions)
+      .where(eq(embeddingBatchSubmissions.id, input.submissionId))
+      .limit(1);
+    if (!submissionIdentity) {
+      throw new Error("The embedding batch submission could not be matched.");
+    }
+    await lockEmbeddingIndex(transaction, submissionIdentity.accountId);
+    const [submission] = await transaction
+      .select()
+      .from(embeddingBatchSubmissions)
+      .where(eq(embeddingBatchSubmissions.id, input.submissionId))
+      .for("update")
+      .limit(1);
+    if (!submission) {
+      throw new Error("The embedding batch submission could not be matched.");
+    }
+    if (submission.status === "complete") {
+      const progress = await getIndexingProgressWithExecutor(
+        {
+          accountId: submission.accountId,
+          modelId: submission.modelId,
+          indexVersion: submission.indexVersion,
+        },
+        transaction,
+      );
+      if (!progress) throw new Error("The embedding account is unavailable.");
+      return {
+        alreadyFinalized: true,
+        stage: progress.state,
+        savedCount: 0,
+        incompleteMessageCount:
+          progress.totalMessageCount - progress.completedMessageCount,
+        failedMessageCount: progress.failedMessageCount,
+        continuationJobId: null,
+      };
+    }
+    if (submission.status !== "submitted") {
+      throw new Error(`The embedding batch submission is ${submission.status}.`);
+    }
+    if (!submission.providerBatchId) {
+      throw new Error("The embedding batch submission has no provider identity.");
+    }
+
+    const savedCount = await saveMessageEmbeddingsWithExecutor(
+      {
+        accountId: submission.accountId,
+        modelId: submission.modelId,
+        dimensions: submission.dimensions,
+        indexVersion: submission.indexVersion,
+        values: input.values,
+      },
+      transaction,
+    );
+    await markMessageEmbeddingsFailedWithExecutor(
+      {
+        accountId: submission.accountId,
+        modelId: submission.modelId,
+        indexVersion: submission.indexVersion,
+        values: input.failedValues,
+        error:
+          input.providerError ??
+          `OpenAI embedding batch ended as ${input.providerState}.`,
+      },
+      transaction,
+    );
+    await transaction
+      .update(embeddingBatchSubmissions)
+      .set({
+        status: "complete",
+        providerState: input.providerState,
+        lastError: input.providerError,
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
       .where(
         and(
-          eq(workflowSteps.accountId, input.accountId),
-          eq(workflowSteps.stepType, "embedding.backfill"),
-          inArray(workflowSteps.status, ["queued", "running"]),
-          sql`${workflowSteps.input}->>'includeFailed' = 'true'`,
+          eq(embeddingBatchSubmissions.id, submission.id),
+          eq(embeddingBatchSubmissions.status, "submitted"),
         ),
+      );
+
+    const [account] = await transaction
+      .select({
+        accountStatus: connectedAccounts.status,
+        syncState: connectedAccounts.syncState,
+        replicaState: gmailReplicaStates.state,
+      })
+      .from(connectedAccounts)
+      .innerJoin(
+        gmailReplicaStates,
+        eq(gmailReplicaStates.accountId, connectedAccounts.id),
       )
-      .orderBy(asc(workflowSteps.createdAt))
+      .where(eq(connectedAccounts.id, submission.accountId))
       .limit(1);
-    if (activeRetry) return activeRetry.id;
-  }
-  return enqueueWorkflowStep(
-    {
-      userId: input.userId,
-      accountId: input.accountId,
-      stepType: "embedding.backfill",
-      payload: {
-        modelId: input.modelId,
-        indexVersion: input.indexVersion,
-        includeFailed: input.includeFailed,
-        batchAttempt: input.batchAttempt,
+    if (!account) throw new Error("The embedding account is unavailable.");
+    const progress = await getIndexingProgressWithExecutor(
+      {
+        accountId: submission.accountId,
+        modelId: submission.modelId,
+        indexVersion: submission.indexVersion,
       },
-      idempotencyKey: `embedding.backfill.continue:${input.reason}:${input.predecessorBatchId}`,
-    },
-    database,
-  );
+      transaction,
+    );
+    if (!progress) throw new Error("The embedding account is unavailable.");
+    const prerequisites: IndexingPrerequisiteState = {
+      accountStatus: account.accountStatus,
+      mailSyncStage: account.syncState.mailSync,
+      replicaState: account.replicaState,
+    };
+    const incompleteMessageCount =
+      progress.totalMessageCount - progress.completedMessageCount;
+    const decision = decideEmbeddingContinuation({
+      prerequisites,
+      hasMore: submission.hasMore,
+      incompleteMessageCount,
+      failedMessageCount: progress.failedMessageCount,
+      batchAttempt: submission.batchAttempt,
+      batchAttemptLimit: input.batchAttemptLimit,
+    });
+    const continuationJobId = decision.continuation
+      ? await enqueueWorkflowStepWithExecutor(
+          {
+            userId: submission.userId,
+            accountId: submission.accountId,
+            stepType: "embedding.backfill",
+            payload: {
+              modelId: submission.modelId,
+              indexVersion: submission.indexVersion,
+              includeFailed: decision.continuation.includeFailed,
+              batchAttempt: decision.continuation.batchAttempt,
+            },
+            idempotencyKey: `embedding.backfill.continue:${decision.continuation.reason}:${submission.providerBatchId}`,
+          },
+          transaction,
+        )
+      : null;
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{indexing}', to_jsonb(${decision.stage}::text), true)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, submission.accountId));
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: submission.accountId })})`,
+    );
+    return {
+      alreadyFinalized: false,
+      stage: decision.stage,
+      savedCount,
+      incompleteMessageCount,
+      failedMessageCount: progress.failedMessageCount,
+      continuationJobId,
+    };
+  });
 }
 
 export async function getReplyDraftContext(
@@ -4218,7 +4629,10 @@ export async function enqueueBatchEvent(
                   embeddingBatchSubmissions.providerBatchId,
                   input.providerBatchId,
                 ),
-                eq(embeddingBatchSubmissions.status, "submitted"),
+                inArray(embeddingBatchSubmissions.status, [
+                  "submitted",
+                  "complete",
+                ]),
               ),
             )
             .limit(1)
@@ -4259,7 +4673,10 @@ export async function enqueueBatchEvent(
       provider: input.provider,
       providerBatchId: input.providerBatchId,
     };
-    const idempotencyKey = `${input.provider}.batch-event:${input.eventType}:${input.providerBatchId}`;
+    const idempotencyKey = createBatchEventIdempotencyKey({
+      provider: input.provider,
+      webhookId: input.webhookId,
+    });
     if (submission) {
       const eventJobType = submission.stepType.startsWith("embedding.")
         ? "embedding.batch.event"

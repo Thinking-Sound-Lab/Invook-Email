@@ -13,7 +13,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
-  AccountSyncStage,
+  IndexingProgress,
   MailboxActionProposal,
 } from "@invook/contracts";
 import { DefaultChatTransport, type UIDataTypes, type UIMessage } from "ai";
@@ -39,10 +39,11 @@ type MailAgentUIMessage = UIMessage<
 >;
 
 interface IndexingStatusProps {
-  state: AccountSyncStage;
+  progress: IndexingProgress;
 }
 
-function IndexingStatus({ state }: IndexingStatusProps) {
+function IndexingStatus({ progress }: IndexingStatusProps) {
+  const { state } = progress;
   if (state === "complete") return null;
 
   const running = state === "running";
@@ -53,10 +54,14 @@ function IndexingStatus({ state }: IndexingStatusProps) {
       ? "Indexing your mail"
       : "Indexing pending";
   const detail = failed
-    ? "Full-text search still works while indexing needs attention."
+    ? progress.totalMessageCount > 0
+      ? `${progress.completedMessageCount.toLocaleString()} of ${progress.totalMessageCount.toLocaleString()} messages indexed${progress.failedMessageCount > 0 ? `; ${progress.failedMessageCount.toLocaleString()} failed` : ""}. Full-text search still works.`
+      : "Indexing is unavailable until mailbox synchronization recovers."
     : running
-      ? "Search works now. Results improve as indexing finishes."
-      : "Semantic search is not ready yet.";
+      ? `${progress.completedMessageCount.toLocaleString()} of ${progress.totalMessageCount.toLocaleString()} messages indexed.`
+      : progress.totalMessageCount > 0
+        ? `${progress.totalMessageCount.toLocaleString()} messages are waiting to be indexed.`
+        : "Semantic search is not ready yet.";
   const icon = failed ? Alert02Icon : running ? Loading01Icon : Clock01Icon;
 
   return (
@@ -94,14 +99,14 @@ export interface AgentPanelProps {
   openThreadId?: string;
   openThreadSubject?: string;
   aiConfigured: boolean;
-  indexingState: AccountSyncStage;
+  indexingProgress: IndexingProgress;
 }
 
 export function AgentPanel({
   openThreadId,
   openThreadSubject,
   aiConfigured,
-  indexingState,
+  indexingProgress,
 }: AgentPanelProps) {
   const transport = useMemo(
     () =>
@@ -174,7 +179,7 @@ export function AgentPanel({
       </header>
 
       <div className="mx-3 space-y-2">
-        <IndexingStatus state={indexingState} />
+        <IndexingStatus progress={indexingProgress} />
         {openThreadSubject ? (
           <div className="rounded-lg bg-background/45 px-3 py-2.5">
             <p className="text-xs font-medium text-muted-foreground">Current thread</p>
