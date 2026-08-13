@@ -11,7 +11,11 @@ import type {
   MemoryGenerationProgress,
   AiReplyDraft,
 } from "@invook/contracts";
-import { getMailboxWorkspace } from "@invook/database";
+import {
+  getIndexingProgressForAccount,
+  getMailboxWorkspace,
+  MAIL_INDEX_VERSION,
+} from "@invook/database";
 
 function resultNumber(
   value: Record<string, unknown> | null,
@@ -122,6 +126,14 @@ async function serializeMemoryProgress(
 export async function serializeWorkspace(
   workspace: NonNullable<Awaited<ReturnType<typeof getMailboxWorkspace>>>,
 ): Promise<MailboxWorkspace> {
+  const indexingProgress = await getIndexingProgressForAccount({
+    accountId: workspace.account.id,
+    modelId: process.env.OPENAI_EMBEDDING_MODEL?.trim() || null,
+    indexVersion: MAIL_INDEX_VERSION,
+  });
+  if (!indexingProgress) {
+    throw new Error("The indexing account is unavailable.");
+  }
   return {
     aiConfigured: isAiConfigured(),
     batchConfigured: isMemoryBatchConfigured(),
@@ -129,7 +141,11 @@ export async function serializeWorkspace(
       id: workspace.account.id,
       email: workspace.account.email,
       status: workspace.account.status,
-      syncState: workspace.account.syncState,
+      syncState: {
+        ...workspace.account.syncState,
+        indexing: indexingProgress.state,
+      },
+      indexingProgress,
       lastSyncedAt: workspace.account.lastSyncedAt?.toISOString() ?? null,
       replica: {
         state: workspace.account.replicaState,

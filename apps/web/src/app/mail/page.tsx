@@ -196,7 +196,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           openThreadId={selectedThread?.id}
           openThreadSubject={selectedThread?.subject || undefined}
           aiConfigured={workspace.aiConfigured}
-          indexingState={workspace.account.syncState.indexing}
+          indexingProgress={workspace.account.indexingProgress}
         />
       </div>
     </main>

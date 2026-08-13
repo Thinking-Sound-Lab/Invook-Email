@@ -65,6 +65,8 @@ The first connection follows every Gmail result page with Spam and Trash include
 
 Each connected account also has one durable daily watch-renewal action. A successful renewal catches up from the stored cursor and schedules its successor; routine renewal never runs the full-mailbox/object audit. Complete audits remain limited to initial readiness, expired-history repair, and explicit manual audit.
 
+Historical search indexing uses durable 2,000-message provider batches. A signed terminal provider webhook commits current-content embeddings, provider-submission completion, any retry or next-batch outbox step, and account progress in one PostgreSQL transaction. Duplicate webhook delivery is idempotent. Indexing is complete only when every current message has a complete embedding for the configured model, dimensions, content hash, and index version; unavailable mailbox prerequisites surface as failed rather than continuing in process memory.
+
 ### Mail workspace
 
 The left sidebar contains:

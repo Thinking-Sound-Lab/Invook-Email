@@ -23,6 +23,7 @@ import {
   workflowSteps,
 } from "./schema";
 import * as schema from "./schema";
+import { createMessageContentHash } from "./repositories";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -73,6 +74,10 @@ test(
           providerMessageId: `provider-message-${firstMessageId}`,
           direction: "incoming",
           sender: { raw: "Sender <sender@example.com>", email: "sender@example.com" },
+          embeddingContentHash: createMessageContentHash({
+            subject: "",
+            bodyText: "",
+          }),
           internalDate: new Date("2026-08-13T08:00:00.000Z"),
           sentAt: new Date("2026-08-13T08:00:00.000Z"),
         },
@@ -84,6 +89,10 @@ test(
           providerMessageId: `provider-message-${secondMessageId}`,
           direction: "incoming",
           sender: { raw: "Other <other@example.com>", email: "other@example.com" },
+          embeddingContentHash: createMessageContentHash({
+            subject: "",
+            bodyText: "",
+          }),
           internalDate: new Date("2026-08-13T09:00:00.000Z"),
           sentAt: new Date("2026-08-13T09:00:00.000Z"),
         },
