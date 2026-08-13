@@ -270,3 +270,24 @@ export async function abandonPendingGmailDraftWrite(
       ),
     );
 }
+
+export async function abandonUnpreparedGmailDraftSend(
+  input: { operationId: string; userId: string },
+  database: Database = getDatabase(),
+): Promise<boolean> {
+  const [abandoned] = await database
+    .delete(gmailDraftWriteOperations)
+    .where(
+      and(
+        eq(gmailDraftWriteOperations.id, input.operationId),
+        eq(gmailDraftWriteOperations.userId, input.userId),
+        eq(gmailDraftWriteOperations.operation, "send"),
+        eq(gmailDraftWriteOperations.status, "pending"),
+        isNull(gmailDraftWriteOperations.providerDraftId),
+        isNull(gmailDraftWriteOperations.providerMessageId),
+        isNull(gmailDraftWriteOperations.providerThreadId),
+      ),
+    )
+    .returning({ id: gmailDraftWriteOperations.id });
+  return Boolean(abandoned);
+}

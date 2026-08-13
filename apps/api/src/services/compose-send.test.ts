@@ -57,8 +57,9 @@ function memoryDependencies(input: {
     completeWrite: async ({ operationId, result }) => {
       stored = { outcome: "complete", operationId, result };
     },
-    abandonWrite: async () => {
+    abandonUnpreparedSend: async () => {
       stored = null;
+      return true;
     },
     getDraft: async () => {
       if (isSent) throw gmailNotFound();
@@ -148,4 +149,24 @@ test("an ambiguous send response recovers from Gmail's SENT message", async () =
   assert.equal(retry.message.providerMessageId, "provider-draft-message");
   assert.equal(counts.send, 1);
   assert.equal(counts.catchup, 1);
+});
+
+test("a missing draft clears only an unprepared send operation", async () => {
+  let abandoned = false;
+  const { dependencies } = memoryDependencies();
+  dependencies.beginWrite = async () => ({
+    outcome: "pending",
+    operationId: "operation-1",
+    result: null,
+  });
+  dependencies.getDraft = async () => {
+    throw gmailNotFound();
+  };
+  dependencies.abandonUnpreparedSend = async () => {
+    abandoned = true;
+    return true;
+  };
+
+  await assert.rejects(sendComposeDraft(sendInput, dependencies), GmailApiError);
+  assert.equal(abandoned, true);
 });

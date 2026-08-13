@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { GmailComposeSendResponse } from "@invook/contracts";
 import {
-  abandonPendingGmailDraftWrite,
+  abandonUnpreparedGmailDraftSend,
   beginGmailDraftWrite,
   completeGmailDraftWrite,
   enqueueGmailHistoryCatchup,
@@ -39,7 +39,7 @@ export interface ComposeSendDependencies {
   beginWrite: typeof beginGmailDraftWrite;
   prepareSend: typeof prepareGmailDraftSend;
   completeWrite: typeof completeGmailDraftWrite;
-  abandonWrite: typeof abandonPendingGmailDraftWrite;
+  abandonUnpreparedSend: typeof abandonUnpreparedGmailDraftSend;
   getDraft: typeof getGmailDraft;
   getMessageState: typeof getGmailMessageState;
   sendDraft: typeof sendGmailDraft;
@@ -50,7 +50,7 @@ const defaultDependencies: ComposeSendDependencies = {
   beginWrite: beginGmailDraftWrite,
   prepareSend: prepareGmailDraftSend,
   completeWrite: completeGmailDraftWrite,
-  abandonWrite: abandonPendingGmailDraftWrite,
+  abandonUnpreparedSend: abandonUnpreparedGmailDraftSend,
   getDraft: getGmailDraft,
   getMessageState: getGmailMessageState,
   sendDraft: sendGmailDraft,
@@ -176,7 +176,6 @@ async function recoverSentMessage(
 async function prepareAndSend(
   input: SendComposeDraftInput,
   operationId: string,
-  canAbandonMissingDraft: boolean,
   dependencies: ComposeSendDependencies,
 ): Promise<GmailComposeSendResponse> {
   let draft: GmailDraft;
@@ -187,8 +186,11 @@ async function prepareAndSend(
     );
   } catch (error) {
     if (error instanceof GmailApiError && error.status === 404) {
-      if (!canAbandonMissingDraft) throw new GmailDraftSendPendingError();
-      await dependencies.abandonWrite({ operationId, userId: input.userId });
+      const wasAbandoned = await dependencies.abandonUnpreparedSend({
+        operationId,
+        userId: input.userId,
+      });
+      if (!wasAbandoned) throw new GmailDraftSendPendingError();
     }
     throw error;
   }
@@ -256,10 +258,10 @@ export async function sendComposeDraft(
     return completedResponse(input, write.operationId, write.result, dependencies);
   }
   if (write.outcome === "claimed") {
-    return prepareAndSend(input, write.operationId, true, dependencies);
+    return prepareAndSend(input, write.operationId, dependencies);
   }
   if (!write.result) {
-    return prepareAndSend(input, write.operationId, false, dependencies);
+    return prepareAndSend(input, write.operationId, dependencies);
   }
   return recoverPreparedSend(
     input,

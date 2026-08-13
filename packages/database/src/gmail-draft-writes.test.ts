@@ -7,6 +7,7 @@ import postgres from "postgres";
 import { v4 as uuidv4 } from "uuid";
 
 import {
+  abandonUnpreparedGmailDraftSend,
   beginGmailDraftWrite,
   completeGmailDraftWrite,
   GmailDraftWriteConflictError,
@@ -112,6 +113,27 @@ test(
         { operationId: sendClaimed.operationId, userId, result },
         database,
       );
+
+      const unpreparedSendInput = {
+        ...sendInput,
+        idempotencyKey: uuidv4(),
+      };
+      const unpreparedSend = await beginGmailDraftWrite(
+        unpreparedSendInput,
+        database,
+      );
+      assert.equal(
+        await abandonUnpreparedGmailDraftSend(
+          { operationId: unpreparedSend.operationId, userId },
+          database,
+        ),
+        true,
+      );
+      const reclaimedSend = await beginGmailDraftWrite(
+        unpreparedSendInput,
+        database,
+      );
+      assert.equal(reclaimedSend.outcome, "claimed");
 
       const catchupInput = {
         userId,
