@@ -4,17 +4,19 @@ import {
   eq,
   gte,
   inArray,
-  isNull,
   lt,
   or,
   sql,
 } from "drizzle-orm";
 
-import { getDatabase, type Database } from "./client";
+import {
+  getDatabase,
+  withGmailAccountControlLock,
+  type Database,
+} from "./client";
 import {
   createDailyGmailWatchRenewalStep,
   createGmailWatchRecoveryStep,
-  GMAIL_WATCH_RENEWAL_INTERVAL_MS,
 } from "./gmail-watch-schedule";
 import {
   connectedAccounts,
@@ -49,9 +51,6 @@ export async function ensureDailyGmailWatchRenewals(
   database: Database = getDatabase(),
 ): Promise<number> {
   const now = input.now ?? new Date();
-  const staleStartedBefore = new Date(
-    now.getTime() - GMAIL_WATCH_RENEWAL_INTERVAL_MS,
-  );
   const accountConditions = [
     eq(connectedAccounts.status, "connected"),
     eq(gmailWatchStates.status, "active"),
@@ -75,69 +74,57 @@ export async function ensureDailyGmailWatchRenewals(
 
   let repaired = 0;
   for (const account of accounts) {
-    const [activeRenewal] = await database
-      .select({ id: workflowSteps.id })
-      .from(workflowSteps)
-      .where(
-        and(
-          eq(workflowSteps.accountId, account.id),
-          eq(workflowSteps.stepType, "gmail.watch.renew"),
-          inArray(workflowSteps.status, ["queued", "running"]),
-          or(
-            lt(workflowSteps.attempts, workflowSteps.maxAttempts),
-            and(
-              eq(workflowSteps.status, "running"),
-              gte(workflowSteps.startedAt, staleStartedBefore),
-            ),
-          ),
-          sql`${workflowSteps.input}->>'cadence' = 'daily'`,
-        ),
-      )
-      .limit(1);
-    if (activeRenewal) continue;
-
-    const recoveryForStepId = input.recoveryForStepId ?? (
-      await database
+    await withGmailAccountControlLock(account.id, async () => {
+      const [activeRenewal] = await database
         .select({ id: workflowSteps.id })
         .from(workflowSteps)
         .where(
           and(
             eq(workflowSteps.accountId, account.id),
             eq(workflowSteps.stepType, "gmail.watch.renew"),
-            or(
-              eq(workflowSteps.status, "failed"),
-              and(
-                eq(workflowSteps.status, "queued"),
-                gte(workflowSteps.attempts, workflowSteps.maxAttempts),
-              ),
-              and(
-                eq(workflowSteps.status, "running"),
-                gte(workflowSteps.attempts, workflowSteps.maxAttempts),
-                or(
-                  isNull(workflowSteps.startedAt),
-                  lt(workflowSteps.startedAt, staleStartedBefore),
+            inArray(workflowSteps.status, ["queued", "running"]),
+            lt(workflowSteps.attempts, workflowSteps.maxAttempts),
+            sql`${workflowSteps.input}->>'cadence' = 'daily'`,
+          ),
+        )
+        .limit(1);
+      if (activeRenewal) return;
+
+      const recoveryForStepId = input.recoveryForStepId ?? (
+        await database
+          .select({ id: workflowSteps.id })
+          .from(workflowSteps)
+          .where(
+            and(
+              eq(workflowSteps.accountId, account.id),
+              eq(workflowSteps.stepType, "gmail.watch.renew"),
+              or(
+                eq(workflowSteps.status, "failed"),
+                and(
+                  inArray(workflowSteps.status, ["queued", "running"]),
+                  gte(workflowSteps.attempts, workflowSteps.maxAttempts),
                 ),
               ),
             ),
-          ),
-        )
-        .orderBy(desc(workflowSteps.completedAt), desc(workflowSteps.updatedAt))
-        .limit(1)
-    )[0]?.id;
-    const recoveryKey = recoveryForStepId
-      ? `failed:${recoveryForStepId}`
-      : `state:${account.lastRenewedAt.getTime()}:${account.expirationAt.getTime()}`;
-    await enqueueWorkflowStep(
-      createGmailWatchRecoveryStep({
-        userId: account.userId,
-        accountId: account.id,
-        expectedExpirationAt: account.expirationAt,
-        recoveryKey,
-        now,
-      }),
-      database,
-    );
-    repaired += 1;
+          )
+          .orderBy(desc(workflowSteps.completedAt), desc(workflowSteps.updatedAt))
+          .limit(1)
+      )[0]?.id;
+      const recoveryKey = recoveryForStepId
+        ? `failed:${recoveryForStepId}`
+        : `state:${account.lastRenewedAt.getTime()}:${account.expirationAt.getTime()}`;
+      await enqueueWorkflowStep(
+        createGmailWatchRecoveryStep({
+          userId: account.userId,
+          accountId: account.id,
+          expectedExpirationAt: account.expirationAt,
+          recoveryKey,
+          now,
+        }),
+        database,
+      );
+      repaired += 1;
+    });
   }
   return repaired;
 }
