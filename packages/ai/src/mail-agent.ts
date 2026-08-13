@@ -3,7 +3,7 @@ import type {
   MailboxQueryResult,
   MailSearchResult,
 } from "@invook/contracts";
-import { isStepCount, tool, ToolLoopAgent } from "ai";
+import { isStepCount, jsonSchema, tool, ToolLoopAgent, zodSchema } from "ai";
 import { z } from "zod";
 
 import { getAiModel } from "./model";
@@ -106,6 +106,19 @@ export type ProposeMailboxActionInput = z.infer<
   typeof proposeMailboxActionInputSchema
 >;
 
+const proposeMailboxActionZodInputSchema = zodSchema(
+  proposeMailboxActionInputSchema,
+);
+
+export const proposeMailboxActionToolInputSchema =
+  jsonSchema<ProposeMailboxActionInput>(
+    async () => ({
+      ...(await proposeMailboxActionZodInputSchema.jsonSchema),
+      type: "object",
+    }),
+    { validate: proposeMailboxActionZodInputSchema.validate },
+  );
+
 export function createMailAgentInstructions(context?: {
   currentThreadId: string;
 }): string {
@@ -174,7 +187,7 @@ export function createMailAgent(
       proposeMailboxAction: tool({
         description:
           "Persist a non-executing Gmail mutation proposal for exact local message IDs or one existing AI draft ID. This never writes to Gmail; the user must approve the returned proposal card.",
-        inputSchema: proposeMailboxActionInputSchema,
+        inputSchema: proposeMailboxActionToolInputSchema,
         execute: (input, { toolCallId }) =>
           operations.proposeMailboxAction(input, toolCallId),
       }),
