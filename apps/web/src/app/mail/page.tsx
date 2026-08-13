@@ -7,6 +7,7 @@ import { validate as validateUuid } from "uuid";
 import { mailboxViews } from "@invook/contracts";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
+import { AccountSyncEventSubscriber } from "@/components/mail/account-sync-event-subscriber";
 import { ComposeSurface } from "@/components/mail/compose-surface";
 import { MailList } from "@/components/mail/mail-list";
 import { MailboxEventSubscriber } from "@/components/mail/mailbox-event-subscriber";
@@ -181,13 +182,14 @@ export default async function MailPage({ searchParams }: MailPageProps) {
 
   return (
     <main className="h-dvh overflow-hidden bg-background">
+      <AccountSyncEventSubscriber />
       <MailboxEventSubscriber />
       <div className="grid h-full grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
         <MailSidebar
           email={workspace.account.email}
           currentView={currentView}
           currentSurface={currentSurface}
-          memoryProgress={workspace.memoryProgress}
+          syncProgress={workspace.account.mailSyncProgress}
           labels={workspace.labels}
         />
         {centerPane}

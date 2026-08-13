@@ -1,5 +1,6 @@
 import {
   Airplane01Icon,
+  CloudSyncIcon,
   Delete02Icon,
   FileEditIcon,
   HonourStarIcon,
@@ -12,7 +13,6 @@ import {
   Search02Icon,
   SentIcon,
   Settings01Icon,
-  SparklesIcon,
   StarIcon,
   Tag01Icon,
   WorkflowSquare01Icon,
@@ -20,7 +20,7 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
   MailLabel,
-  MemoryGenerationProgress,
+  MailSyncProgress,
   SystemLabelKey,
 } from "@invook/contracts";
 import Link from "next/link";
@@ -30,6 +30,7 @@ import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 
 import { initials } from "./mail-format";
+import { getGmailSyncProgressPresentation } from "./gmail-sync-progress";
 import type { MailboxView, MailSurface } from "./types";
 
 const workspaceItems = [
@@ -82,54 +83,30 @@ function NavLink({
   );
 }
 
-interface MemoryProgressProps {
-  progress: MemoryGenerationProgress;
+interface GmailSyncProgressProps {
+  progress: MailSyncProgress;
 }
 
-function MemoryProgress({ progress }: MemoryProgressProps) {
-  const processed =
-    progress.completedRequestCount === null && progress.failedRequestCount === null
-      ? null
-      : (progress.completedRequestCount ?? 0) + (progress.failedRequestCount ?? 0);
-  const percentage =
-    progress.stage === "complete"
-      ? 100
-      : processed !== null &&
-          progress.totalRequestCount !== null &&
-          progress.totalRequestCount > 0
-        ? Math.round((processed / progress.totalRequestCount) * 100)
-        : null;
-
-  const title = {
-    waiting_for_mail: "Waiting for Gmail",
-    preparing: "Preparing memory",
-    validating: "Checking memory batch",
-    analyzing: "Building memory",
-    finalizing: "Saving memory",
-    complete: "Memory ready",
-    failed: "Memory needs attention",
-  }[progress.stage];
-
-  const detail =
-    progress.stage === "complete"
-      ? `${progress.memoryCount} ${progress.memoryCount === 1 ? "memory" : "memories"} available`
-      : processed !== null && progress.totalRequestCount !== null
-        ? `${processed} of ${progress.totalRequestCount} analyses complete`
-        : progress.evidenceMessageCount !== null
-          ? `${progress.evidenceMessageCount} sent messages prepared`
-          : "Waiting for confirmed progress";
+function GmailSyncProgress({ progress }: GmailSyncProgressProps) {
+  const presentation = getGmailSyncProgressPresentation(progress);
+  if (!presentation) return null;
+  const { title, detail, percentage, isFailed } = presentation;
 
   return (
-    <div className="hidden px-2 pb-1 lg:block">
+    <div
+      role={isFailed ? "alert" : "status"}
+      aria-live="polite"
+      className="hidden px-2 pb-1 lg:block"
+    >
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <HugeiconsIcon
-            icon={SparklesIcon}
+            icon={CloudSyncIcon}
             size={14}
             strokeWidth={1.7}
             className={cn(
               "shrink-0 text-primary",
-              progress.stage === "failed" && "text-destructive",
+              isFailed && "text-destructive",
             )}
           />
           <p className="truncate text-[13px] font-semibold text-sidebar-foreground">{title}</p>
@@ -145,7 +122,7 @@ function MemoryProgress({ progress }: MemoryProgressProps) {
         aria-label={title}
         className={cn(
           "mt-2 h-1 bg-sidebar-accent",
-          progress.stage === "failed" && "[&_[data-slot=progress-indicator]]:bg-destructive",
+          isFailed && "[&_[data-slot=progress-indicator]]:bg-destructive",
         )}
       />
       <p className="mt-2 text-xs leading-4 text-sidebar-foreground/48">{detail}</p>
@@ -157,7 +134,7 @@ export interface MailSidebarProps {
   email: string;
   currentView: MailboxView;
   currentSurface: MailSurface;
-  memoryProgress: MemoryGenerationProgress;
+  syncProgress: MailSyncProgress;
   labels: MailLabel[];
 }
 
@@ -165,7 +142,7 @@ export function MailSidebar({
   email,
   currentView,
   currentSurface,
-  memoryProgress,
+  syncProgress,
   labels,
 }: MailSidebarProps) {
   return (
@@ -244,7 +221,7 @@ export function MailSidebar({
         </nav>
       </div>
 
-      <MemoryProgress progress={memoryProgress} />
+      <GmailSyncProgress progress={syncProgress} />
     </aside>
   );
 }

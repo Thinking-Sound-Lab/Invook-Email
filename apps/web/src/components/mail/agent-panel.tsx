@@ -21,7 +21,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { useIndexingEvents } from "@/hooks/use-indexing-events";
 import { cn } from "@/lib/utils";
 
 import { formatMailText } from "./mail-format";
@@ -124,7 +123,6 @@ export function AgentPanel({
     setMessages,
   } = useChat<MailAgentUIMessage>({ transport });
   const [input, setInput] = useState("");
-  useIndexingEvents();
   const endRef = useRef<HTMLDivElement>(null);
   const busy = status === "submitted" || status === "streaming";
   const suggestions = openThreadId

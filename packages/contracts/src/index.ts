@@ -17,7 +17,18 @@ export type IndexingProgress = {
   totalMessageCount: number;
 };
 
-export type IndexingStatusEvent = IndexingProgress;
+export type MailSyncProgress = {
+  state: AccountSyncStage;
+  discoveryComplete: boolean;
+  discoveredMessageCount: number;
+  processedMessageCount: number;
+  failedMessageCount: number;
+};
+
+export type AccountSyncStatusEvent = {
+  mailSync: MailSyncProgress;
+  indexing: IndexingProgress;
+};
 
 export const mailboxViews = [
   "all",
@@ -32,22 +43,6 @@ export const mailboxViews = [
 ] as const;
 
 export type MailboxView = (typeof mailboxViews)[number] | `label:${string}`;
-
-export type MemoryGenerationProgress = {
-  stage:
-    | "waiting_for_mail"
-    | "preparing"
-    | "validating"
-    | "analyzing"
-    | "finalizing"
-    | "complete"
-    | "failed";
-  completedRequestCount: number | null;
-  failedRequestCount: number | null;
-  totalRequestCount: number | null;
-  evidenceMessageCount: number | null;
-  memoryCount: number;
-};
 
 export const systemLabelKeys = [
   "important",
@@ -196,6 +191,7 @@ export type MailboxAccount = {
   email: string;
   status: "connected" | "reconnect_required" | "disconnected";
   syncState: AccountSyncState;
+  mailSyncProgress: MailSyncProgress;
   indexingProgress: IndexingProgress;
   lastSyncedAt: string | null;
   replica: {
@@ -390,7 +386,6 @@ export type MailboxWorkspace = {
   aiConfigured: boolean;
   batchConfigured: boolean;
   account: MailboxAccount;
-  memoryProgress: MemoryGenerationProgress;
   memories: MemoryEntry[];
   labels: MailLabel[];
   pagination: MailboxPagination;

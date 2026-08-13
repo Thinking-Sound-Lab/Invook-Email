@@ -13,7 +13,7 @@ import { registerComposeDraftRoutes } from "./routes/compose-drafts";
 import { registerDraftRoutes } from "./routes/drafts";
 import { registerGmailProviderRoutes } from "./routes/gmail-provider";
 import { registerHealthRoutes } from "./routes/health";
-import { registerIndexingEventRoutes } from "./routes/indexing-events";
+import { registerAccountSyncEventRoutes } from "./routes/account-sync-events";
 import { registerLabelRoutes } from "./routes/labels";
 import { registerGooglePubSubRoutes } from "./routes/google-pubsub";
 import { registerMailboxEventRoutes } from "./routes/mailbox-events";
@@ -80,7 +80,7 @@ export async function buildApi(options: {
   await api.register(registerSessionRoutes);
   await api.register(registerAttachmentRoutes(options.attachmentRoutes));
   await api.register(registerAgentRoutes);
-  await api.register(registerIndexingEventRoutes);
+  await api.register(registerAccountSyncEventRoutes);
   await api.register(registerMailboxEventRoutes);
   await api.register(registerMailboxActionRoutes);
   await api.register(registerMailboxRoutes);

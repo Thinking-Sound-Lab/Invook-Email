@@ -7,7 +7,7 @@ function getApiOrigin(): string {
 export function proxy(request: NextRequest) {
   if (
     request.nextUrl.pathname === "/v1/mailbox/events" ||
-    request.nextUrl.pathname === "/v1/indexing/events"
+    request.nextUrl.pathname === "/v1/account-sync/events"
   ) {
     return NextResponse.next();
   }

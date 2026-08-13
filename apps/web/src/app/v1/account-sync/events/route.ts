@@ -4,5 +4,5 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  return proxyEventStream(request, "/v1/indexing/events");
+  return proxyEventStream(request, "/v1/account-sync/events");
 }
