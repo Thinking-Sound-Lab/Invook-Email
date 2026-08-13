@@ -16,6 +16,18 @@ function contactEmails(values: string[], accountEmail: string): Set<string> {
   );
 }
 
+export function selectApplicableDraftMemories<
+  Memory extends { type: string; contactEmail: string | null },
+>(memories: Memory[], contacts: Set<string>): Memory[] {
+  return memories.filter(
+    (memory) =>
+      memory.type !== "contact" ||
+      Boolean(
+        memory.contactEmail && contacts.has(memory.contactEmail.toLowerCase()),
+      ),
+  );
+}
+
 export async function generateDraftForUser(input: {
   userId: string;
   threadId: string;
@@ -34,12 +46,9 @@ export async function generateDraftForUser(input: {
     ],
     context.accountEmail,
   );
-  const applicableMemories = context.memories.filter(
-    (memory) =>
-      memory.type !== "contact" ||
-      Boolean(
-        memory.contactEmail && contacts.has(memory.contactEmail.toLowerCase()),
-      ),
+  const applicableMemories = selectApplicableDraftMemories(
+    context.memories,
+    contacts,
   );
   const result = await generateReplyDraft({
     subject: context.subject,

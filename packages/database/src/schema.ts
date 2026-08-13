@@ -15,7 +15,13 @@ import {
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
-import type { LabelAnalysisState, SystemLabelKey } from "@invook/contracts";
+import type {
+  LabelAnalysisState,
+  MailboxActionOperation,
+  MailboxActionStatus,
+  MailboxActionTargetStatus,
+  SystemLabelKey,
+} from "@invook/contracts";
 
 import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 
@@ -839,47 +845,6 @@ export const gmailDrafts = pgTable(
   ],
 );
 
-export const jobs = pgTable(
-  "jobs",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id").references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id").references(() => connectedAccounts.id, {
-      onDelete: "cascade",
-    }),
-    jobType: text("job_type").notNull(),
-    status: text("status")
-      .$type<"queued" | "running" | "retry" | "complete" | "failed">()
-      .notNull()
-      .default("queued"),
-    payload: jsonb("payload").$type<JsonObject>().notNull().default({}),
-    result: jsonb("result").$type<JsonObject>(),
-    attempts: integer("attempts").notNull().default(0),
-    maxAttempts: integer("max_attempts").notNull().default(5),
-    lockedAt: timestampWithTimezone("locked_at"),
-    lockedBy: text("locked_by"),
-    lastError: text("last_error"),
-    idempotencyKey: text("idempotency_key"),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    uniqueIndex("jobs_idempotency_key_idx").on(table.idempotencyKey),
-    index("jobs_ready_idx")
-      .on(table.status, table.createdAt)
-      .where(sql`${table.status} in ('queued', 'retry')`),
-    check(
-      "jobs_status_check",
-      sql`${table.status} in ('queued', 'running', 'retry', 'complete', 'failed')`,
-    ),
-    check("jobs_attempts_check", sql`${table.attempts} >= 0`),
-    check("jobs_max_attempts_check", sql`${table.maxAttempts} > 0`),
-  ],
-);
-
 export const mailSyncRuns = pgTable(
   "mail_sync_runs",
   {
@@ -1065,6 +1030,8 @@ export const queueOutbox = pgTable(
         | "mail-memory-submit"
         | "mail-memory-events"
         | "mail-memory-feedback"
+        | "mail-label-submit"
+        | "mail-label-events"
       >()
       .notNull(),
     publishAttempts: integer("publish_attempts").notNull().default(0),
@@ -1084,7 +1051,130 @@ export const queueOutbox = pgTable(
     check("queue_outbox_publish_attempts_check", sql`${table.publishAttempts} >= 0`),
     check(
       "queue_outbox_queue_name_check",
-      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback')`,
+      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit', 'mail-label-events')`,
+    ),
+  ],
+);
+
+export const mailboxActionProposals = pgTable(
+  "mailbox_action_proposals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    operation: text("operation").$type<MailboxActionOperation>().notNull(),
+    status: text("status")
+      .$type<MailboxActionStatus>()
+      .notNull()
+      .default("pending"),
+    gmailLabelId: uuid("gmail_label_id").references(() => gmailLabels.id, {
+      onDelete: "set null",
+    }),
+    providerLabelId: text("provider_label_id"),
+    gmailLabelName: text("gmail_label_name"),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    workflowStepId: uuid("workflow_step_id").references(() => workflowSteps.id, {
+      onDelete: "set null",
+    }),
+    approvedAt: timestampWithTimezone("approved_at"),
+    completedAt: timestampWithTimezone("completed_at"),
+    cancelledAt: timestampWithTimezone("cancelled_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("mailbox_action_proposals_idempotency_idx").on(
+      table.idempotencyKey,
+    ),
+    index("mailbox_action_proposals_user_created_idx").on(
+      table.userId,
+      table.createdAt,
+    ),
+    index("mailbox_action_proposals_account_status_idx").on(
+      table.accountId,
+      table.status,
+      table.createdAt,
+    ),
+    check(
+      "mailbox_action_proposals_operation_check",
+      sql`${table.operation} in ('archive', 'mark_read', 'mark_unread', 'trash', 'apply_gmail_label', 'remove_gmail_label', 'save_draft_to_gmail')`,
+    ),
+    check(
+      "mailbox_action_proposals_status_check",
+      sql`${table.status} in ('pending', 'executing', 'completed', 'partial_failure', 'failed', 'cancelled')`,
+    ),
+    check(
+      "mailbox_action_proposals_label_check",
+      sql`(${table.operation} in ('apply_gmail_label', 'remove_gmail_label') and ${table.providerLabelId} is not null and ${table.gmailLabelName} is not null) or (${table.operation} not in ('apply_gmail_label', 'remove_gmail_label') and ${table.providerLabelId} is null and ${table.gmailLabelName} is null)`,
+    ),
+  ],
+);
+
+export const mailboxActionTargets = pgTable(
+  "mailbox_action_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    proposalId: uuid("proposal_id")
+      .notNull()
+      .references(() => mailboxActionProposals.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id"),
+    draftId: uuid("draft_id"),
+    threadId: uuid("thread_id").notNull(),
+    providerMessageId: text("provider_message_id"),
+    providerThreadId: text("provider_thread_id").notNull(),
+    subject: text("subject").notNull(),
+    sender: text("sender"),
+    sentAt: timestampWithTimezone("sent_at"),
+    expectedUpdatedAt: timestampWithTimezone("expected_updated_at").notNull(),
+    status: text("status")
+      .$type<MailboxActionTargetStatus>()
+      .notNull()
+      .default("pending"),
+    errorCode: text("error_code"),
+    providerEvidence: jsonb("provider_evidence")
+      .$type<JsonObject>()
+      .notNull()
+      .default({}),
+    completedAt: timestampWithTimezone("completed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("mailbox_action_targets_proposal_message_idx")
+      .on(table.proposalId, table.messageId)
+      .where(sql`${table.messageId} is not null`),
+    uniqueIndex("mailbox_action_targets_proposal_draft_idx")
+      .on(table.proposalId, table.draftId)
+      .where(sql`${table.draftId} is not null`),
+    index("mailbox_action_targets_proposal_status_idx").on(
+      table.proposalId,
+      table.status,
+      table.createdAt,
+    ),
+    check(
+      "mailbox_action_targets_kind_check",
+      sql`(${table.messageId} is not null and ${table.draftId} is null and ${table.providerMessageId} is not null) or (${table.messageId} is null and ${table.draftId} is not null and ${table.providerMessageId} is null)`,
+    ),
+    check(
+      "mailbox_action_targets_status_check",
+      sql`${table.status} in ('pending', 'executing', 'completed', 'failed', 'stale')`,
     ),
   ],
 );

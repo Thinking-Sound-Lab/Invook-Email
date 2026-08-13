@@ -4,6 +4,10 @@ import { v4 as uuidv4 } from "uuid";
 
 import { registerAuthRoutes } from "./routes/auth";
 import { registerAgentRoutes } from "./routes/agent";
+import {
+  registerAttachmentRoutes,
+  type AttachmentRouteDependencies,
+} from "./routes/attachments";
 import { registerBatchWebhookRoutes } from "./routes/batch-webhook";
 import { registerDraftRoutes } from "./routes/drafts";
 import { registerGmailProviderRoutes } from "./routes/gmail-provider";
@@ -12,6 +16,7 @@ import { registerIndexingEventRoutes } from "./routes/indexing-events";
 import { registerLabelRoutes } from "./routes/labels";
 import { registerGooglePubSubRoutes } from "./routes/google-pubsub";
 import { registerMailboxEventRoutes } from "./routes/mailbox-events";
+import { registerMailboxActionRoutes } from "./routes/mailbox-actions";
 import { registerMailboxRoutes } from "./routes/mailbox";
 import { registerMemoryRoutes } from "./routes/memories";
 import { registerSessionRoutes } from "./routes/session";
@@ -29,7 +34,9 @@ function isInvalidBodyError(error: unknown): boolean {
   );
 }
 
-export async function buildApi() {
+export async function buildApi(options: {
+  attachmentRoutes?: AttachmentRouteDependencies;
+} = {}) {
   const api = Fastify({
     bodyLimit: MAXIMUM_REQUEST_BODY_BYTES,
     exposeHeadRoutes: false,
@@ -70,9 +77,11 @@ export async function buildApi() {
   await api.register(registerHealthRoutes);
   await api.register(registerAuthRoutes);
   await api.register(registerSessionRoutes);
+  await api.register(registerAttachmentRoutes(options.attachmentRoutes));
   await api.register(registerAgentRoutes);
   await api.register(registerIndexingEventRoutes);
   await api.register(registerMailboxEventRoutes);
+  await api.register(registerMailboxActionRoutes);
   await api.register(registerMailboxRoutes);
   await api.register(registerMemoryRoutes, { prefix: "/v1/memories" });
   await api.register(registerLabelRoutes, { prefix: "/v1/labels" });

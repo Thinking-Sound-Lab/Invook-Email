@@ -10,6 +10,10 @@ import { pipeAgentUIStreamToResponse } from "ai";
 import { mutationAccessHooks, requireSession } from "../access";
 import { sendJson, sendProblem } from "../responses";
 import { generateDraftForUser } from "../services/drafts";
+import {
+  createMailboxActionProposalForUser,
+  queryMailboxForUser,
+} from "../services/mailbox-actions";
 import { searchMailForUser } from "../services/search";
 
 type SearchQuery = { q?: unknown };
@@ -127,6 +131,14 @@ export const registerAgentRoutes: FastifyPluginAsync = async (api) => {
             if (!draft) throw new Error("The email thread was not found.");
             return { draftId: draft.id, threadId: draft.threadId, text: draft.currentText };
           },
+          queryInvookMailbox: (input) =>
+            queryMailboxForUser({ userId: session.userId, ...input }),
+          proposeMailboxAction: (input, toolCallId) =>
+            createMailboxActionProposalForUser({
+              userId: session.userId,
+              toolCallId,
+              ...input,
+            }),
         },
         currentThread ? { currentThreadId: currentThread.id } : undefined,
       );

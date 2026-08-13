@@ -1,7 +1,6 @@
 export {
   createDatabase,
   getDatabase,
-  listenForJobNotifications,
   listenForAccountSyncNotifications,
   listenForOutboxNotifications,
   listenForMailboxChangeNotifications,
@@ -13,6 +12,8 @@ export {
   encryptGoogleCredential,
   type GoogleCredential,
 } from "./credentials";
+export * from "./mailbox-actions";
+export * from "./gmail-watch";
 export * from "./repositories";
 export * from "./replica";
 export * from "./schema";
@@ -22,9 +23,9 @@ export * from "./workflows";
 export type {
   AccountSyncStage,
   AccountSyncState,
-  ClaimedJob,
   IndexedMessage,
   MailboxMessage,
   QueueName,
+  WorkflowStepInput,
   WorkflowStepJob,
 } from "./types";

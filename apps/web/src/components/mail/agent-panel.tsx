@@ -12,8 +12,11 @@ import {
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { AccountSyncStage } from "@invook/contracts";
-import { DefaultChatTransport } from "ai";
+import type {
+  AccountSyncStage,
+  MailboxActionProposal,
+} from "@invook/contracts";
+import { DefaultChatTransport, type UIDataTypes, type UIMessage } from "ai";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -22,6 +25,18 @@ import { useIndexingEvents } from "@/hooks/use-indexing-events";
 import { cn } from "@/lib/utils";
 
 import { formatMailText } from "./mail-format";
+import { ActionProposalCard } from "./action-proposal-card";
+
+type MailAgentUIMessage = UIMessage<
+  never,
+  UIDataTypes,
+  {
+    proposeMailboxAction: {
+      input: unknown;
+      output: MailboxActionProposal;
+    };
+  }
+>;
 
 interface IndexingStatusProps {
   state: AccountSyncStage;
@@ -102,7 +117,7 @@ export function AgentPanel({
     status,
     error,
     setMessages,
-  } = useChat({ transport });
+  } = useChat<MailAgentUIMessage>({ transport });
   const [input, setInput] = useState("");
   useIndexingEvents();
   const endRef = useRef<HTMLDivElement>(null);
@@ -211,6 +226,17 @@ export function AgentPanel({
                       <p key={index} className="whitespace-pre-wrap">
                         {part.text}
                       </p>
+                    );
+                  }
+                  if (
+                    part.type === "tool-proposeMailboxAction" &&
+                    part.state === "output-available"
+                  ) {
+                    return (
+                      <ActionProposalCard
+                        key={part.toolCallId}
+                        initialProposal={part.output}
+                      />
                     );
                   }
                   if (part.type.startsWith("tool-")) {

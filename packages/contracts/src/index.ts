@@ -286,6 +286,86 @@ export type MailSearchResult = {
   score: number;
 };
 
+export const mailboxActionOperations = [
+  "archive",
+  "mark_read",
+  "mark_unread",
+  "trash",
+  "apply_gmail_label",
+  "remove_gmail_label",
+  "save_draft_to_gmail",
+] as const;
+
+export type MailboxActionOperation = (typeof mailboxActionOperations)[number];
+
+export type MailboxActionStatus =
+  | "pending"
+  | "executing"
+  | "completed"
+  | "partial_failure"
+  | "failed"
+  | "cancelled";
+
+export type MailboxActionTargetStatus =
+  | "pending"
+  | "executing"
+  | "completed"
+  | "failed"
+  | "stale";
+
+export type MailboxActionTarget = {
+  id: string;
+  messageId: string | null;
+  draftId: string | null;
+  threadId: string;
+  subject: string;
+  sender: string | null;
+  sentAt: string | null;
+  status: MailboxActionTargetStatus;
+  errorCode: string | null;
+};
+
+export type MailboxActionProposal = {
+  id: string;
+  operation: MailboxActionOperation;
+  status: MailboxActionStatus;
+  gmailLabel: { id: string; name: string } | null;
+  targets: MailboxActionTarget[];
+  createdAt: string;
+  approvedAt: string | null;
+  completedAt: string | null;
+};
+
+export type MailboxQueryMessage = {
+  messageId: string;
+  threadId: string;
+  subject: string;
+  sender: { raw: string; email: string };
+  sentAt: string;
+  bodyPreview: string;
+  isInbox: boolean;
+  isUnread: boolean;
+  gmailLabels: Array<{ id: string; name: string }>;
+  invookLabels: Array<{ id: string; name: string }>;
+};
+
+export type MailboxQueryResult =
+  | {
+      status: "available";
+      messages: MailboxQueryMessage[];
+      availableGmailLabels: Array<{ id: string; name: string }>;
+      availableInvookLabels: Array<{ id: string; name: string }>;
+      nextCursor: string | null;
+    }
+  | {
+      status: "unavailable";
+      reason: "replica_not_ready" | "mailbox_not_connected";
+      messages: [];
+      availableGmailLabels?: never;
+      availableInvookLabels?: never;
+      nextCursor: null;
+    };
+
 export type MailboxSelectedThread = Omit<MailboxThreadSummary, "snippet"> & {
   messages: MailboxThreadMessage[];
   aiReplyDraft: AiReplyDraft | null;

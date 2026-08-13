@@ -13,6 +13,7 @@ import {
 } from "@invook/database";
 import {
   createGmailDraft,
+  composePlainTextGmailReply,
   createGmailLabel,
   deleteGmailDraft,
   deleteGmailLabel,
@@ -29,7 +30,6 @@ import {
   requireUuidParameter,
 } from "../access";
 import { sendJson, sendProblem } from "../responses";
-import { composePlainTextGmailReply } from "../services/gmail-drafts";
 import {
   getGmailProviderAccess,
   GmailProviderConfigurationError,

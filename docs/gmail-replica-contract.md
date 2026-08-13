@@ -37,7 +37,7 @@ An account is not readable by indexing or Memory workflows until all of these st
 5. Replay Gmail history from H0 through the provider's current cursor. Message changes and cursor advancement commit together.
 6. Refresh Gmail labels and Gmail Draft resources.
 7. Audit provider/local message IDs, provider label and draft catalogs, and every current raw/attachment object checksum; repair recoverable differences.
-8. Mark the replica ready, then enqueue search indexing and Memory extraction.
+8. Mark the replica ready, then independently enqueue search indexing, initial Memory extraction, and each pending Invook-label analysis so those derivations can run concurrently.
 
 There is no finalization path that jumps directly to the latest profile cursor.
 
@@ -53,11 +53,11 @@ Google Pub/Sub sends authenticated OIDC push requests to `/v1/webhooks/google-pu
 
 The worker serializes Gmail control work per account with a PostgreSQL advisory lock while allowing different accounts to progress concurrently, and always rereads the stored replica cursor. Duplicate and out-of-order deliveries are safe because history application uses an expected-cursor comparison and idempotent provider identifiers. Message/tombstone/label membership changes, cursor advancement, push-event completion, and the durable mailbox-change event commit in one PostgreSQL transaction. The web client listens to authenticated `/v1/mailbox/events` SSE and refreshes on committed mailbox changes.
 
-Watch renewal is a delayed, durable one-shot BullMQ action keyed by the watch expiration. It registers the replacement watch, catches up history, audits completeness, and schedules only the next renewal. It does not poll.
+Watch renewal is a durable daily one-shot BullMQ action. A successful registration durably schedules its next daily action before catching up from the stored replica cursor, so a terminal catch-up failure cannot break the renewal chain. Terminal failure state and its bounded recovery successor commit in one PostgreSQL transaction. Worker startup takes the same per-account advisory lock as live Gmail control work before recovering any exhausted attempt, and a reconciliation failure stops the worker instead of silently abandoning the chain. Routine renewal never performs a full-mailbox or object audit and does not poll. Duplicate and superseded actions remain safe through workflow idempotency and per-account serialization.
 
 ## Repair and deletion
 
-Initial completion, expired-history recovery, watch renewal, and manual audit use the same completeness and repair rules. Audits compare Gmail's current label membership for every message with normalized local membership and refetch mismatches before readiness. If Gmail rejects an expired history cursor, Invook captures a fresh baseline, renews the watch, reconciles a full snapshot, replays from that baseline, refreshes labels/drafts, and audits before returning to ready.
+Initial completion, expired-history recovery, and explicit manual audit use the same completeness and repair rules. Audits compare Gmail's current label membership for every message with normalized local membership and refetch mismatches before readiness. If Gmail rejects an expired history cursor during push catch-up or daily renewal, Invook captures a fresh baseline, renews the watch, reconciles a full snapshot, replays from that baseline, refreshes labels/drafts, and audits before returning to ready.
 
 Account deletion first enters a durable deleting state. The cleanup action stops the Gmail watch when the credential remains valid, removes every recorded raw MIME and attachment object, and only then deletes the relational account. Transient provider or object-storage failures retry without losing the cleanup record.
 

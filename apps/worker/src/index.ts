@@ -36,13 +36,13 @@ import {
   type MessageMemoryCandidate,
 } from "@invook/ai";
 import {
-  claimNextJob,
+  claimMailboxActionTarget,
   clearPendingMemoryEvidence,
   applyGmailHistoryBatch,
   beginGmailReplicaAudit,
   completeGmailReplicaAudit,
   failGmailReplicaAudit,
-  completeJob,
+  completeMailboxActionTarget,
   deleteIndexedMessage,
   completeMailSyncItem,
   completeMailSyncRun,
@@ -52,17 +52,20 @@ import {
   decryptGoogleCredential,
   DRAFT_FEEDBACK_VERSION,
   encryptGoogleCredential,
-  enqueueAnalysisJobsForIndexedAccounts,
+  enqueueDailyGmailWatchRenewal,
+  ensureDailyGmailWatchRenewals,
+  enqueuePendingAnalysisWorkflowSteps,
   enqueueLabelBackfillContinuation,
   enqueueLabelBatchRetry,
   enqueueBatchEvent,
   enqueueEmbeddingBackfillContinuation,
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
+  enqueueWorkflowStep,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
-  deferJobWithoutAttempt,
-  failAnalysisJob,
+  failMailboxActionProposalExecution,
+  failMailboxActionTarget,
   failMailSyncItem,
   failMailSyncRun,
   failWorkflowStep,
@@ -79,11 +82,12 @@ import {
   getUserAuthoredMemories,
   getWorkerAccount,
   getGmailReplicaContext,
+  getMailboxActionExecution,
+  getAiReplyDraftForGmailSave,
   getGmailReplicaInventory,
   getGmailWatchContext,
   GmailLabelCatalogMismatchError,
   isActiveMailSyncRun,
-  listenForJobNotifications,
   saveLabelBatchResults,
   setLabelAnalysisState,
   getBatchSubmission,
@@ -92,6 +96,7 @@ import {
   MAIL_INDEX_VERSION,
   listGmailObjectKeysForAccount,
   markGmailAccountCleanupRunning,
+  markMailboxActionTargetsStale,
   listSubmittedEmbeddingBatchIds,
   markGmailReplicaReady,
   markMailSyncItemRunning,
@@ -109,6 +114,7 @@ import {
   setMemorySyncStage,
   toPostgresTextProjection,
   publishOutboxBatch,
+  finalizeMailboxActionProposal,
   replaceGmailDraftResources,
   replaceGmailLabelCatalog,
   prepareEmbeddingBatchSubmission,
@@ -120,13 +126,14 @@ import {
   updateStoredCredential,
   upsertMailboxMessage,
   withGmailAccountControlLock,
-  type ClaimedJob,
   type GoogleCredential,
   type IndexedMessage,
   type MemoryType,
   type WorkflowStepJob,
 } from "@invook/database";
 import {
+  composePlainTextGmailReply,
+  createGmailDraft,
   extractEmailAddress,
   gmailHistoryChanges,
   getGmailDraft,
@@ -139,10 +146,12 @@ import {
   listGmailHistory,
   listGmailLabels,
   listGmailMessages,
+  modifyGmailMessageLabels,
   parseGmailMessage,
   refreshGoogleAccessToken,
   startGmailWatch,
   stopGmailWatch,
+  trashGmailMessage,
   type ParsedGmailMessage,
 } from "@invook/gmail";
 import { createObjectStorage } from "@invook/object-storage";
@@ -156,11 +165,19 @@ import {
   findGmailLabelMembershipMismatches,
   type GmailLabelMembershipSnapshot,
 } from "./gmail-label-membership";
+import {
+  MailboxActionTargetError,
+  runMailboxActionExecution,
+} from "./mailbox-action-execution";
+import {
+  applyGmailHistoryWithExpiredCursorRepair,
+  shouldRepairNonReadyGmailReplica,
+} from "./gmail-history-recovery";
+import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
 const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
-const workerId = `worker-${process.pid}`;
 const feedbackBatchSize = 24;
 const embeddingBatchRequestLimit = 2_000;
 const embeddingBatchAttemptLimit = 3;
@@ -489,7 +506,6 @@ async function syncMailbox(options: {
 
   do {
     const page = await listGmailMessages(options.accessToken, {
-      maxResults: 100,
       pageToken,
     });
     const references = page.messages ?? [];
@@ -544,7 +560,6 @@ async function listProviderMessageIds(accessToken: string): Promise<string[]> {
   const messageIds: string[] = [];
   do {
     const page = await listGmailMessages(accessToken, {
-      maxResults: 100,
       pageToken,
     });
     messageIds.push(...(page.messages ?? []).map((message) => message.id));
@@ -809,7 +824,6 @@ async function runGmailPage(job: WorkflowStepJob) {
     });
   }
   const page = await listGmailMessages(credential.accessToken, {
-    maxResults: 100,
     pageToken: rawPageToken ?? undefined,
   });
   const providerMessageIds = (page.messages ?? []).map((message) => message.id);
@@ -894,16 +908,18 @@ async function renewGmailWatch(accountId: string, accessToken: string) {
   if (!Number.isFinite(expiration)) {
     throw new Error("Gmail returned an invalid watch expiration.");
   }
+  const renewedAt = new Date();
+  const expirationAt = new Date(expiration);
   await saveGmailWatchState({
     accountId,
     watch: {
       topicName,
       historyId: watch.historyId,
-      expirationAt: new Date(expiration),
+      expirationAt,
     },
-    scheduleRenewal: true,
+    renewedAt,
   });
-  return watch;
+  return { historyId: watch.historyId, expirationAt, renewedAt };
 }
 
 async function ensureGmailWatch(accountId: string, accessToken: string) {
@@ -1192,13 +1208,18 @@ async function catchUpGmailHistory(options: {
   accountId: string;
   pushEventId?: string | null;
   resumeNonReady?: boolean;
+  resumeFailedReplica?: boolean;
   markStoredPushEventsProcessed?: boolean;
 }) {
   for (let conflictAttempt = 0; conflictAttempt < 3; conflictAttempt += 1) {
     const replica = await getGmailReplicaContext(options.accountId);
     if (!replica) throw new Error("The Gmail replica state was not found.");
     if (replica.state !== "ready") {
-      if (options.resumeNonReady) {
+      if (shouldRepairNonReadyGmailReplica({
+        isFailed: replica.state === "failed",
+        resumeNonReady: options.resumeNonReady,
+        resumeFailedReplica: options.resumeFailedReplica,
+      })) {
         const { account, credential } = await getMailSyncContext(options.accountId);
         const expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
         const repaired = await repairExpiredHistory({
@@ -1226,8 +1247,8 @@ async function catchUpGmailHistory(options: {
       accountId: account.id,
       notify: true,
     });
-    try {
-      const replay = await applyHistoryRange({
+    const replayOrRepair = await applyGmailHistoryWithExpiredCursorRepair({
+      apply: () => applyHistoryRange({
         accessToken: credential.accessToken,
         userId: account.userId,
         accountId: account.id,
@@ -1238,24 +1259,8 @@ async function catchUpGmailHistory(options: {
         stateAfterApply: "ready",
         markStoredPushEventsProcessed: options.markStoredPushEventsProcessed,
         ingestionMode: "incremental",
-      });
-      if (!replay.applied) continue;
-      await syncGmailDraftResources({
-        accessToken: credential.accessToken,
-        userId: account.userId,
-        accountId: account.id,
-        accountEmail: account.email,
-        ingestionMode: "incremental",
-        notify: true,
-      });
-      return {
-        status: "complete",
-        historyCursor: replay.historyId,
-        changedThreadCount: replay.changedThreadIds.length,
-      };
-    } catch (error) {
-      if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
-      const repaired = await repairExpiredHistory({
+      }),
+      repair: () => repairExpiredHistory({
         accessToken: credential.accessToken,
         userId: account.userId,
         accountId: account.id,
@@ -1263,9 +1268,30 @@ async function catchUpGmailHistory(options: {
         expectedCursor,
         pushEventId: options.pushEventId,
         markStoredPushEventsProcessed: options.markStoredPushEventsProcessed,
-      });
-      return { status: "repaired", ...repaired, changedThreadCount: 0 };
+      }),
+    });
+    if (replayOrRepair.outcome === "repaired") {
+      return {
+        status: "repaired",
+        ...replayOrRepair.result,
+        changedThreadCount: 0,
+      };
     }
+    const replay = replayOrRepair.result;
+    if (!replay.applied) continue;
+    await syncGmailDraftResources({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      ingestionMode: "incremental",
+      notify: true,
+    });
+    return {
+      status: "complete",
+      historyCursor: replay.historyId,
+      changedThreadCount: replay.changedThreadIds.length,
+    };
   }
   throw new Error("The Gmail history cursor changed repeatedly during catch-up.");
 }
@@ -1340,8 +1366,179 @@ async function runGmailFinalize(job: WorkflowStepJob) {
     finalHistoryCursor: historyCursor,
   });
   if (!completed) return { status: "inactive", runId };
-  await enqueueAnalysisJobsForIndexedAccounts();
   return { status: "complete", runId, historyCursor, auditId };
+}
+
+function mailboxActionProviderError(error: GmailApiError): MailboxActionTargetError {
+  if (error.status === 404) {
+    return new MailboxActionTargetError("provider_target_missing", error.message);
+  }
+  if (error.status === 400 || error.status === 409) {
+    return new MailboxActionTargetError("provider_write_rejected", error.message);
+  }
+  if (error.status === 403) {
+    return new MailboxActionTargetError("provider_permission_denied", error.message);
+  }
+  if (error.status === 0 || error.status === 429 || error.status >= 500) {
+    return new MailboxActionTargetError("provider_unavailable", error.message);
+  }
+  return new MailboxActionTargetError("provider_write_failed", error.message);
+}
+
+function mailboxActionLabelChanges(
+  operation: Exclude<
+    NonNullable<Awaited<ReturnType<typeof getMailboxActionExecution>>>["operation"],
+    "trash" | "save_draft_to_gmail"
+  >,
+  providerLabelId: string | null,
+) {
+  switch (operation) {
+    case "archive":
+      return { removeLabelIds: ["INBOX"] };
+    case "mark_read":
+      return { removeLabelIds: ["UNREAD"] };
+    case "mark_unread":
+      return { addLabelIds: ["UNREAD"] };
+    case "apply_gmail_label":
+      if (!providerLabelId) {
+        throw new MailboxActionTargetError(
+          "gmail_label_stale",
+          "The approved Gmail label target is unavailable.",
+        );
+      }
+      return { addLabelIds: [providerLabelId] };
+    case "remove_gmail_label":
+      if (!providerLabelId) {
+        throw new MailboxActionTargetError(
+          "gmail_label_stale",
+          "The approved Gmail label target is unavailable.",
+        );
+      }
+      return { removeLabelIds: [providerLabelId] };
+  }
+}
+
+async function runGmailMailboxAction(job: WorkflowStepJob) {
+  if (!job.accountId || !job.userId) {
+    throw new Error("The Gmail action job has no authenticated account owner.");
+  }
+  const proposalId = requiredString(
+    job.payload.proposalId,
+    "Mailbox action proposal ID",
+  );
+  const proposal = await getMailboxActionExecution({
+    proposalId,
+    userId: job.userId,
+    accountId: job.accountId,
+  });
+  if (!proposal) return { status: "inactive", proposalId };
+
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  return runMailboxActionExecution({
+    load: async () => proposal,
+    claim: (target, operation) =>
+      claimMailboxActionTarget({ proposalId, targetId: target.id, operation }),
+    execute: async (target, operation) => {
+      try {
+        if (operation === "save_draft_to_gmail") {
+          if (!target.draftId) {
+            throw new MailboxActionTargetError(
+              "target_stale",
+              "The approved AI draft is no longer available.",
+            );
+          }
+          const draft = await getAiReplyDraftForGmailSave({
+            userId: account.userId,
+            draftId: target.draftId,
+          });
+          if (
+            !draft ||
+            draft.updatedAt.getTime() !== target.expectedUpdatedAt.getTime() ||
+            !draft.replyTarget
+          ) {
+            throw new MailboxActionTargetError(
+              "target_stale",
+              "The approved AI draft changed or no longer has a reply target.",
+            );
+          }
+          const raw = composePlainTextGmailReply({
+            accountEmail: draft.accountEmail,
+            subject: draft.subject,
+            currentText: draft.currentText,
+            replyTarget: draft.replyTarget,
+          });
+          if (!raw) {
+            throw new MailboxActionTargetError(
+              "draft_recipient_missing",
+              "The approved AI draft has no valid reply recipient.",
+            );
+          }
+          const created = await createGmailDraft(credential.accessToken, {
+            raw,
+            threadId: draft.providerThreadId,
+          });
+          return {
+            providerDraftId: created.id,
+            providerMessageId: created.message.id,
+          };
+        }
+
+        if (!target.providerMessageId) {
+          throw new MailboxActionTargetError(
+            "target_stale",
+            "The approved Gmail message target is unavailable.",
+          );
+        }
+        const providerMessage =
+          operation === "trash"
+            ? await trashGmailMessage(
+                credential.accessToken,
+                target.providerMessageId,
+              )
+            : await modifyGmailMessageLabels(
+                credential.accessToken,
+                target.providerMessageId,
+                mailboxActionLabelChanges(operation, proposal.providerLabelId),
+              );
+        return {
+          providerMessageId: providerMessage.id,
+          providerHistoryId: providerMessage.historyId ?? null,
+        };
+      } catch (error) {
+        if (error instanceof GmailApiError) {
+          const isTransient =
+            error.status === 0 || error.status === 429 || error.status >= 500;
+          if (error.status === 401 || (isTransient && operation !== "save_draft_to_gmail")) {
+            throw error;
+          }
+          if (isTransient && operation === "save_draft_to_gmail") {
+            throw new MailboxActionTargetError(
+              "provider_outcome_uncertain",
+              error.message,
+            );
+          }
+          throw mailboxActionProviderError(error);
+        }
+        throw error;
+      }
+    },
+    shouldAbort: (error) => error instanceof GmailApiError,
+    complete: (targetId, evidence) =>
+      completeMailboxActionTarget({ targetId, evidence }),
+    fail: (targetId, errorCode) =>
+      failMailboxActionTarget({ targetId, errorCode }),
+    markRemainingStale: (errorCode) =>
+      markMailboxActionTargetsStale({ proposalId, errorCode }),
+    enqueueHistoryCatchup: () =>
+      enqueueWorkflowStep({
+        userId: account.userId,
+        accountId: account.id,
+        stepType: "gmail.history.catchup",
+        payload: { reason: "provider_write", proposalId },
+        idempotencyKey: `gmail-action-history:${proposalId}`,
+      }),
+    finalize: () => finalizeMailboxActionProposal(proposalId),
+  });
 }
 
 async function runGmailHistoryCatchup(job: WorkflowStepJob) {
@@ -1350,35 +1547,44 @@ async function runGmailHistoryCatchup(job: WorkflowStepJob) {
     typeof job.payload.pushEventId === "string" ? job.payload.pushEventId : null;
   const markStoredPushEventsProcessed =
     job.payload.reason === "post_initial_reconciliation";
-  return catchUpGmailHistory({
+  const result = await catchUpGmailHistory({
     accountId: job.accountId,
     pushEventId,
     resumeNonReady: job.attempts > 1,
     markStoredPushEventsProcessed,
   });
+  if (result.status === "complete" || result.status === "repaired") {
+    await enqueuePendingAnalysisWorkflowSteps();
+  }
+  return result;
 }
 
 async function runGmailWatchRenewal(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Gmail watch renewal has no account.");
   const { account, credential } = await getMailSyncContext(job.accountId);
-  await renewGmailWatch(account.id, credential.accessToken);
-  const catchup = await catchUpGmailHistory({
-    accountId: account.id,
-    resumeNonReady: job.attempts > 1,
+  const renewal = await runDailyGmailWatchRenewal({
+    renew: () => renewGmailWatch(account.id, credential.accessToken),
+    catchUp: () => catchUpGmailHistory({
+      accountId: account.id,
+      resumeNonReady: job.attempts > 1,
+      resumeFailedReplica: true,
+    }),
+    scheduleNext: (renewedWatch) => enqueueDailyGmailWatchRenewal({
+      userId: account.userId,
+      accountId: account.id,
+      renewedAt: renewedWatch.renewedAt,
+      expectedExpirationAt: renewedWatch.expirationAt,
+    }),
   });
-  if (catchup.status === "deferred") return catchup;
-  const auditId = await runReplicaAudit({
-    accessToken: credential.accessToken,
-    userId: account.userId,
-    accountId: account.id,
-    accountEmail: account.email,
-    trigger: "watch_renewal",
-  });
-  const replica = await getGmailReplicaContext(account.id);
-  const historyCursor = replica?.historyCursor ?? replica?.initialHistoryId;
-  if (!historyCursor) throw new Error("The Gmail replica cursor was not found.");
-  await markGmailReplicaReady({ accountId: account.id, historyCursor, auditId });
-  return { status: "complete", historyCursor, auditId };
+  const catchup = renewal.catchup;
+  if (catchup.status === "complete" || catchup.status === "repaired") {
+    await enqueuePendingAnalysisWorkflowSteps();
+  }
+  return {
+    ...catchup,
+    nextRenewalStepId: renewal.nextRenewalStepId,
+    watchExpirationAt: renewal.watch.expirationAt.toISOString(),
+  };
 }
 
 async function runGmailReplicaAudit(job: WorkflowStepJob) {
@@ -2084,7 +2290,7 @@ async function runMemoryExtraction(job: WorkflowStepJob) {
       modelId: null,
       memories: [],
     });
-    await enqueueAnalysisJobsForIndexedAccounts();
+    await enqueuePendingAnalysisWorkflowSteps();
     return {
       status: "complete",
       threadCount: threads.length,
@@ -2109,7 +2315,7 @@ async function runMemoryExtraction(job: WorkflowStepJob) {
       modelId: null,
       memories: [],
     });
-    await enqueueAnalysisJobsForIndexedAccounts();
+    await enqueuePendingAnalysisWorkflowSteps();
     return {
       status: "complete",
       threadCount: threads.length,
@@ -2130,7 +2336,7 @@ async function runMemoryExtraction(job: WorkflowStepJob) {
   };
 }
 
-async function runIncrementalMemoryExtraction(job: ClaimedJob) {
+async function runIncrementalMemoryExtraction(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The incremental Memory job has no account.");
   if (job.payload.schemaVersion !== MEMORY_SCHEMA_VERSION) {
     return {
@@ -2205,7 +2411,7 @@ async function runIncrementalMemoryExtraction(job: ClaimedJob) {
   };
 }
 
-async function runMemoryBatchRetry(job: ClaimedJob | WorkflowStepJob) {
+async function runMemoryBatchRetry(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Memory retry has no connected account.");
   const parentSubmissionJobId = requiredString(
     job.payload.parentSubmissionJobId,
@@ -2266,7 +2472,7 @@ async function runMemoryBatchRetry(job: ClaimedJob | WorkflowStepJob) {
   };
 }
 
-async function runMemoryBatchEvent(job: ClaimedJob | WorkflowStepJob) {
+async function runMemoryBatchEvent(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Memory batch event has no account.");
   const submissionJobId = requiredString(
     job.payload.submissionJobId,
@@ -2349,7 +2555,7 @@ async function runMemoryBatchEvent(job: ClaimedJob | WorkflowStepJob) {
     await clearMemoryEvidenceUsedByCandidates(submission.accountId, memories);
 
     if (details.pendingScope === null && failedManifest.length === 0) {
-      await enqueueAnalysisJobsForIndexedAccounts();
+      await enqueuePendingAnalysisWorkflowSteps();
     }
   }
 
@@ -2512,7 +2718,7 @@ async function cleanupLabelBatchFiles(input: {
   }
 }
 
-async function runLabelBackfill(job: ClaimedJob) {
+async function runLabelBackfill(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The label backfill has no connected account.");
   const labelId = requiredString(job.payload.labelId, "Label ID");
   const definitionVersion = requiredInteger(
@@ -2564,7 +2770,7 @@ async function runLabelBackfill(job: ClaimedJob) {
   };
 }
 
-async function runLabelBatchRetry(job: ClaimedJob) {
+async function runLabelBatchRetry(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The label Batch retry has no connected account.");
   const parentSubmissionJobId = requiredString(
     job.payload.parentSubmissionJobId,
@@ -2625,7 +2831,7 @@ async function runLabelBatchRetry(job: ClaimedJob) {
   };
 }
 
-async function runLabelBatchEvent(job: ClaimedJob) {
+async function runLabelBatchEvent(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The label Batch event has no account.");
   const submissionJobId = requiredString(
     job.payload.submissionJobId,
@@ -2915,81 +3121,6 @@ async function runMemoryFeedback(job: WorkflowStepJob) {
     memoryCount: savedCount,
   };
 }
-async function markPostgresJobFailed(job: ClaimedJob, error: unknown) {
-  const message = error instanceof Error ? error.message : "Unknown worker failure";
-  await failAnalysisJob({ job, message });
-}
-
-async function processNextPostgresJob() {
-  const jobTypes: string[] = [];
-  if (isMemoryBatchConfigured()) {
-    jobTypes.push("memory.incremental", "label.backfill.submit");
-  }
-  if (isAnyMemoryBatchProviderConfigured()) {
-    jobTypes.push(
-      "memory.batch.retry",
-      "memory.batch.event",
-      "label.batch.retry",
-      "label.batch.event",
-    );
-  }
-  if (jobTypes.length === 0) return false;
-  const job = await claimNextJob(workerId, jobTypes);
-  if (!job) return false;
-
-  try {
-    let result: Record<string, unknown>;
-    switch (job.jobType) {
-      case "memory.incremental":
-        result = await runIncrementalMemoryExtraction(job);
-        break;
-      case "memory.batch.retry":
-        result = await runMemoryBatchRetry(job);
-        break;
-      case "memory.batch.event":
-        result = await runMemoryBatchEvent(job);
-        break;
-      case "label.backfill.submit":
-        result = await runLabelBackfill(job);
-        break;
-      case "label.batch.retry":
-        result = await runLabelBatchRetry(job);
-        break;
-      case "label.batch.event":
-        result = await runLabelBatchEvent(job);
-        break;
-      default:
-        throw new Error(`Unsupported PostgreSQL job type: ${job.jobType}`);
-    }
-    await completeJob(job.id, result);
-  } catch (error) {
-    if (
-      error instanceof AiConfigurationError ||
-      error instanceof MemoryBatchConfigurationError
-    ) {
-      if (job.jobType === "label.backfill.submit" && job.accountId) {
-        const labelId = job.payload.labelId;
-        const definitionVersion = job.payload.definitionVersion;
-        if (typeof labelId === "string" && typeof definitionVersion === "number") {
-          await setLabelAnalysisState({
-            accountId: job.accountId,
-            labelId,
-            definitionVersion,
-            state: "pending",
-          });
-        }
-      }
-      await deferJobWithoutAttempt({
-        jobId: job.id,
-        message: error.message,
-      });
-      return false;
-    }
-    await markPostgresJobFailed(job, error);
-    throw error;
-  }
-  return true;
-}
 
 async function persistWorkflowFailure(
   job: WorkflowStepJob,
@@ -2999,7 +3130,18 @@ async function persistWorkflowFailure(
 ) {
   const stepUpdated = await failWorkflowStep({ step: job, message, terminal });
   if (!stepUpdated) return;
-  if (job.stepType === "gmail.sync.message" && job.runId) {
+  if (job.stepType === "gmail.action.execute" && terminal) {
+    const proposalId =
+      typeof job.payload.proposalId === "string" ? job.payload.proposalId : null;
+    if (proposalId) {
+      await failMailboxActionProposalExecution({
+        proposalId,
+        errorCode: reconnectRequired
+          ? "provider_authentication_failed"
+          : "execution_failed",
+      });
+    }
+  } else if (job.stepType === "gmail.sync.message" && job.runId) {
     await failMailSyncItem({
       runId: job.runId,
       providerMessageId: requiredString(
@@ -3090,6 +3232,9 @@ function processGmailControl(bullJob: WorkflowJob) {
       }
       if (job.stepType === "gmail.watch.renew") return runGmailWatchRenewal(job);
       if (job.stepType === "gmail.replica.audit") return runGmailReplicaAudit(job);
+      if (job.stepType === "gmail.action.execute") {
+        return runGmailMailboxAction(job);
+      }
       if (job.stepType === "gmail.account.cleanup") {
         return runGmailAccountCleanup(job);
       }
@@ -3112,7 +3257,13 @@ function processIncrementalIndexing(bullJob: WorkflowJob) {
 }
 
 function processMemorySubmission(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, runMemoryExtraction);
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "memory.extract") return runMemoryExtraction(job);
+    if (job.stepType === "memory.incremental") {
+      return runIncrementalMemoryExtraction(job);
+    }
+    throw new Error(`Unsupported Memory submission step: ${job.stepType}`);
+  });
 }
 
 function processMemoryEvent(bullJob: WorkflowJob) {
@@ -3127,9 +3278,25 @@ function processMemoryFeedback(bullJob: WorkflowJob) {
   return executeWorkflowJob(bullJob, runMemoryFeedback);
 }
 
-function startBullWorkers(runtime: BullQueueRuntime) {
+function processLabelSubmission(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, runLabelBackfill);
+}
+
+function processLabelEvent(bullJob: WorkflowJob) {
+  return executeWorkflowJob(bullJob, async (job) => {
+    if (job.stepType === "label.batch.retry") return runLabelBatchRetry(job);
+    if (job.stepType === "label.batch.event") return runLabelBatchEvent(job);
+    throw new Error(`Unsupported label Batch step: ${job.stepType}`);
+  });
+}
+
+function startBullWorkers(
+  runtime: BullQueueRuntime,
+  onReconciliationFailure: (error: Error) => void,
+) {
   const withFailureReconciliation = {
     onTerminalFailure: reconcileTerminalQueueFailure,
+    onTerminalFailureReconciliationError: onReconciliationFailure,
   };
   runtime.createWorker("gmail-pages", processGmailPages, withFailureReconciliation);
   runtime.createWorker("gmail-messages", processGmailMessage, {
@@ -3168,11 +3335,20 @@ function startBullWorkers(runtime: BullQueueRuntime) {
       ...withFailureReconciliation,
       lockDuration: batchWorkerLockDuration,
     });
+    runtime.createWorker("mail-label-submit", processLabelSubmission, {
+      ...withFailureReconciliation,
+      lockDuration: batchWorkerLockDuration,
+    });
   }
   if (isAnyMemoryBatchProviderConfigured()) {
     runtime.createWorker(
       "mail-memory-events",
       processMemoryEvent,
+      withFailureReconciliation,
+    );
+    runtime.createWorker(
+      "mail-label-events",
+      processLabelEvent,
       withFailureReconciliation,
     );
   }
@@ -3223,35 +3399,22 @@ async function runOutboxLoop(
   }
 }
 
-async function runPostgresJobLoop(
-  signal: ReturnType<typeof createJobSignal>,
-  isStopped: () => boolean,
-) {
-  while (!isStopped()) {
-    await signal.wait();
-    if (isStopped()) break;
-    while (!isStopped() && (await processNextPostgresJob())) {
-      // Drain the current queue before waiting for another database notification.
-    }
-  }
-}
-
 async function run() {
   const runtime = new BullQueueRuntime(process.env.REDIS_URL ?? "");
   await runtime.waitUntilReady();
   await runtime.configureGlobalConcurrency();
-  startBullWorkers(runtime);
-
   const outboxSignal = createJobSignal();
-  const postgresJobSignal = createJobSignal();
   let stopRequested = false;
+  let fatalError: Error | null = null;
   const requestStop = () => {
     stopRequested = true;
     outboxSignal.notify();
-    postgresJobSignal.notify();
   };
+  startBullWorkers(runtime, (error) => {
+    fatalError = error;
+    requestStop();
+  });
   const stopOutboxListening = await listenForOutboxNotifications(outboxSignal.notify);
-  const stopJobListening = await listenForJobNotifications(postgresJobSignal.notify);
   const stopRedisReadyListener = runtime.onReady(outboxSignal.notify);
 
   process.once("SIGINT", requestStop);
@@ -3260,21 +3423,18 @@ async function run() {
   try {
     await enqueueMissingMailSyncRuns();
     await enqueueReadyMailSyncFinalizers();
+    await ensureDailyGmailWatchRenewals();
     await enqueuePostSyncWorkflowSteps();
-    await enqueueAnalysisJobsForIndexedAccounts();
+    await enqueuePendingAnalysisWorkflowSteps();
     await reconcileSubmittedEmbeddingBatches();
     outboxSignal.notify();
-    postgresJobSignal.notify();
-    await Promise.all([
-      runOutboxLoop(outboxSignal, () => stopRequested, runtime),
-      runPostgresJobLoop(postgresJobSignal, () => stopRequested),
-    ]);
+    await runOutboxLoop(outboxSignal, () => stopRequested, runtime);
+    if (fatalError) throw fatalError;
   } finally {
     process.removeListener("SIGINT", requestStop);
     process.removeListener("SIGTERM", requestStop);
     stopRedisReadyListener();
     await stopOutboxListening();
-    await stopJobListening();
     await runtime.close();
   }
 }
