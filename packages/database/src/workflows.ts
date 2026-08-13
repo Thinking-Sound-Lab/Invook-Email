@@ -146,7 +146,7 @@ async function terminalizeMailSyncRun(
   const [account] = await database
     .update(connectedAccounts)
     .set({
-      syncState: { mailSync: "failed", indexing: "pending", memory: "pending" },
+      syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{mailSync}', to_jsonb(${"failed"}::text), true)`,
       updatedAt: input.failedAt,
     })
     .where(eq(connectedAccounts.id, run.accountId))

@@ -43,7 +43,7 @@ test(
         providerAccountId: `provider-${accountId}`,
         email: `${accountId}@example.com`,
         memoryAcknowledgedAt: new Date(),
-        syncState: { mailSync: "running", indexing: "pending", memory: "pending" },
+        syncState: { mailSync: "running", indexing: "running", memory: "complete" },
       });
       await database.insert(gmailReplicaStates).values({
         accountId,
@@ -135,6 +135,8 @@ test(
       assert.deepEqual(steps.map((step) => step.status), ["failed", "failed"]);
       assert.equal(account?.status, "connected");
       assert.equal(account?.syncState.mailSync, "failed");
+      assert.equal(account?.syncState.indexing, "running");
+      assert.equal(account?.syncState.memory, "complete");
       assert.equal(replica?.state, "failed");
       assert.deepEqual(
         await markWorkflowStepRunning(remainingStepId, 1, database),

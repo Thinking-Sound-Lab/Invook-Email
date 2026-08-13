@@ -20,8 +20,8 @@ export class GmailProviderConfigurationError extends Error {
 }
 
 export class GmailProviderReconnectRequiredError extends Error {
-  constructor() {
-    super("The Gmail account must be reconnected.");
+  constructor(options?: ErrorOptions) {
+    super("The Gmail account must be reconnected.", options);
     this.name = "GmailProviderReconnectRequiredError";
   }
 }
@@ -67,7 +67,7 @@ async function refreshCredentialIfRequired(
       accountId,
       errorCode: GOOGLE_REAUTHENTICATION_REQUIRED_ERROR_CODE,
     });
-    throw new GmailProviderReconnectRequiredError();
+    throw new GmailProviderReconnectRequiredError({ cause: error });
   }
   const nextCredential: GoogleCredential = {
     ...credential,

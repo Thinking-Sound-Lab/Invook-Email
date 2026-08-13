@@ -1,9 +1,10 @@
 import { GoogleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { mailboxViews } from "@invook/contracts";
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
 import { validate as validateUuid } from "uuid";
+
+import { mailboxViews } from "@invook/contracts";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
 import { MailList } from "@/components/mail/mail-list";
