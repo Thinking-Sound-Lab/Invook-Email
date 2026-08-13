@@ -1,6 +1,8 @@
+import { GoogleIcon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { mailboxViews } from "@invook/contracts";
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
-import { mailboxViews } from "@invook/contracts";
 import { validate as validateUuid } from "uuid";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
@@ -8,6 +10,7 @@ import { MailList } from "@/components/mail/mail-list";
 import { MailboxEventSubscriber } from "@/components/mail/mailbox-event-subscriber";
 import { MailSidebar } from "@/components/mail/mail-sidebar";
 import { ThreadReader } from "@/components/mail/thread-reader";
+import { Button } from "@/components/ui/button";
 import type {
   MailboxView,
   MailSurface,
@@ -85,6 +88,32 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     view: currentView,
   });
   if (!workspace) redirect("/");
+  if (workspace.account.status === "reconnect_required") {
+    return (
+      <main className="grid min-h-dvh place-items-center bg-background px-6">
+        <div className="flex w-full max-w-sm flex-col items-center text-center">
+          <h1 className="text-2xl font-semibold tracking-[-0.035em]">
+            Reconnect Gmail
+          </h1>
+          <p className="mt-3 text-sm leading-6 text-muted-foreground">
+            Google no longer accepts the stored Gmail credential. Your local
+            mailbox remains preserved and synchronization will resume only
+            after Google authorization succeeds.
+          </p>
+          <form
+            action="/v1/auth/google/start"
+            method="get"
+            className="mt-7 w-full"
+          >
+            <Button type="submit" size="lg" className="h-11 w-full gap-2.5">
+              <HugeiconsIcon icon={GoogleIcon} size={18} strokeWidth={1.7} />
+              Reconnect Gmail
+            </Button>
+          </form>
+        </div>
+      </main>
+    );
+  }
   const currentLabel = currentView.startsWith("label:")
     ? workspace.labels.find((label) => label.id === currentView.slice("label:".length))
     : null;

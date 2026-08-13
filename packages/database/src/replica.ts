@@ -251,6 +251,18 @@ export async function replaceGmailLabelCatalog(
   database: Database = getDatabase(),
 ) {
   await database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!account) return false;
     const providerLabelIds = input.labels.map((label) => label.providerLabelId);
     if (providerLabelIds.length === 0) {
       await transaction
@@ -308,6 +320,18 @@ export async function replaceGmailDraftResources(
   database: Database = getDatabase(),
 ) {
   await database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!account) return false;
     const providerDraftIds = input.drafts.map((draft) => draft.providerDraftId);
     if (providerDraftIds.length === 0) {
       await transaction
@@ -411,37 +435,65 @@ export async function setGmailReplicaState(
   },
   database: Database = getDatabase(),
 ) {
-  await database
-    .update(gmailReplicaStates)
-    .set({
-      state: input.state,
-      lastError: input.lastError ?? null,
-      updatedAt: new Date(),
-    })
-    .where(eq(gmailReplicaStates.accountId, input.accountId));
+  await database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!account) return;
+    await transaction
+      .update(gmailReplicaStates)
+      .set({
+        state: input.state,
+        lastError: input.lastError ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(gmailReplicaStates.accountId, input.accountId));
+  });
 }
 
 export async function saveGmailWatchState(
   input: { accountId: string; watch: GmailWatchInput; renewedAt: Date },
   database: Database = getDatabase(),
 ) {
-  await database
-    .insert(gmailWatchStates)
-    .values({
-      accountId: input.accountId,
-      ...input.watch,
-      lastRenewedAt: input.renewedAt,
-    })
-    .onConflictDoUpdate({
-      target: gmailWatchStates.accountId,
-      set: {
+  await database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!account) return;
+    await transaction
+      .insert(gmailWatchStates)
+      .values({
+        accountId: input.accountId,
         ...input.watch,
-        status: "active",
         lastRenewedAt: input.renewedAt,
-        lastError: null,
-        updatedAt: input.renewedAt,
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: gmailWatchStates.accountId,
+        set: {
+          ...input.watch,
+          status: "active",
+          lastRenewedAt: input.renewedAt,
+          lastError: null,
+          updatedAt: input.renewedAt,
+        },
+      });
+  });
 }
 
 export async function ingestGmailPushEvent(
@@ -598,6 +650,20 @@ export async function applyGmailHistoryBatch(
   database: Database = getDatabase(),
 ): Promise<{ applied: boolean; changedThreadIds: string[]; eventId: string | null }> {
   return database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!account) {
+      return { applied: false, changedThreadIds: [], eventId: null };
+    }
     const [replica] = await transaction
       .select({
         initialHistoryId: gmailReplicaStates.initialHistoryId,
@@ -865,6 +931,18 @@ export async function markGmailReplicaReady(
   database: Database = getDatabase(),
 ) {
   await database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!account) return false;
     const [audit] = await transaction
       .select({
         status: gmailReplicaAudits.status,
@@ -921,6 +999,7 @@ export async function markGmailReplicaReady(
         transaction as unknown as Database,
       );
     }
+    return true;
   });
 }
 

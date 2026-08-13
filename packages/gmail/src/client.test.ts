@@ -4,8 +4,10 @@ import { after, before, test } from "node:test";
 import axios, { type AxiosRequestConfig } from "axios";
 
 import {
+  GmailApiError,
   GMAIL_MESSAGE_LIST_MAX_RESULTS,
   getGmailMessage,
+  isGoogleReauthenticationRequired,
   listGmailMessages,
 } from "./client";
 
@@ -48,4 +50,40 @@ test("each listed Gmail message is fetched as raw MIME", async () => {
   assert.equal(request.baseURL, "https://gmail.googleapis.com/gmail/v1");
   assert.equal(url.pathname, "/users/me/messages/message%2Fwith%20spaces");
   assert.equal(url.searchParams.get("format"), "raw");
+});
+
+test("a rejected Google refresh token requires immediate reauthentication", () => {
+  const error = new GmailApiError(
+    "Google token refresh failed with status 400.",
+    400,
+    "redacted",
+    {
+      path: "https://oauth2.googleapis.com/token",
+      code: "invalid_grant",
+    },
+  );
+
+  assert.equal(isGoogleReauthenticationRequired(error), true);
+});
+
+test("a Google authentication 401 requires reauthentication", () => {
+  const error = new GmailApiError(
+    "Google token refresh failed with status 401.",
+    401,
+    "redacted",
+    { path: "https://oauth2.googleapis.com/token" },
+  );
+
+  assert.equal(isGoogleReauthenticationRequired(error), true);
+});
+
+test("a transient Google provider failure remains retryable", () => {
+  const error = new GmailApiError(
+    "Google token refresh failed with status 503.",
+    503,
+    "redacted",
+    { path: "https://oauth2.googleapis.com/token" },
+  );
+
+  assert.equal(isGoogleReauthenticationRequired(error), false);
 });

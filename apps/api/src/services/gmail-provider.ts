@@ -2,15 +2,27 @@ import {
   decryptGoogleCredential,
   encryptGoogleCredential,
   getGmailProviderWriteContext,
+  markGmailAccountReconnectRequired,
   updateStoredCredential,
   type GoogleCredential,
 } from "@invook/database";
-import { refreshGoogleAccessToken } from "@invook/gmail";
+import {
+  GOOGLE_REAUTHENTICATION_REQUIRED_ERROR_CODE,
+  isGoogleReauthenticationRequired,
+  refreshGoogleAccessToken,
+} from "@invook/gmail";
 
 export class GmailProviderConfigurationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "GmailProviderConfigurationError";
+  }
+}
+
+export class GmailProviderReconnectRequiredError extends Error {
+  constructor() {
+    super("The Gmail account must be reconnected.");
+    this.name = "GmailProviderReconnectRequiredError";
   }
 }
 
@@ -42,11 +54,21 @@ async function refreshCredentialIfRequired(
     );
   }
 
-  const refreshed = await refreshGoogleAccessToken({
-    refreshToken: credential.refreshToken,
-    clientId,
-    clientSecret,
-  });
+  let refreshed: Awaited<ReturnType<typeof refreshGoogleAccessToken>>;
+  try {
+    refreshed = await refreshGoogleAccessToken({
+      refreshToken: credential.refreshToken,
+      clientId,
+      clientSecret,
+    });
+  } catch (error) {
+    if (!isGoogleReauthenticationRequired(error)) throw error;
+    await markGmailAccountReconnectRequired({
+      accountId,
+      errorCode: GOOGLE_REAUTHENTICATION_REQUIRED_ERROR_CODE,
+    });
+    throw new GmailProviderReconnectRequiredError();
+  }
   const nextCredential: GoogleCredential = {
     ...credential,
     accessToken: refreshed.accessToken,

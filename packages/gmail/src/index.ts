@@ -10,6 +10,8 @@ export {
   getGmailProfile,
   gmailHistoryChanges,
   GmailApiError,
+  GOOGLE_REAUTHENTICATION_REQUIRED_ERROR_CODE,
+  isGoogleReauthenticationRequired,
   listGmailDrafts,
   listGmailHistory,
   listGmailLabels,
