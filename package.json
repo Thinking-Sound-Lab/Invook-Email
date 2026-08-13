@@ -12,9 +12,11 @@
     "start": "pnpm --filter @invook/web run start",
     "api": "pnpm --filter @invook/api run start",
     "worker": "pnpm --filter @invook/worker run start",
-    "typecheck": "pnpm --recursive run typecheck",
+    "typecheck": "pnpm run typecheck:local-reset && pnpm --recursive run typecheck",
+    "typecheck:local-reset": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler --types node --allowImportingTsExtensions docker/reset-local-config.ts docker/reset-local-config.test.ts",
     "lint": "pnpm --recursive --if-present run lint",
-    "test": "pnpm --recursive --if-present run test",
+    "test": "pnpm run test:local-reset && pnpm --recursive --if-present run test",
+    "test:local-reset": "node --import tsx --test docker/reset-local-config.test.ts",
     "db:generate": "pnpm --filter @invook/database run db:generate",
     "db:migrate": "pnpm --filter @invook/database run db:migrate",
     "db:studio": "pnpm --filter @invook/database run db:studio"
@@ -24,6 +26,8 @@
     "pnpm": ">=11"
   },
   "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   }
 }
