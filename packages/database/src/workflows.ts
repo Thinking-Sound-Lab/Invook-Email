@@ -30,7 +30,7 @@ import {
   workflowSteps,
 } from "./schema";
 import { createGmailWatchRecoveryStep } from "./gmail-watch-schedule";
-import { hasMailSyncPercentageAdvanced } from "./mail-sync-progress";
+import { hasMailSyncProgressAdvanced } from "./mail-sync-progress";
 import type {
   QueueName,
   WorkflowStepInput,
@@ -1185,7 +1185,7 @@ async function enqueueFinalizeIfReady(runId: string, database: Database) {
     })
     .where(eq(mailSyncRuns.id, runId));
   if (
-    hasMailSyncPercentageAdvanced({
+    hasMailSyncProgressAdvanced({
       discoveryComplete: run.discoveryComplete,
       discoveredMessageCount: counts.total,
       previousProcessedMessageCount: run.processedMessageCount,

@@ -2,20 +2,14 @@
 
 import { useChat } from "@ai-sdk/react";
 import {
-  Alert02Icon,
   ArrowUpRight01Icon,
   BotIcon,
-  Clock01Icon,
-  Loading01Icon,
   PencilEdit01Icon,
   Search02Icon,
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type {
-  IndexingProgress,
-  MailboxActionProposal,
-} from "@invook/contracts";
+import type { MailboxActionProposal } from "@invook/contracts";
 import { DefaultChatTransport, type UIDataTypes, type UIMessage } from "ai";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -37,75 +31,16 @@ type MailAgentUIMessage = UIMessage<
   }
 >;
 
-interface IndexingStatusProps {
-  progress: IndexingProgress;
-}
-
-function IndexingStatus({ progress }: IndexingStatusProps) {
-  const { state } = progress;
-  if (state === "complete") return null;
-
-  const running = state === "running";
-  const failed = state === "failed";
-  const title = failed
-    ? "Indexing paused"
-    : running
-      ? "Indexing your mail"
-      : "Indexing pending";
-  const detail = failed
-    ? progress.totalMessageCount > 0
-      ? `${progress.completedMessageCount.toLocaleString()} of ${progress.totalMessageCount.toLocaleString()} messages indexed${progress.failedMessageCount > 0 ? `; ${progress.failedMessageCount.toLocaleString()} failed` : ""}. Full-text search still works.`
-      : "Indexing is unavailable until mailbox synchronization recovers."
-    : running
-      ? `${progress.completedMessageCount.toLocaleString()} of ${progress.totalMessageCount.toLocaleString()} messages indexed.`
-      : progress.totalMessageCount > 0
-        ? `${progress.totalMessageCount.toLocaleString()} messages are waiting to be indexed.`
-        : "Semantic search is not ready yet.";
-  const icon = failed ? Alert02Icon : running ? Loading01Icon : Clock01Icon;
-
-  return (
-    <div
-      role={failed ? "alert" : "status"}
-      aria-live="polite"
-      className={cn(
-        "rounded-lg bg-primary/[0.07] px-3 py-2.5",
-        failed && "bg-destructive/[0.08]",
-      )}
-    >
-      <div className="flex items-start gap-2.5">
-        <span
-          className={cn(
-            "grid size-7 shrink-0 place-items-center rounded-md bg-primary/10 text-primary",
-            failed && "bg-destructive/10 text-destructive",
-          )}
-        >
-          <span className={cn("grid", running && "motion-safe:animate-spin")}>
-            <HugeiconsIcon icon={icon} size={14} strokeWidth={1.8} />
-          </span>
-        </span>
-        <div className="min-w-0 pt-0.5">
-          <p className="text-xs font-semibold text-foreground/88">{title}</p>
-          <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
-            {detail}
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export interface AgentPanelProps {
   openThreadId?: string;
   openThreadSubject?: string;
   aiConfigured: boolean;
-  indexingProgress: IndexingProgress;
 }
 
 export function AgentPanel({
   openThreadId,
   openThreadSubject,
   aiConfigured,
-  indexingProgress,
 }: AgentPanelProps) {
   const transport = useMemo(
     () =>
@@ -176,17 +111,16 @@ export function AgentPanel({
         </Button>
       </header>
 
-      <div className="mx-3 space-y-2">
-        <IndexingStatus progress={indexingProgress} />
-        {openThreadSubject ? (
+      {openThreadSubject ? (
+        <div className="mx-3">
           <div className="rounded-lg bg-background/45 px-3 py-2.5">
             <p className="text-xs font-medium text-muted-foreground">Current thread</p>
             <p className="mt-1 truncate text-[13px] text-foreground/82">
               {formatMailText(openThreadSubject)}
             </p>
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
         {messages.length === 0 ? (

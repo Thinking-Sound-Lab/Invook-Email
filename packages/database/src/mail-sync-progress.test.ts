@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   deriveMailSyncProgress,
-  hasMailSyncPercentageAdvanced,
+  hasMailSyncProgressAdvanced,
 } from "./mail-sync-progress";
 
 test("mail sync progress preserves durable run counts", () => {
@@ -37,9 +37,9 @@ test("a completed account is known to have finished discovery without a run", ()
   });
 });
 
-test("sync notifications advance only on a new whole percentage", () => {
+test("sync notifications advance on a new percentage or durable count interval", () => {
   assert.equal(
-    hasMailSyncPercentageAdvanced({
+    hasMailSyncProgressAdvanced({
       discoveryComplete: true,
       discoveredMessageCount: 10_000,
       previousProcessedMessageCount: 99,
@@ -48,16 +48,25 @@ test("sync notifications advance only on a new whole percentage", () => {
     true,
   );
   assert.equal(
-    hasMailSyncPercentageAdvanced({
+    hasMailSyncProgressAdvanced({
       discoveryComplete: true,
       discoveredMessageCount: 10_000,
-      previousProcessedMessageCount: 100,
-      processedMessageCount: 101,
+      previousProcessedMessageCount: 199,
+      processedMessageCount: 200,
+    }),
+    true,
+  );
+  assert.equal(
+    hasMailSyncProgressAdvanced({
+      discoveryComplete: true,
+      discoveredMessageCount: 10_000,
+      previousProcessedMessageCount: 200,
+      processedMessageCount: 201,
     }),
     false,
   );
   assert.equal(
-    hasMailSyncPercentageAdvanced({
+    hasMailSyncProgressAdvanced({
       discoveryComplete: false,
       discoveredMessageCount: 10_000,
       previousProcessedMessageCount: 99,

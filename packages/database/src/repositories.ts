@@ -1130,22 +1130,116 @@ export async function getMailboxWorkspace(
       )
     : undefined;
 
-  const rawMailboxThreads = await database
-    .select({
-      id: threads.id,
-      subject: threads.subject,
-      snippet: threads.snippet,
-      participants: threads.participants,
-      latestMessageAt: threads.latestMessageAt,
-      messageCount: threads.messageCount,
-    })
-    .from(threads)
-    .where(and(mailboxScope, cursorCondition))
-    .orderBy(
-      cursor?.direction === "newer" ? asc(mailboxSortTime) : desc(mailboxSortTime),
-      cursor?.direction === "newer" ? asc(threads.id) : desc(threads.id),
-    )
-    .limit(mailboxPageSize + 1);
+  const selectedThreadPromise = selectedThreadId
+    ? database
+        .select({
+          id: threads.id,
+          providerThreadId: threads.providerThreadId,
+          subject: threads.subject,
+          participants: threads.participants,
+          latestMessageAt: threads.latestMessageAt,
+          messageCount: threads.messageCount,
+        })
+        .from(threads)
+        .where(
+          and(
+            eq(threads.id, selectedThreadId),
+            eq(threads.userId, userId),
+            eq(threads.accountId, account.id),
+          ),
+        )
+        .limit(1)
+    : Promise.resolve([]);
+  const [
+    rawMailboxThreads,
+    [threadCount],
+    memoryRows,
+    mailLabelRows,
+    [threadCountRow],
+    analyzedCounts,
+    selectedThreadRows,
+  ] = await Promise.all([
+    database
+      .select({
+        id: threads.id,
+        subject: threads.subject,
+        snippet: threads.snippet,
+        participants: threads.participants,
+        latestMessageAt: threads.latestMessageAt,
+        messageCount: threads.messageCount,
+      })
+      .from(threads)
+      .where(and(mailboxScope, cursorCondition))
+      .orderBy(
+        cursor?.direction === "newer" ? asc(mailboxSortTime) : desc(mailboxSortTime),
+        cursor?.direction === "newer" ? asc(threads.id) : desc(threads.id),
+      )
+      .limit(mailboxPageSize + 1),
+    database
+      .select({ value: count(threads.id) })
+      .from(threads)
+      .where(mailboxScope),
+    database
+      .select({
+        id: memoryEntries.id,
+        type: memoryEntries.memoryType,
+        contactEmail: memoryEntries.contactEmail,
+        statement: memoryEntries.statement,
+        source: memoryEntries.source,
+        confidence: memoryEntries.confidence,
+        evidenceMessageIds: memoryEntries.evidenceMessageIds,
+        evidenceDraftIds: memoryEntries.evidenceDraftIds,
+        createdAt: memoryEntries.createdAt,
+        updatedAt: memoryEntries.updatedAt,
+      })
+      .from(memoryEntries)
+      .where(
+        and(eq(memoryEntries.userId, userId), eq(memoryEntries.accountId, account.id)),
+      )
+      .orderBy(
+        asc(memoryEntries.memoryType),
+        asc(memoryEntries.contactEmail),
+        asc(memoryEntries.createdAt),
+      ),
+    database
+      .select({
+        id: mailLabels.id,
+        name: mailLabels.name,
+        description: mailLabels.description,
+        systemKey: mailLabels.systemKey,
+        definitionVersion: mailLabels.definitionVersion,
+        analysisState: mailLabels.analysisState,
+        createdAt: mailLabels.createdAt,
+      })
+      .from(mailLabels)
+      .where(
+        and(eq(mailLabels.userId, userId), eq(mailLabels.accountId, account.id)),
+      )
+      .orderBy(asc(mailLabels.createdAt), asc(mailLabels.name)),
+    database
+      .select({ value: count(threads.id) })
+      .from(threads)
+      .where(and(eq(threads.userId, userId), eq(threads.accountId, account.id))),
+    database
+      .select({
+        labelId: threadLabelAnalyses.labelId,
+        definitionVersion: threadLabelAnalyses.definitionVersion,
+        value: count(threadLabelAnalyses.id),
+      })
+      .from(threadLabelAnalyses)
+      .where(
+        and(
+          eq(threadLabelAnalyses.userId, userId),
+          eq(threadLabelAnalyses.accountId, account.id),
+        ),
+      )
+      .groupBy(
+        threadLabelAnalyses.labelId,
+        threadLabelAnalyses.definitionVersion,
+      ),
+    selectedThreadPromise,
+  ]);
+  const [selectedThread] = selectedThreadRows;
   const hasExtraPage = rawMailboxThreads.length > mailboxPageSize;
   const currentPage = rawMailboxThreads.slice(0, mailboxPageSize);
   const mailboxThreads =
@@ -1153,10 +1247,6 @@ export async function getMailboxWorkspace(
   const hasNewerPage = Boolean(cursor) &&
     (cursor?.direction === "older" || hasExtraPage);
   const hasOlderPage = cursor?.direction === "newer" ? true : hasExtraPage;
-  const [threadCount] = await database
-    .select({ value: count(threads.id) })
-    .from(threads)
-    .where(mailboxScope);
   const firstMailboxThread = mailboxThreads[0];
   const lastMailboxThread = mailboxThreads.at(-1);
   const pagination = {
@@ -1171,66 +1261,6 @@ export async function getMailboxWorkspace(
     totalThreadCount: threadCount?.value ?? 0,
   };
 
-  const memoryRows = await database
-    .select({
-      id: memoryEntries.id,
-      type: memoryEntries.memoryType,
-      contactEmail: memoryEntries.contactEmail,
-      statement: memoryEntries.statement,
-      source: memoryEntries.source,
-      confidence: memoryEntries.confidence,
-      evidenceMessageIds: memoryEntries.evidenceMessageIds,
-      evidenceDraftIds: memoryEntries.evidenceDraftIds,
-      createdAt: memoryEntries.createdAt,
-      updatedAt: memoryEntries.updatedAt,
-    })
-    .from(memoryEntries)
-    .where(
-      and(eq(memoryEntries.userId, userId), eq(memoryEntries.accountId, account.id)),
-    )
-    .orderBy(
-      asc(memoryEntries.memoryType),
-      asc(memoryEntries.contactEmail),
-      asc(memoryEntries.createdAt),
-    );
-
-  const mailLabelRows = await database
-    .select({
-      id: mailLabels.id,
-      name: mailLabels.name,
-      description: mailLabels.description,
-      systemKey: mailLabels.systemKey,
-      definitionVersion: mailLabels.definitionVersion,
-      analysisState: mailLabels.analysisState,
-      createdAt: mailLabels.createdAt,
-    })
-    .from(mailLabels)
-    .where(
-      and(eq(mailLabels.userId, userId), eq(mailLabels.accountId, account.id)),
-    )
-    .orderBy(asc(mailLabels.createdAt), asc(mailLabels.name));
-
-  const [threadCountRow] = await database
-    .select({ value: count(threads.id) })
-    .from(threads)
-    .where(and(eq(threads.userId, userId), eq(threads.accountId, account.id)));
-  const analyzedCounts = await database
-    .select({
-      labelId: threadLabelAnalyses.labelId,
-      definitionVersion: threadLabelAnalyses.definitionVersion,
-      value: count(threadLabelAnalyses.id),
-    })
-    .from(threadLabelAnalyses)
-    .where(
-      and(
-        eq(threadLabelAnalyses.userId, userId),
-        eq(threadLabelAnalyses.accountId, account.id),
-      ),
-    )
-    .groupBy(
-      threadLabelAnalyses.labelId,
-      threadLabelAnalyses.definitionVersion,
-    );
   const analyzedCountByLabel = new Map(
     analyzedCounts.map((entry) => [
       `${entry.labelId}:${entry.definitionVersion}`,
@@ -1264,36 +1294,15 @@ export async function getMailboxWorkspace(
       return left.name.localeCompare(right.name);
     });
 
-  const [selectedThread] = selectedThreadId
-    ? await database
-        .select({
-          id: threads.id,
-          providerThreadId: threads.providerThreadId,
-          subject: threads.subject,
-          participants: threads.participants,
-          latestMessageAt: threads.latestMessageAt,
-          messageCount: threads.messageCount,
-        })
-        .from(threads)
-        .where(
-          and(
-            eq(threads.id, selectedThreadId),
-            eq(threads.userId, userId),
-            eq(threads.accountId, account.id),
-          ),
-        )
-        .limit(1)
-    : [];
-
   const threadIds = Array.from(
     new Set([
       ...mailboxThreads.map((thread) => thread.id),
       ...(selectedThread ? [selectedThread.id] : []),
     ]),
   );
-  const appliedLabelRows =
-    threadIds.length > 0
-      ? await database
+  const [appliedLabelRows, gmailLabelRows] = threadIds.length > 0
+    ? await Promise.all([
+        database
           .select({
             threadId: threadLabels.threadId,
             labelId: threadLabels.labelId,
@@ -1309,11 +1318,8 @@ export async function getMailboxWorkspace(
               inArray(threadLabels.threadId, threadIds),
               eq(threadLabels.state, "applied"),
             ),
-          )
-      : [];
-  const gmailLabelRows =
-    threadIds.length > 0
-      ? await database
+          ),
+        database
           .select({
             threadId: messages.threadId,
             id: gmailLabels.id,
@@ -1328,8 +1334,9 @@ export async function getMailboxWorkspace(
             eq(gmailMessageLabels.messageId, messages.id),
           )
           .innerJoin(gmailLabels, eq(gmailLabels.id, gmailMessageLabels.gmailLabelId))
-          .where(inArray(messages.threadId, threadIds))
-      : [];
+          .where(inArray(messages.threadId, threadIds)),
+      ])
+    : [[], []];
   const labelsByThread = new Map<string, typeof appliedLabelRows>();
   for (const label of appliedLabelRows) {
     const current = labelsByThread.get(label.threadId) ?? [];
@@ -1385,32 +1392,72 @@ export async function getMailboxWorkspace(
     };
   }
 
-  const threadMessages = await database
-    .select({
-      id: messages.id,
-      providerMessageId: messages.providerMessageId,
-      providerHistoryId: messages.providerHistoryId,
-      internalDate: messages.internalDate,
-      sizeEstimate: messages.sizeEstimate,
-      headerLines: messages.headerLines,
-      direction: messages.direction,
-      sender: messages.sender,
-      recipients: messages.recipients,
-      subject: messages.subject,
-      bodyText: messages.bodyText,
-      bodyHtml: messages.bodyHtml,
-      rawChecksumSha256: messages.rawChecksumSha256,
-      rawContentLength: messages.rawContentLength,
-      sentAt: messages.sentAt,
-    })
-    .from(messages)
-    .where(and(eq(messages.userId, userId), eq(messages.threadId, selectedThread.id)))
-    .orderBy(asc(messages.sentAt));
+  const [threadMessages, [threadDraft], providerDrafts] = await Promise.all([
+    database
+      .select({
+        id: messages.id,
+        providerMessageId: messages.providerMessageId,
+        providerHistoryId: messages.providerHistoryId,
+        internalDate: messages.internalDate,
+        sizeEstimate: messages.sizeEstimate,
+        headerLines: messages.headerLines,
+        direction: messages.direction,
+        sender: messages.sender,
+        recipients: messages.recipients,
+        subject: messages.subject,
+        bodyText: messages.bodyText,
+        bodyHtml: messages.bodyHtml,
+        rawChecksumSha256: messages.rawChecksumSha256,
+        rawContentLength: messages.rawContentLength,
+        sentAt: messages.sentAt,
+      })
+      .from(messages)
+      .where(and(eq(messages.userId, userId), eq(messages.threadId, selectedThread.id)))
+      .orderBy(asc(messages.sentAt)),
+    database
+      .select({
+        id: drafts.id,
+        threadId: drafts.threadId,
+        status: drafts.status,
+        generatedText: drafts.generatedText,
+        currentText: drafts.currentText,
+        usedMemoryIds: drafts.usedMemoryIds,
+        updatedAt: drafts.updatedAt,
+      })
+      .from(drafts)
+      .where(
+        and(
+          eq(drafts.userId, userId),
+          eq(drafts.threadId, selectedThread.id),
+          eq(drafts.status, "editing"),
+          isNotNull(drafts.generatedText),
+        ),
+      )
+      .orderBy(desc(drafts.updatedAt))
+      .limit(1),
+    database
+      .select({
+        id: gmailDrafts.id,
+        providerDraftId: gmailDrafts.providerDraftId,
+        providerMessageId: gmailDrafts.providerMessageId,
+        providerThreadId: gmailDrafts.providerThreadId,
+        updatedAt: gmailDrafts.updatedAt,
+      })
+      .from(gmailDrafts)
+      .where(
+        and(
+          eq(gmailDrafts.accountId, account.id),
+          eq(gmailDrafts.providerThreadId, selectedThread.providerThreadId),
+          isNotNull(gmailDrafts.providerMessageId),
+        ),
+      )
+      .orderBy(desc(gmailDrafts.updatedAt)),
+  ]);
 
   const messageIds = threadMessages.map((message) => message.id);
-  const attachmentRows =
-    messageIds.length > 0
-      ? await database
+  const [attachmentRows, messageGmailLabelRows] = messageIds.length > 0
+    ? await Promise.all([
+        database
           .select({
             id: messageAttachments.id,
             messageId: messageAttachments.messageId,
@@ -1425,18 +1472,8 @@ export async function getMailboxWorkspace(
           })
           .from(messageAttachments)
           .where(inArray(messageAttachments.messageId, messageIds))
-          .orderBy(asc(messageAttachments.filename))
-      : [];
-  const attachmentsByMessage = new Map<string, typeof attachmentRows>();
-  for (const attachment of attachmentRows) {
-    const current = attachmentsByMessage.get(attachment.messageId) ?? [];
-    current.push(attachment);
-    attachmentsByMessage.set(attachment.messageId, current);
-  }
-
-  const messageGmailLabelRows =
-    messageIds.length > 0
-      ? await database
+          .orderBy(asc(messageAttachments.filename)),
+        database
           .select({
             messageId: gmailMessageLabels.messageId,
             id: gmailLabels.id,
@@ -1447,54 +1484,22 @@ export async function getMailboxWorkspace(
           })
           .from(gmailMessageLabels)
           .innerJoin(gmailLabels, eq(gmailLabels.id, gmailMessageLabels.gmailLabelId))
-          .where(inArray(gmailMessageLabels.messageId, messageIds))
-      : [];
+          .where(inArray(gmailMessageLabels.messageId, messageIds)),
+      ])
+    : [[], []];
+  const attachmentsByMessage = new Map<string, typeof attachmentRows>();
+  for (const attachment of attachmentRows) {
+    const current = attachmentsByMessage.get(attachment.messageId) ?? [];
+    current.push(attachment);
+    attachmentsByMessage.set(attachment.messageId, current);
+  }
+
   const gmailLabelsByMessage = new Map<string, typeof messageGmailLabelRows>();
   for (const label of messageGmailLabelRows) {
     const current = gmailLabelsByMessage.get(label.messageId) ?? [];
     current.push(label);
     gmailLabelsByMessage.set(label.messageId, current);
   }
-
-  const [threadDraft] = await database
-    .select({
-      id: drafts.id,
-      threadId: drafts.threadId,
-      status: drafts.status,
-      generatedText: drafts.generatedText,
-      currentText: drafts.currentText,
-      usedMemoryIds: drafts.usedMemoryIds,
-      updatedAt: drafts.updatedAt,
-    })
-    .from(drafts)
-    .where(
-      and(
-        eq(drafts.userId, userId),
-        eq(drafts.threadId, selectedThread.id),
-        eq(drafts.status, "editing"),
-        isNotNull(drafts.generatedText),
-      ),
-    )
-    .orderBy(desc(drafts.updatedAt))
-    .limit(1);
-
-  const providerDrafts = await database
-    .select({
-      id: gmailDrafts.id,
-      providerDraftId: gmailDrafts.providerDraftId,
-      providerMessageId: gmailDrafts.providerMessageId,
-      providerThreadId: gmailDrafts.providerThreadId,
-      updatedAt: gmailDrafts.updatedAt,
-    })
-    .from(gmailDrafts)
-    .where(
-      and(
-        eq(gmailDrafts.accountId, account.id),
-        eq(gmailDrafts.providerThreadId, selectedThread.providerThreadId),
-        isNotNull(gmailDrafts.providerMessageId),
-      ),
-    )
-    .orderBy(desc(gmailDrafts.updatedAt));
 
   return {
     account,
@@ -1591,6 +1596,19 @@ export async function getMailSyncProgressForAccount(
     state: account.syncState.mailSync,
     run: run ?? null,
   });
+}
+
+export async function getAccountSyncStateForAccount(
+  input: { accountId: string },
+  database: Database = getDatabase(),
+): Promise<AccountSyncState | null> {
+  const [account] = await database
+    .select({ syncState: connectedAccounts.syncState })
+    .from(connectedAccounts)
+    .where(eq(connectedAccounts.id, input.accountId))
+    .limit(1);
+
+  return account?.syncState ?? null;
 }
 
 async function getIndexingProgressWithExecutor(
@@ -3397,13 +3415,18 @@ export async function setMemorySyncStage(
   stage: AccountSyncState["memory"],
   database: Database = getDatabase(),
 ) {
-  await database
-    .update(connectedAccounts)
-    .set({
-      syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{memory}', to_jsonb(${stage}::text), true)`,
-      updatedAt: new Date(),
-    })
-    .where(eq(connectedAccounts.id, accountId));
+  await database.transaction(async (transaction) => {
+    await transaction
+      .update(connectedAccounts)
+      .set({
+        syncState: sql`jsonb_set(${connectedAccounts.syncState}, '{memory}', to_jsonb(${stage}::text), true)`,
+        updatedAt: new Date(),
+      })
+      .where(eq(connectedAccounts.id, accountId));
+    await transaction.execute(
+      sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId })})`,
+    );
+  });
 }
 
 export async function setIndexingSyncStage(

@@ -1,13 +1,13 @@
 import "server-only";
 
-import axios from "axios";
-import { Readable } from "node:stream";
+import axios, { type AxiosResponse } from "axios";
+import { PassThrough, Readable } from "node:stream";
 
 function getApiOrigin(): string {
   return (process.env.API_INTERNAL_URL ?? "http://127.0.0.1:4000").replace(/\/$/, "");
 }
 
-export async function proxyEventStream(request: Request, path: string) {
+export async function proxyEventStream(request: Request, path: string): Promise<Response> {
   const headers: Record<string, string> = {
     accept: "text/event-stream",
   };
@@ -16,12 +16,18 @@ export async function proxyEventStream(request: Request, path: string) {
   if (cookie) headers.cookie = cookie;
   if (lastEventId) headers["last-event-id"] = lastEventId;
 
-  const upstream = await axios.get(`${getApiOrigin()}${path}`, {
-    headers,
-    responseType: "stream",
-    signal: request.signal,
-    validateStatus: () => true,
-  });
+  let upstream: AxiosResponse<Readable>;
+  try {
+    upstream = await axios.get<Readable>(`${getApiOrigin()}${path}`, {
+      headers,
+      responseType: "stream",
+      signal: request.signal,
+      validateStatus: () => true,
+    });
+  } catch (error) {
+    if (axios.isCancel(error)) return new Response(null, { status: 204 });
+    throw error;
+  }
   const responseHeaders = new Headers();
   for (const name of [
     "cache-control",
@@ -34,7 +40,17 @@ export async function proxyEventStream(request: Request, path: string) {
     if (typeof value === "string") responseHeaders.set(name, value);
   }
 
-  const body = Readable.toWeb(upstream.data as Readable) as unknown as ReadableStream;
+  const responseBody = new PassThrough();
+  upstream.data.once("error", (error: unknown) => {
+    if (axios.isCancel(error)) {
+      responseBody.end();
+      return;
+    }
+    responseBody.destroy(new Error("Upstream event stream failed"));
+  });
+  upstream.data.pipe(responseBody);
+
+  const body = Readable.toWeb(responseBody) as unknown as ReadableStream;
   return new Response(body, {
     headers: responseHeaders,
     status: upstream.status,

@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 
 import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
 import { MailboxRefreshButton } from "./mailbox-refresh-button";
+import { MailNavigationPending } from "./mail-navigation-pending";
 import type {
   MailAccount,
   MailboxView,
@@ -85,6 +86,7 @@ function MailRow({
         unread && "bg-card/45",
       )}
     >
+      <MailNavigationPending variant="edge" />
       <div className="flex min-w-0 items-center gap-2">
         {important ? <span className="size-1.5 shrink-0 rounded-full bg-primary" /> : null}
         <p className={cn("truncate text-sm", unread ? "font-semibold" : "font-medium text-foreground/78")}>
