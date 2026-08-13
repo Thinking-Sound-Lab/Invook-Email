@@ -546,7 +546,12 @@ export async function ingestGmailPushEvent(
 }
 
 export async function enqueueGmailHistoryCatchup(
-  input: { userId: string; accountId: string; reason: "manual" | "provider_write" },
+  input: {
+    userId: string;
+    accountId: string;
+    reason: "manual" | "provider_write";
+    sourceId?: string;
+  },
   database: Database = getDatabase(),
 ) {
   return enqueueWorkflowStep(
@@ -555,7 +560,7 @@ export async function enqueueGmailHistoryCatchup(
       accountId: input.accountId,
       stepType: "gmail.history.catchup",
       payload: { reason: input.reason },
-      idempotencyKey: `gmail-history-${input.reason}:${input.accountId}:${uuidv4()}`,
+      idempotencyKey: `gmail-history-${input.reason}:${input.accountId}:${input.sourceId ?? uuidv4()}`,
     },
     database,
   );

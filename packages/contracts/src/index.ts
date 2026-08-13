@@ -1,3 +1,5 @@
+export * from "./gmail-compose";
+
 export type AccountSyncStage = "pending" | "running" | "complete" | "failed";
 
 export const MAIL_EMBEDDING_DIMENSIONS = 1_536;

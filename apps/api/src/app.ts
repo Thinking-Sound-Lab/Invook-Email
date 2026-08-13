@@ -9,6 +9,7 @@ import {
   type AttachmentRouteDependencies,
 } from "./routes/attachments";
 import { registerBatchWebhookRoutes } from "./routes/batch-webhook";
+import { registerComposeDraftRoutes } from "./routes/compose-drafts";
 import { registerDraftRoutes } from "./routes/drafts";
 import { registerGmailProviderRoutes } from "./routes/gmail-provider";
 import { registerHealthRoutes } from "./routes/health";
@@ -87,6 +88,7 @@ export async function buildApi(options: {
   await api.register(registerLabelRoutes, { prefix: "/v1/labels" });
   await api.register(registerThreadLabelRoutes, { prefix: "/v1/threads" });
   await api.register(registerDraftRoutes);
+  await api.register(registerComposeDraftRoutes);
   await api.register(registerGmailProviderRoutes);
 
   api.setNotFoundHandler(async (request, reply) => {

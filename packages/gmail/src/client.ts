@@ -427,10 +427,11 @@ export function untrashGmailMessage(
 
 export function listGmailDrafts(
   accessToken: string,
-  options: { maxResults: number; pageToken?: string },
+  options: { maxResults: number; pageToken?: string; query?: string },
 ): Promise<GmailDraftPage> {
   const search = new URLSearchParams({ maxResults: String(options.maxResults) });
   if (options.pageToken) search.set("pageToken", options.pageToken);
+  if (options.query) search.set("q", options.query);
   return gmailRequest<GmailDraftPage>(
     accessToken,
     `/users/me/drafts?${search.toString()}`,

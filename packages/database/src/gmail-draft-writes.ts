@@ -1,0 +1,174 @@
+import { and, eq } from "drizzle-orm";
+
+import {
+  getDatabase,
+  type Database,
+} from "./client";
+import { gmailDraftWriteOperations } from "./schema";
+
+export type GmailDraftWriteOperation = "create" | "update";
+
+export type GmailDraftWriteResult = {
+  providerDraftId: string;
+  providerMessageId: string;
+  providerThreadId: string;
+};
+
+export type BeginGmailDraftWriteResult =
+  | { outcome: "claimed"; operationId: string }
+  | { outcome: "pending"; operationId: string }
+  | {
+      outcome: "complete";
+      operationId: string;
+      result: GmailDraftWriteResult;
+    };
+
+export class GmailDraftWriteConflictError extends Error {
+  constructor() {
+    super("The idempotency key was already used for a different Gmail draft write.");
+    this.name = "GmailDraftWriteConflictError";
+  }
+}
+
+export async function beginGmailDraftWrite(
+  input: {
+    userId: string;
+    accountId: string;
+    operation: GmailDraftWriteOperation;
+    idempotencyKey: string;
+    requestFingerprint: string;
+  },
+  database: Database = getDatabase(),
+): Promise<BeginGmailDraftWriteResult> {
+  const [inserted] = await database
+    .insert(gmailDraftWriteOperations)
+    .values({
+      ...input,
+      status: "pending",
+    })
+    .onConflictDoNothing({
+      target: [
+        gmailDraftWriteOperations.userId,
+        gmailDraftWriteOperations.idempotencyKey,
+      ],
+    })
+    .returning({ id: gmailDraftWriteOperations.id });
+  if (inserted) return { outcome: "claimed", operationId: inserted.id };
+
+  const [existing] = await database
+    .select({
+      id: gmailDraftWriteOperations.id,
+      accountId: gmailDraftWriteOperations.accountId,
+      operation: gmailDraftWriteOperations.operation,
+      status: gmailDraftWriteOperations.status,
+      requestFingerprint: gmailDraftWriteOperations.requestFingerprint,
+      providerDraftId: gmailDraftWriteOperations.providerDraftId,
+      providerMessageId: gmailDraftWriteOperations.providerMessageId,
+      providerThreadId: gmailDraftWriteOperations.providerThreadId,
+    })
+    .from(gmailDraftWriteOperations)
+    .where(
+      and(
+        eq(gmailDraftWriteOperations.userId, input.userId),
+        eq(gmailDraftWriteOperations.idempotencyKey, input.idempotencyKey),
+      ),
+    )
+    .limit(1);
+  if (!existing) {
+    throw new Error("The Gmail draft write idempotency record could not be read.");
+  }
+  if (
+    existing.accountId !== input.accountId ||
+    existing.operation !== input.operation ||
+    existing.requestFingerprint !== input.requestFingerprint
+  ) {
+    throw new GmailDraftWriteConflictError();
+  }
+  if (existing.status === "pending") {
+    return { outcome: "pending", operationId: existing.id };
+  }
+  if (
+    !existing.providerDraftId ||
+    !existing.providerMessageId ||
+    !existing.providerThreadId
+  ) {
+    throw new Error("The completed Gmail draft write has no provider result.");
+  }
+  return {
+    outcome: "complete",
+    operationId: existing.id,
+    result: {
+      providerDraftId: existing.providerDraftId,
+      providerMessageId: existing.providerMessageId,
+      providerThreadId: existing.providerThreadId,
+    },
+  };
+}
+
+export async function completeGmailDraftWrite(
+  input: {
+    operationId: string;
+    userId: string;
+    result: GmailDraftWriteResult;
+  },
+  database: Database = getDatabase(),
+): Promise<void> {
+  const [completed] = await database
+    .update(gmailDraftWriteOperations)
+    .set({
+      status: "complete",
+      providerDraftId: input.result.providerDraftId,
+      providerMessageId: input.result.providerMessageId,
+      providerThreadId: input.result.providerThreadId,
+      completedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(gmailDraftWriteOperations.id, input.operationId),
+        eq(gmailDraftWriteOperations.userId, input.userId),
+        eq(gmailDraftWriteOperations.status, "pending"),
+      ),
+    )
+    .returning({ id: gmailDraftWriteOperations.id });
+  if (completed) return;
+
+  const [existing] = await database
+    .select({
+      status: gmailDraftWriteOperations.status,
+      providerDraftId: gmailDraftWriteOperations.providerDraftId,
+      providerMessageId: gmailDraftWriteOperations.providerMessageId,
+      providerThreadId: gmailDraftWriteOperations.providerThreadId,
+    })
+    .from(gmailDraftWriteOperations)
+    .where(
+      and(
+        eq(gmailDraftWriteOperations.id, input.operationId),
+        eq(gmailDraftWriteOperations.userId, input.userId),
+      ),
+    )
+    .limit(1);
+  if (
+    existing?.status === "complete" &&
+    existing.providerDraftId === input.result.providerDraftId &&
+    existing.providerMessageId === input.result.providerMessageId &&
+    existing.providerThreadId === input.result.providerThreadId
+  ) {
+    return;
+  }
+  throw new Error("The Gmail draft write result could not be persisted.");
+}
+
+export async function abandonPendingGmailDraftWrite(
+  input: { operationId: string; userId: string },
+  database: Database = getDatabase(),
+): Promise<void> {
+  await database
+    .delete(gmailDraftWriteOperations)
+    .where(
+      and(
+        eq(gmailDraftWriteOperations.id, input.operationId),
+        eq(gmailDraftWriteOperations.userId, input.userId),
+        eq(gmailDraftWriteOperations.status, "pending"),
+      ),
+    );
+}
