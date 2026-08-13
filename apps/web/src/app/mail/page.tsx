@@ -138,7 +138,6 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   if (selectedThread) {
     centerPane = (
       <ThreadReader
-        key={selectedThread.id}
         thread={selectedThread}
         currentView={currentView}
         mailboxCursor={mailboxCursor}
@@ -192,7 +191,12 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           syncProgress={workspace.account.mailSyncProgress}
           labels={workspace.labels}
         />
-        {centerPane}
+        <div
+          data-slot="mail-workspace-content"
+          className="min-h-0 min-w-0 overflow-hidden [&>*]:h-full"
+        >
+          {centerPane}
+        </div>
         <AgentPanel
           key={selectedThread?.id ?? "mailbox"}
           openThreadId={selectedThread?.id}
