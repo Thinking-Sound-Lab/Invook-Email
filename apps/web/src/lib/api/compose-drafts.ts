@@ -1,6 +1,8 @@
 import type {
   CreateGmailComposeDraftRequest,
   GmailComposeDraftResponse,
+  GmailComposeSendResponse,
+  SendGmailComposeDraftRequest,
   UpdateGmailComposeDraftRequest,
 } from "@invook/contracts";
 import axios from "axios";
@@ -21,6 +23,17 @@ export async function updateGmailComposeDraft(
 ): Promise<GmailComposeDraftResponse> {
   const response = await axios.put<GmailComposeDraftResponse>(
     `/v1/gmail/compose-drafts/${encodeURIComponent(providerDraftId)}`,
+    request,
+  );
+  return response.data;
+}
+
+export async function sendGmailComposeDraft(
+  providerDraftId: string,
+  request: SendGmailComposeDraftRequest,
+): Promise<GmailComposeSendResponse> {
+  const response = await axios.post<GmailComposeSendResponse>(
+    `/v1/gmail/compose-drafts/${encodeURIComponent(providerDraftId)}/send`,
     request,
   );
   return response.data;

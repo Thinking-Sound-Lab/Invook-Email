@@ -149,7 +149,11 @@ test("a retry after catch-up failure does not repeat the completed provider writ
 test("an ambiguous pending write recovers by its stable RFC 822 message ID", async () => {
   let completed = false;
   const dependencies: ComposeDraftDependencies = {
-    beginWrite: async () => ({ outcome: "pending", operationId: "operation-1" }),
+    beginWrite: async () => ({
+      outcome: "pending",
+      operationId: "operation-1",
+      result: null,
+    }),
     completeWrite: async () => {
       completed = true;
     },

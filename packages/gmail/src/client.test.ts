@@ -10,6 +10,7 @@ import {
   isGoogleReauthenticationRequired,
   listGmailDrafts,
   listGmailMessages,
+  sendGmailDraft,
 } from "./client";
 
 const originalAxiosRequest = axios.request;
@@ -104,4 +105,16 @@ test("Gmail draft listing forwards an exact provider search query", async () => 
     url.searchParams.get("q"),
     "rfc822msgid:invook-compose@example.invalid",
   );
+});
+
+test("sending uses Gmail's existing-draft endpoint and provider draft identity", async () => {
+  requests.length = 0;
+  await sendGmailDraft("access-token", "provider-draft");
+
+  const request = requests[0];
+  assert.ok(request);
+  const url = new URL(request.url ?? "", request.baseURL);
+  assert.equal(url.pathname, "/users/me/drafts/send");
+  assert.equal(request.method, "POST");
+  assert.deepEqual(request.data, { id: "provider-draft" });
 });

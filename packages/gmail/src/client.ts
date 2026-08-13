@@ -482,6 +482,16 @@ export function updateGmailDraft(
   );
 }
 
+export function sendGmailDraft(
+  accessToken: string,
+  draftId: string,
+): Promise<GmailMessageState> {
+  return gmailRequest<GmailMessageState>(accessToken, "/users/me/drafts/send", {
+    method: "POST",
+    data: { id: draftId },
+  });
+}
+
 export async function deleteGmailDraft(
   accessToken: string,
   draftId: string,
