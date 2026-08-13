@@ -6,6 +6,7 @@ import type { OutboxJob, QueueName, WorkflowStepJob } from "@invook/database";
 export const queueNames: QueueName[] = [
   "gmail-pages",
   "gmail-messages",
+  "gmail-control",
   "mail-indexing-batch",
   "mail-indexing-live",
   "mail-memory-submit",
@@ -14,6 +15,8 @@ export const queueNames: QueueName[] = [
 ];
 
 export type WorkflowJob = Job<WorkflowStepJob, Record<string, unknown>, string>;
+
+export const gmailControlConcurrency = 5;
 
 const completedJobRetention = { age: 7 * 24 * 60 * 60, count: 1_000 };
 const failedJobRetention = { age: 30 * 24 * 60 * 60, count: 5_000 };
@@ -63,6 +66,9 @@ export class BullQueueRuntime {
     const gmailMessages = this.queues.get("gmail-messages");
     if (!gmailMessages) throw new Error("The Gmail message queue is unavailable.");
     await gmailMessages.setGlobalConcurrency(5);
+    const gmailControl = this.queues.get("gmail-control");
+    if (!gmailControl) throw new Error("The Gmail control queue is unavailable.");
+    await gmailControl.setGlobalConcurrency(gmailControlConcurrency);
   }
 
   async publish(jobs: OutboxJob[]) {
@@ -77,25 +83,36 @@ export class BullQueueRuntime {
       const queue = this.queues.get(queueName);
       if (!queue) throw new Error(`BullMQ queue is unavailable: ${queueName}`);
       await queue.addBulk(
-        queueJobs.map((job) => ({
-          name: job.stepType,
-          data: {
-            id: job.id,
-            runId: job.runId,
-            userId: job.userId,
-            accountId: job.accountId,
-            stepType: job.stepType,
-            payload: job.payload,
-            attempts: job.attempts,
-            maxAttempts: job.maxAttempts,
-          },
-          opts: {
-            jobId: job.id,
-            attempts: Math.max(job.maxAttempts - job.attempts, 1),
-            removeOnComplete: completedJobRetention,
-            removeOnFail: failedJobRetention,
-          },
-        })),
+        queueJobs.map((job) => {
+          const runAt =
+            typeof job.payload.runAt === "string"
+              ? Date.parse(job.payload.runAt)
+              : Number.NaN;
+          const delay = Number.isFinite(runAt)
+            ? Math.max(runAt - Date.now(), 0)
+            : 0;
+          return {
+            name: job.stepType,
+            data: {
+              id: job.id,
+              runId: job.runId,
+              userId: job.userId,
+              accountId: job.accountId,
+              stepType: job.stepType,
+              payload: job.payload,
+              attempts: job.attempts,
+              maxAttempts: job.maxAttempts,
+            },
+            opts: {
+              jobId: job.id,
+              attempts: Math.max(job.maxAttempts - job.attempts, 1),
+              backoff: { type: "exponential", delay: 1_000 },
+              ...(delay > 0 ? { delay } : {}),
+              removeOnComplete: completedJobRetention,
+              removeOnFail: failedJobRetention,
+            },
+          };
+        }),
       );
     }
   }

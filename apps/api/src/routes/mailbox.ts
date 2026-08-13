@@ -2,10 +2,11 @@ import type { FastifyPluginAsync } from "fastify";
 
 import { mailboxViews, type MailboxView } from "@invook/contracts";
 import {
-  enqueueIncrementalSyncForUser,
+  enqueueGmailHistoryCatchupForUser,
+  enqueueGmailReplicaAuditForUser,
   getMailboxWorkspace,
+  markGmailReplicaDeletingForUser,
   parseMailboxCursor,
-  waitForMailboxSyncCompletion,
 } from "@invook/database";
 
 import { isUuid, mutationAccessHooks, requireSession } from "../access";
@@ -77,39 +78,54 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      const result = await enqueueIncrementalSyncForUser(session.userId);
-      if (result.jobId === null) {
+      const result = await enqueueGmailHistoryCatchupForUser(session.userId);
+      if (result.stepId === null) {
         await sendProblem(
           request,
           reply,
           result.reason === "not_found" ? 404 : 409,
           result.reason === "not_found"
             ? "Connected Gmail account not found"
-            : "Initial Gmail indexing is not complete",
+            : "Gmail mailbox replica is not ready",
         );
         return;
       }
-      const completion = await waitForMailboxSyncCompletion({
-        userId: session.userId,
-        jobId: result.jobId,
+      await sendJson(reply, 202, {
+        accepted: true,
+        stepId: result.stepId,
       });
-      if (!completion) {
-        await sendProblem(
-          request,
-          reply,
-          404,
-          "Gmail synchronization job not found",
-        );
+    },
+  );
+
+  api.post(
+    "/v1/mailbox/audit",
+    { onRequest: mutationAccessHooks },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const result = await enqueueGmailReplicaAuditForUser(session.userId);
+      if (result.stepId === null) {
+        await sendProblem(request, reply, 404, "Connected Gmail account not found");
         return;
       }
-      if (completion.status === "failed") {
-        await sendProblem(request, reply, 502, "Gmail synchronization failed");
+      await sendJson(reply, 202, { accepted: true, stepId: result.stepId });
+    },
+  );
+
+  api.delete(
+    "/v1/mailbox/account",
+    { onRequest: mutationAccessHooks },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const result = await markGmailReplicaDeletingForUser(session.userId);
+      if (!result.cleanupId) {
+        await sendProblem(request, reply, 404, "Connected Gmail account not found");
         return;
       }
-      await sendJson(reply, 200, {
-        completed: true,
-        jobId: result.jobId,
-        result: completion.result,
+      await sendJson(reply, 202, {
+        accepted: true,
+        cleanupId: result.cleanupId,
       });
     },
   );

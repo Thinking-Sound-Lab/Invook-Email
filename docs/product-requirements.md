@@ -1,16 +1,16 @@
 # Invook product requirements
 
-**Status:** Memory-first implementation  
-**Updated:** August 11, 2026
+**Status:** Mailbox-replica and Memory implementation
+**Updated:** August 12, 2026
 
 ## Product statement
 
-Invook is an AI-native Gmail client that indexes a user's real mailbox, identifies what matters, and helps find, write, and eventually automate email work. AI is part of the product's operating model rather than a separate compose button.
+Invook is an AI-native Gmail client that replicates a user's real Gmail mailbox, identifies what matters, and helps find, write, and eventually automate email work. AI is part of the product's operating model rather than a separate compose button.
 
 The first differentiated loop is Memory-backed drafting:
 
 1. Connect Gmail.
-2. Index real mail and label the inbox.
+2. Build and continuously synchronize a verified replica of real mail.
 3. Infer a small, inspectable Memory from full thread context and repeated owner-sent behavior.
 4. Draft with only the memories that apply to the current conversation.
 5. Treat the user's repeated draft corrections as high-quality feedback.
@@ -55,9 +55,13 @@ Google OAuth must:
 - request the Gmail permissions required by the product;
 - return to `/mail` after a valid callback;
 - encrypt refresh and access credentials before persistence;
-- queue full-mailbox indexing without blocking the callback.
+- on first connection, capture H0, register a Gmail watch, and create exactly one durable full-mailbox replication run without blocking the callback;
+- on returning authentication, refresh the session, profile, and encrypted credentials without resetting replica, cursor, audit, watch, sync-stage, or mailbox state;
+- keep an existing initial replication run, or enqueue stored-cursor history catch-up for a ready replica only when Gmail reports newer history.
 
-The first connection stores real normalized messages and thread metadata in PostgreSQL by following every Gmail result page, including Spam and Trash. After that one-time crawl, the mailbox Refresh action and account reconnects use the saved Gmail history cursor to apply message additions, deletions, and Gmail label changes. Only threads whose indexed content changed are relabeled, and only new eligible owner-sent evidence is considered for incremental Memory. An expired history cursor triggers a full snapshot reconciliation with change-aware upserts and deletion handling, so unchanged stored mail does not become new evidence or lose its labels.
+Signing out clears only the browser session cookie. It does not revoke Google credentials, stop the Gmail watch, cancel durable work, or change the mailbox replica. Account deletion remains the explicit destructive lifecycle.
+
+The first connection follows every Gmail result page with Spam and Trash included, stores exact raw MIME and attachment bytes in S3-compatible storage, and stores complete headers, text/HTML, normalized provider labels, Gmail Draft resources, tombstones, cursor/watch state, and audit state in PostgreSQL. It replays history from H0 and passes a completeness audit before indexing or Memory can start. Authenticated Pub/Sub pushes durably queue serialized history catch-up from the stored cursor. An expired cursor triggers watch renewal, full snapshot repair, replay, label/draft refresh, and another audit. Gmail remains canonical. The detailed boundary is defined in `docs/gmail-replica-contract.md`.
 
 ### Mail workspace
 
@@ -144,7 +148,7 @@ When the user requests a draft, the API builds context from:
 
 Unrelated contact memory is never supplied. The model returns the draft, the IDs of memories that materially affected it, and whether scheduling was relevant. Invook persists that provenance with the editable draft.
 
-Sending is outside the current slice. The UI must say **Save changes**, not imply that a message was sent.
+Sending is outside the current slice. The UI may explicitly save an AI reply as a Gmail Draft; that creates a separate provider resource and keeps the AI draft/evidence unchanged. It must not imply that a message was sent.
 
 ## Feedback
 
@@ -187,8 +191,10 @@ Browser
 Worker
   -> PostgreSQL workflow runs, checkpoints, and transactional outbox
   -> BullMQ queues in persistent Redis
-  -> initial Gmail indexing, search indexing, and initial Memory
-  -> PostgreSQL jobs for Gmail history sync, label backfills, and incremental Memory
+  -> Gmail snapshot, history replay, Pub/Sub catch-up, watch renewal, and audits
+  -> S3-compatible raw MIME and attachment object storage
+  -> BullMQ search indexing and initial Memory
+  -> PostgreSQL jobs for Invook-label backfills and incremental Memory
   -> selected OpenAI or Azure OpenAI Batch provider for labels and Memory
   -> configured model endpoint for feedback and drafts
   -> validated results in PostgreSQL
@@ -205,6 +211,16 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `account_secrets`
 - `threads`
 - `messages`
+- `gmail_labels`
+- `gmail_message_labels`
+- `gmail_message_tombstones`
+- `gmail_drafts`
+- `gmail_replica_states`
+- `gmail_watch_states`
+- `gmail_push_events`
+- `gmail_replica_audits`
+- `mailbox_change_events`
+- `gmail_account_cleanups`
 - `labels`
 - `thread_labels`
 - `thread_label_analyses`
@@ -230,7 +246,11 @@ Current mailbox, label, Memory, and draft endpoints include:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/mailbox` | Return the connected mailbox workspace |
-| `POST` | `/v1/mailbox/sync` | Run a worker-backed Gmail history sync from the saved cursor and return after its database job completes |
+| `POST` | `/v1/mailbox/sync` | Durably queue Gmail history catch-up from the stored replica cursor |
+| `POST` | `/v1/mailbox/audit` | Durably queue a manual completeness audit and repair |
+| `DELETE` | `/v1/mailbox/account` | Stop the watch, clean object storage, then delete the connected account |
+| `GET` | `/v1/mailbox/events` | Stream authenticated durable mailbox-change events over SSE |
+| `POST` | `/v1/webhooks/google-pubsub` | Authenticate and durably deduplicate a Gmail Pub/Sub push |
 | `POST` | `/v1/labels` | Create a label and queue its full indexed-mailbox backfill |
 | `DELETE` | `/v1/labels/:labelId` | Delete any account-owned label and its decisions |
 | `GET` | `/v1/memories` | Return the connected account's real Memory and status |
@@ -239,6 +259,11 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `DELETE` | `/v1/memories/:id` | Delete an item and retain only its fingerprint tombstone |
 | `POST` | `/v1/threads/:id/drafts` | Generate a draft from the thread and applicable Memory |
 | `PATCH` | `/v1/drafts/:id` | Save an edit and queue feedback analysis when changed |
+| `POST` | `/v1/drafts/:id/save-to-gmail` | Create a distinct Gmail Draft from saved AI reply evidence |
+| `POST` | `/v1/gmail/labels` | Create an authoritative custom label at Gmail |
+| `PATCH/DELETE` | `/v1/gmail/labels/:id` | Update or delete an authoritative custom Gmail label |
+| `PATCH` | `/v1/gmail/messages/:id/labels` | Apply authoritative Gmail message-label changes |
+| `PUT/DELETE` | `/v1/gmail/drafts/:id` | Update or delete an existing Gmail Draft resource |
 
 Every mutation requires an authenticated signed session and an allowed request origin. IDs and bodies are validated before repository calls. User ownership is enforced in every product lookup.
 
@@ -246,7 +271,7 @@ Every mutation requires an authenticated signed session and an allowed request o
 
 - Embedding-based Memory extraction or retrieval.
 - A broad inferred relationship/personality graph.
-- Automatic sending or autonomous mailbox mutations.
+- Automatic sending or autonomous mailbox mutations without an explicit user action.
 - Calendar execution.
 - General agent chat that claims unsupported actions.
 - Multiple email providers.
@@ -272,7 +297,6 @@ The Memory-first slice is successful when:
 After the Memory loop is measured with real use:
 
 1. add conversational right-panel actions with explicit approvals and audit records;
-2. add Gmail push-notification delivery so background sync does not depend on the current manual Refresh action or an account reconnect;
-3. evaluate semantic retrieval for mailbox finding or factual context, independently of Memory extraction;
-4. add sending, scheduling, reminders, and safe automations;
-5. choose an open-source license and add contribution governance.
+2. evaluate semantic retrieval for mailbox finding or factual context, independently of Memory extraction;
+3. add sending, scheduling, reminders, and safe automations;
+4. choose an open-source license and add contribution governance.

@@ -1,15 +1,180 @@
-## Project rules
+# Invook engineering guidelines
 
-- Never guess or imagine requirements, behavior, data, states, labels, fields, actions, or design details. Implement only what the user explicitly provides or what the repository, connected services, or real stored data prove. When information is absent, preserve an honest empty or unavailable state.
-- Never use dummy, mock, placeholder, synthetic, seeded, or fixture product data. Product flows must use real connected data. If a live integration is unavailable, show an honest empty or setup state instead of fabricating content.
-- When replacing an implementation, remove its superseded code, routes, scripts, dependencies, environment variables, configuration, and implementation documentation in the same change. Do not retain legacy paths or compatibility shims unless the user explicitly requires them. Finish replacement work with a repository-wide search for obsolete implementation remnants.
-- After every change, remove all dead or unused files, folders, functions, exports, routes, scripts, dependencies, environment variables, configuration, and documentation introduced or made obsolete by that change. Finish with a repository-wide search to confirm that no dead implementation remnants remain.
-- Never use `setTimeout`, deadline options named `timeout`, or timer-based polling in project code or configuration. Prefer event-driven signals, database notifications, queue state, and platform-native health or retry behavior.
-- For UUID generation and UUID utilities, always use the `uuid` package. Do not use UUID APIs from `node:crypto`, including `randomUUID`.
-- Use Fastify for the API server. For outbound HTTP client requests in both frontend and backend application code, always use `axios`. Do not use the native `fetch` API, `node:http` client APIs, or `node:https` client APIs for application requests.
-- Use an open-source-friendly repository structure. Put deployable applications in `apps/`, shared libraries and configuration in `packages/`, and container-related files in `docker/`.
-- For frontend interfaces, use `shadcn/ui` components and conventions.
-- Use Plus Jakarta Sans for all product interface typography. Do not introduce another product font without explicit approval.
-- For frontend icons, use only the free Hugeicons icon pack unless the user explicitly approves another icon source.
-- Do not use icon fonts, emoji, text glyphs, or hand-drawn SVGs as interface icons.
-- Do not add borders or divider lines by default. Use spacing, typography, color, and surface contrast first; add a border only when it conveys necessary structure or state.
+Invook is an open-source, AI-native Gmail client. Gmail remains canonical while Invook maintains a lossless local mailbox replica, performs search and label analysis, learns inspectable Memory from real user-authored mail, and drafts replies with cited evidence.
+
+These instructions apply repository-wide. Before editing a file, read the closest applicable `AGENTS.md`; directory-specific instructions override this root guide for files in their scope.
+
+## Core principles
+
+These principles apply to every change:
+
+1. **Evidence over assumption.** Implement only behavior proved by the request, repository, connected services, or real stored data. Preserve an honest empty or unavailable state when information is missing.
+2. **Correctness over convenience.** Protect data integrity, provider fidelity, authorization, idempotency, and concurrency even when the safer implementation spans several layers.
+3. **One source of truth.** Identify which system owns each state. Do not create competing local representations, optimistic provider state, or duplicated business rules.
+4. **Clear ownership.** Keep UI, HTTP admission, durable work, domain logic, persistence, and provider integration in their established layers. A module should have one coherent reason to change.
+5. **Composition over complexity.** Build behavior from small, focused modules with explicit contracts instead of large components, hidden coupling, or speculative abstractions.
+6. **Types are contracts.** Model valid states precisely, validate untrusted boundaries, and make impossible states difficult to represent. Do not use casts to hide an unclear contract.
+7. **Durability over process memory.** Work that must survive restarts belongs in PostgreSQL and the durable workflow/outbox path. Treat queues and notifications as execution and wake-up mechanisms.
+8. **Retry-safe by design.** External delivery and worker execution are at least once. Use stable idempotency keys, transactions, database constraints, and cross-process locks where required.
+9. **Privacy and security by default.** Minimize access to mailbox data and credentials, authorize before reading, and never expose sensitive content through logs or errors.
+10. **Complete changes only.** Update every producer and consumer of a changed contract, remove the superseded path, and verify the result end to end at the level the environment permits.
+
+## Sources of truth
+
+Read the smallest relevant set before changing behavior:
+
+- `README.md` describes the supported product and local setup.
+- `docs/product-requirements.md` defines product intent and exclusions.
+- `docs/gmail-replica-contract.md` defines mailbox completeness, synchronization, repair, and deletion invariants.
+- `packages/database/src/schema.ts` and `packages/database/drizzle/` define the current data model and migration history.
+- Existing routes, repositories, workflows, tests, and runtime configuration prove current implementation behavior.
+
+When these sources disagree, do not silently choose one. Determine whether the implementation or documentation is stale and update the complete affected contract.
+
+## Global standards
+
+- Preserve existing user changes and unrelated work. Inspect `git status` before editing and never reset or revert a dirty worktree to simplify a task.
+- Never introduce dummy, placeholder, seeded, synthetic, mock, or fixture data into product flows or persistent product stores. Test-only protocol inputs stay inside tests.
+- Remove dead files, functions, routes, exports, dependencies, configuration, environment variables, and documentation made obsolete by a change. Do not keep speculative compatibility shims.
+- Finish replacements with repository-wide `rg` searches for the obsolete symbols, routes, configuration, and forbidden APIs.
+- Never use `setTimeout`, deadline options named `timeout`, or timer-based polling in project code or configuration. Prefer durable queue state, PostgreSQL notifications, SSE, provider webhooks, or platform-native retry and health behavior.
+- Use Fastify for the API server and Axios for outbound application HTTP. Do not use native `fetch`, `node:http` clients, or `node:https` clients for application requests.
+- Use the `uuid` package for UUID generation and utilities. Do not use UUID APIs from `node:crypto`, including `randomUUID`.
+- Use `pnpm` and `pnpm dlx`, not npm, yarn, or bun. Use Node.js 22+ and the versions pinned by the repository manifests and lockfile.
+- Never commit `.env.local`, credentials, tokens, real mailbox content, raw provider payloads containing secrets, or local tunnel URLs. Keep `.env.example`, runtime validation, setup docs, and container configuration synchronized.
+- Treat email content, attachments, filenames, webhook payloads, model output, and provider error text as untrusted input. Log structured identifiers and statuses, never provider credentials, raw MIME, attachment bytes, or full email content.
+- Do not claim verification that was not performed. State exactly which checks passed and which external integration behavior remains unverified.
+- Frontend work uses shadcn/ui conventions, Plus Jakarta Sans, and free Hugeicons. Do not add icon fonts, emoji, text glyphs, hand-drawn SVG icons, or decorative borders by default.
+
+## Repository structure and boundaries
+
+```text
+apps/
+  api/                 Fastify HTTP API, sessions, OAuth, webhooks, SSE, and product routes
+  web/                 Next.js App Router UI and same-origin API/SSE proxies
+  worker/              Durable Gmail, indexing, labeling, Memory, and feedback work
+packages/
+  ai/                  Model, embedding, Memory, label, draft, and mail-agent logic
+  contracts/           Shared browser/server product and wire contracts
+  database/            Schema, migrations, repositories, replica operations, and workflows
+  gmail/               Google OAuth/OIDC, Gmail API, history mapping, and MIME parsing
+  object-storage/      S3-compatible raw MIME and attachment storage
+docker/                 Container images and local service orchestration
+docs/                   Product and implementation contracts
+```
+
+- Deployable processes belong in `apps/`; reusable domain and infrastructure code belongs in `packages/`; container assets belong in `docker/`.
+- Applications may import public workspace-package exports. Packages must never import from `apps/*`.
+- `apps/web` is UI-only and must not import database, Gmail, object-storage, credentials, or worker code.
+- `apps/api` owns HTTP admission, authentication, authorization, protocol validation, and response serialization. Long-running or retryable work belongs in `apps/worker`.
+- `packages/contracts` remains infrastructure-free and safe for browser imports.
+- Cross-package imports use `@invook/*` public exports. Use relative imports within one package or application. Add a barrel file only when it defines a genuine public boundary.
+- Read `apps/web/AGENTS.md` before frontend work; its Next.js-specific instructions take precedence for that subtree.
+
+## Naming conventions
+
+- Use `kebab-case` for source filenames and directories, except framework-required filenames such as `page.tsx`, `layout.tsx`, and `route.ts`.
+- Use `PascalCase` for React components, classes, types, and interfaces.
+- Name component props `<ComponentName>Props`. Name hooks `use<Capability>`.
+- Use `camelCase` for functions, variables, object properties, and parameters.
+- Prefix booleans with `is`, `has`, `can`, `should`, or another predicate that makes the true condition clear.
+- Name UI event implementations `handle<Action>` and callback props `on<Action>`.
+- Use `SCREAMING_SNAKE_CASE` only for true module-level constants. Do not capitalize ordinary immutable local variables.
+- Use explicit identifier names at boundaries: `userId`, `accountId`, `messageId`, and `providerMessageId`, not an ambiguous `id` when several identities are in scope.
+- Name collections with plural nouns. Name keyed lookups `<entities>ById` and identifier sets `<entity>Ids` when that describes their shape.
+- Use verbs that reveal behavior. Prefer `get`, `list`, `create`, `save`, `replace`, `delete`, `enqueue`, `mark`, `complete`, or `fail` over vague names such as `handleData`, `processThing`, or `doWork`.
+- Route registration functions use `register<Domain>Routes`. Durable worker handlers use `run<Step>` or another established verb that distinguishes them from pure transforms.
+- Keep TypeScript property names `camelCase`; map to SQL `snake_case` explicitly through Drizzle.
+- Test files are colocated and named `<subject>.test.ts` or `<subject>.test.tsx`.
+- Avoid generic filenames and abstractions such as `utils`, `helpers`, `manager`, or `common` when a domain-specific name can state the responsibility.
+- Match established domain vocabulary exactly. Do not create synonyms for existing concepts in adjacent layers.
+
+## TypeScript standards
+
+- TypeScript is strict. Do not add `any`, implicit `any`, or broad suppressions. Start with `unknown` at untrusted boundaries and narrow it explicitly.
+- Add explicit input and return types at exported package APIs, HTTP/service boundaries, repository boundaries, queue payloads, and callbacks whose contract is not obvious. Prefer local inference inside a well-typed implementation.
+- Use discriminated unions for state machines and provider/domain results. Handle closed unions exhaustively, with a `never` check when it improves compile-time safety.
+- Model `null`, `undefined`, and omission deliberately. Preserve their distinction when it is part of a database, provider, or wire contract.
+- Use `import type` for type-only imports. Keep imports grouped as external, workspace, then local, following the file's existing formatting.
+- Prefer `satisfies` when validating an object while preserving inference. Use `as const` for intentional literal contracts, not as a substitute for proper modeling.
+- Avoid type assertions, non-null assertions, and double casts. If a library boundary makes an assertion unavoidable, keep it narrow and document the invariant that proves it safe.
+- Do not accept positional boolean arguments. Use an options object or a descriptive union so call sites explain intent.
+- Keep public result shapes stable and domain-specific. Do not pass arbitrary records through several layers when the allowed fields are known.
+- Validate environment variables, request bodies, webhook payloads, queue data, and provider responses before converting them to trusted domain types.
+- Do not duplicate a shared browser/server contract in `apps/web` and `apps/api`; put genuinely shared wire types in `@invook/contracts`.
+- Normalize caught `unknown` values before branching or logging. Preserve the original cause internally without leaking sensitive provider details to clients.
+
+## Code and composition patterns
+
+- Keep functions small enough to expose their invariant and side effects. Extract a focused module when logic is independently testable, reused, or owns a distinct integration boundary; do not create an abstraction for one trivial call site.
+- Keep pure transformation and validation separate from I/O when practical. Pure code should not reach into global configuration, a database client, or provider SDK implicitly.
+- Pass dependencies or established executors explicitly at boundaries where transaction composition, testing, or ownership requires it. Avoid hidden mutable global state.
+- Reuse existing route, service, repository, serializer, access, credential, workflow, and error helpers before introducing a parallel implementation.
+- HTTP handlers should follow the established flow: authenticate and authorize, validate protocol/input, call a focused service or repository operation, then serialize a stable success or problem response.
+- Authenticate and authorize before reading protected data. Scope reads by server-resolved stable user/account IDs, never client-asserted ownership.
+- Multi-row invariants and state transition plus outbox publication belong in one database transaction. Repository functions that must compose should accept an existing transaction executor.
+- Use database constraints, row/advisory locks, or expected-version/cursor checks for cross-process correctness. In-memory mutexes do not coordinate multiple workers.
+- Queue payloads contain identifiers and durable checkpoints, not authoritative mutable state. Workers re-read canonical state, make handlers idempotent, and no-op terminal or superseded work before expensive external calls.
+- PostgreSQL workflow/outbox records are the durable source of work. Redis/BullMQ executes and retries; `LISTEN/NOTIFY` wakes consumers but does not store work.
+- Default to React Server Components. Add `'use client'` only where browser APIs, client state, or hooks require it. Keep client components focused and keep server-only packages out of the client bundle.
+- Keep server data authoritative in the UI. Loading, empty, unavailable, reconnect, and error states must be explicit and honest.
+- Comments explain invariants, external constraints, or non-obvious tradeoffs. Do not narrate the code or add decorative section comments.
+
+## Project invariants
+
+The detailed mailbox synchronization contract lives in `docs/gmail-replica-contract.md`; do not duplicate or weaken it in implementation-specific comments.
+
+- Gmail is canonical. Provider writes happen at Gmail first, and local state converges through provider history.
+- Browser sessions, Gmail authorization, and mailbox replication are separate lifecycles.
+- PostgreSQL stores relational replica state; S3-compatible object storage stores raw MIME and attachment bytes.
+- Gmail provider labels and Draft resources remain separate from Invook AI/user labels and AI-generated reply evidence.
+- Indexing, label analysis, and Memory operate only on replica state that satisfies the documented readiness contract.
+- Email and model-provided content is untrusted context, never instruction authority.
+- User-written or user-applied state takes precedence over inferred state where the product contract defines that ownership.
+
+## Database and migration standards
+
+- `packages/database/src/schema.ts` is the Drizzle source. `packages/database/drizzle/` is immutable ordered migration history.
+- Add a new migration for every schema change. Never rewrite an applied migration to conceal a later change.
+- Generate with `pnpm db:generate`, inspect SQL plus journal/snapshot changes, and apply it against an appropriate PostgreSQL instance when practical.
+- Backfill and deduplicate existing data before adding `NOT NULL`, unique, check, or foreign-key constraints that old rows may violate.
+- Keep provider-owned records account-scoped and add compound uniqueness wherever provider IDs are only account-unique.
+- Relational cascades remove metadata, not external objects. External object cleanup must remain durable after account-row deletion.
+- Credentials use the existing encryption boundary and must never appear in public repository or API return types.
+
+## Testing and verification
+
+Tests use Node's built-in runner through `node --import tsx --test`. Test files are colocated as `*.test.ts` or `*.test.tsx`.
+
+Use the narrowest relevant checks while iterating, then run the full gate before handoff when the change warrants it:
+
+```bash
+pnpm --filter @invook/api test
+pnpm --filter @invook/worker test
+pnpm --filter @invook/gmail test
+pnpm --filter @invook/database typecheck
+pnpm --filter @invook/worker typecheck
+pnpm --filter @invook/web lint
+make verify
+docker compose -f docker/compose.yml config --quiet
+```
+
+- `make verify` runs repository typechecking, linting, tests, and the production web build.
+- Add regression coverage for changed parsing, validation, ownership, state transitions, concurrency, deduplication, idempotency, and retry behavior.
+- Prefer pure unit tests for deterministic transforms and real service integration checks when PostgreSQL, Redis, MinIO, Gmail, Pub/Sub, or model credentials are available.
+- Do not weaken assertions to make tests pass. Test observable contracts and failure modes rather than private implementation details.
+- Schema changes require migration generation and inspection, plus a clean apply when the required database is available.
+- Configuration changes require Docker Compose validation. Runtime changes require the closest practical end-to-end verification.
+
+## Working procedure
+
+1. Read applicable instructions and source-of-truth documentation.
+2. Inspect `git status`, relevant call sites, schemas, tests, and configuration before editing.
+3. State the invariant being changed and identify every producer and consumer of the affected state or contract.
+4. Implement the smallest complete end-to-end change across the layers that own the behavior.
+5. Remove the superseded path and all dead remnants in the same change.
+6. Run targeted checks while iterating, then the full verification proportional to risk.
+7. Search repository-wide for forbidden APIs, obsolete symbols, routes, configuration, and dead exports.
+8. Report what changed, what was verified, and the exact external verification that remains.
+
+`make dev` starts the complete Docker stack. `make down` stops containers without deleting named volumes. Never remove volumes or other user data unless the user explicitly requests it.

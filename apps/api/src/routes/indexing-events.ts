@@ -73,12 +73,14 @@ export const registerIndexingEventRoutes: FastifyPluginAsync = async (api) => {
         return;
       }
 
-      reply
-        .header("content-type", "text/event-stream; charset=utf-8")
-        .header("cache-control", "no-cache, no-transform")
-        .header("connection", "keep-alive")
-        .header("x-accel-buffering", "no");
       reply.hijack();
+      reply.raw.statusCode = 200;
+      reply.raw.setHeader("content-type", "text/event-stream; charset=utf-8");
+      reply.raw.setHeader("cache-control", "no-cache, no-transform");
+      reply.raw.setHeader("connection", "keep-alive");
+      reply.raw.setHeader("x-accel-buffering", "no");
+      reply.raw.setHeader("x-content-type-options", "nosniff");
+      reply.raw.setHeader("x-request-id", request.id);
       reply.raw.flushHeaders();
 
       const accountStreams = streams.get(indexing.accountId) ?? new Set();

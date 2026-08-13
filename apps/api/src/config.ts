@@ -6,8 +6,40 @@ const requiredApiVariables = [
   "TOKEN_ENCRYPTION_KEY",
 ] as const;
 
+const requiredGmailReplicaVariables = [
+  "GMAIL_PUBSUB_TOPIC",
+  "GOOGLE_PUBSUB_PUSH_AUDIENCE",
+  "GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL",
+  "GOOGLE_PUBSUB_SUBSCRIPTION",
+] as const;
+
 export function getMissingApiConfiguration(): string[] {
   return requiredApiVariables.filter((name) => !process.env[name]?.trim());
+}
+
+export function getMissingGmailConnectionConfiguration(): string[] {
+  return [
+    ...getMissingApiConfiguration(),
+    ...requiredGmailReplicaVariables.filter((name) => !process.env[name]?.trim()),
+  ];
+}
+
+export function getGooglePubSubPushConfiguration(): {
+  audience: string;
+  serviceAccountEmail: string;
+  subscription: string;
+} | null {
+  const audience = process.env.GOOGLE_PUBSUB_PUSH_AUDIENCE?.trim();
+  const serviceAccountEmail =
+    process.env.GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL?.trim();
+  const subscription = process.env.GOOGLE_PUBSUB_SUBSCRIPTION?.trim();
+  if (!audience || !serviceAccountEmail || !subscription) return null;
+
+  return {
+    audience,
+    serviceAccountEmail: serviceAccountEmail.toLowerCase(),
+    subscription,
+  };
 }
 
 export function getPublicAppOrigin(): string {

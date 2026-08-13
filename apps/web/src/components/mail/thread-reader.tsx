@@ -110,7 +110,7 @@ export function ThreadReader({
 
           <DraftComposer
             threadId={thread.id}
-            initialDraft={thread.draft}
+            initialDraft={thread.aiReplyDraft}
             aiConfigured={aiConfigured}
           />
         </div>

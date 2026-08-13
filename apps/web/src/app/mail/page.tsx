@@ -5,6 +5,7 @@ import { validate as validateUuid } from "uuid";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
 import { MailList } from "@/components/mail/mail-list";
+import { MailboxEventSubscriber } from "@/components/mail/mailbox-event-subscriber";
 import { MailSidebar } from "@/components/mail/mail-sidebar";
 import { ThreadReader } from "@/components/mail/thread-reader";
 import type {
@@ -149,6 +150,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
 
   return (
     <main className="h-dvh overflow-hidden bg-background">
+      <MailboxEventSubscriber />
       <div className="grid h-full grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
         <MailSidebar
           email={workspace.account.email}

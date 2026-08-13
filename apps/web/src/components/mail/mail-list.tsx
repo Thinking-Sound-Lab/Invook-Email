@@ -23,12 +23,12 @@ import type {
 
 const viewTitles: Record<StaticMailboxView, string> = {
   all: "All mail",
+  travel: "Travel",
+  important: "Important",
+  pitch: "Pitch",
+  newsletter: "Newsletter",
   starred: "Starred",
-  shared: "Shared",
-  reminders: "Reminders",
-  scheduled: "Scheduled",
   drafts: "Drafts",
-  done: "Done",
   sent: "Sent",
   trash: "Trash",
 };
@@ -65,8 +65,12 @@ function MailRow({
   important: boolean;
 }) {
   const people = threadPeople(thread.participants, accountEmail);
-  const unread = thread.labelIds.includes("UNREAD");
-  const starred = thread.labelIds.includes("STARRED");
+  const unread = thread.gmailLabels.some(
+    (label) => label.providerLabelId === "UNREAD",
+  );
+  const starred = thread.gmailLabels.some(
+    (label) => label.providerLabelId === "STARRED",
+  );
   const primaryLabel = thread.invookLabels[0];
 
   return (

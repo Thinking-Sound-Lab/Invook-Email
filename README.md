@@ -1,14 +1,14 @@
 # Invook
 
-Invook is an open-source, AI-native Gmail client. It indexes the connected mailbox, applies built-in and user-defined labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
+Invook is an open-source, AI-native Gmail client. It keeps a lossless local Gmail mailbox replica, applies built-in and user-defined Invook labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
 
 The application starts with one Google sign-in action. Until a real Gmail account is connected, it shows an honest setup or empty state and never manufactures mailbox data.
 
 ## What works today
 
 1. Direct Google OAuth authenticates the user and grants Gmail access.
-2. The callback validates the Google identity, reads the Gmail profile, encrypts the provider credentials with AES-256-GCM, and transactionally records a Gmail synchronization run plus its first BullMQ step.
-3. A sequential page worker follows Gmail's opaque page tokens while parallel message workers store the discovered messages. PostgreSQL retains the run, page, message, and outbox checkpoints; Redis coordinates BullMQ execution and retries. After the initial crawl, Refresh resumes from the stored Gmail history cursor and applies only message additions, deletions, and Gmail label changes. If Gmail expires the cursor, the worker reconciles a fresh mailbox snapshot with change-aware upserts and deletion handling.
+2. On first connection, the callback validates the Google identity, captures H0, registers a Gmail watch, encrypts the provider credentials with AES-256-GCM, and transactionally records exactly one replica run plus its first BullMQ step. Returning sign-in refreshes only the browser session, profile, and encrypted credentials; it preserves durable replica/watch/run state and queues stored-cursor catch-up only when needed. Signing out clears only the browser session.
+3. A sequential page worker discovers every message, including Spam and Trash, while parallel workers fetch exact raw MIME. Raw MIME and attachment bytes go to S3-compatible object storage with checksums; PostgreSQL stores complete headers, text/HTML, provider metadata, normalized Gmail labels, Gmail Draft resources, tombstones, watch state, and workflow checkpoints. Finalization replays history from H0, refreshes labels and drafts, repairs completeness, and only then enables indexing and Memory.
 4. The selected native Batch provider checks every indexed thread against Invook's Important, Travel, Pitch, and Newsletter definitions. Settings can add a new label and description, which always queues a full analysis of the already-indexed mailbox for that label. Later Gmail changes queue analysis only for affected threads. Every label, including a built-in label, can be deleted. A user's thread-level label changes take precedence over later model runs.
 5. Initial Memory analysis sends all eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Later eligible owner-sent messages accumulate as targeted global and contact evidence without rescanning the original mailbox. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
    - **Preferences:** repeated behavior that applies across contacts and should shape every draft.
@@ -18,10 +18,10 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 7. A reply draft receives the current thread plus applicable global, contact, and scheduling memories. It never receives unrelated contact memory.
 8. Saving an edited AI draft records feedback. A new memory is proposed only when the same correction appears across at least three real drafts.
 9. Historical subject/body embeddings use OpenAI Batch. Later stored messages use the regular OpenAI embeddings API with the same explicitly configured model, dimensions, content hash, and index version.
-10. Search combines PostgreSQL full text, sender/recipient metadata, attachment filenames, and available vector similarity. Attachment contents are not downloaded or embedded.
+10. Search combines PostgreSQL full text, sender/recipient metadata, attachment filenames, and available vector similarity. Attachment bytes are replicated to object storage but are not embedded.
 11. The right sidebar runs a tool-using agent that can search mail, inspect a thread, list attachment metadata, and generate a saved reply draft with cited thread and message IDs.
 
-Initial Gmail synchronization, search indexing, and initial Memory extraction use BullMQ with a transactional PostgreSQL outbox. Dynamic-label backfills, Gmail history refreshes, and targeted incremental Memory use the PostgreSQL job table and database notifications. Neither path uses timer-based polling.
+Initial Gmail synchronization, Pub/Sub history catch-up, watch renewal, completeness repair, search indexing, and initial Memory extraction use BullMQ with a transactional PostgreSQL outbox. PostgreSQL notifications wake outbox and SSE consumers. Dynamic Invook-label analysis and targeted incremental Memory retain the PostgreSQL job queue. Neither path uses timer-based polling.
 
 Memory v3 does not depend on search embeddings. Native Batch analysis discovers repeated writing behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting.
 
@@ -39,11 +39,13 @@ packages/
   contracts/           Shared JSON API types
   database/            Drizzle schema, migrations, repositories, and credential encryption
   gmail/               Gmail API client, OAuth scopes, and MIME parsing
+  object-storage/      Axios/SigV4 S3-compatible raw MIME and attachment storage
 docker/
   Dockerfile           Web, API, and worker image targets
   compose.yml          Complete local service stack
   dev-local.sh         Local Docker startup
 docs/
+  gmail-replica-contract.md
   product-requirements.md
 ```
 
@@ -63,7 +65,9 @@ cp .env.example .env.local
 openssl rand -base64 32
 ```
 
-Put the generated value in `TOKEN_ENCRYPTION_KEY`. Invook uses the official Google OAuth client directly; it does not use Supabase Auth.
+Put the generated value in `TOKEN_ENCRYPTION_KEY`. Invook uses Google's OAuth endpoints directly; it does not use Supabase Auth.
+
+Continuous Gmail synchronization also needs a Google Pub/Sub topic and an authenticated push subscription targeting `https://your-domain.example/v1/webhooks/google-pubsub`. Set `GMAIL_PUBSUB_TOPIC`, the subscription's OIDC audience in `GOOGLE_PUBSUB_PUSH_AUDIENCE`, its service-account email in `GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL`, and the full subscription name in `GOOGLE_PUBSUB_SUBSCRIPTION`. Gmail connection stays unavailable until these real resources are configured.
 
 ## Model setup
 
@@ -95,7 +99,7 @@ pnpm install --frozen-lockfile
 make dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). The stack starts PostgreSQL and persistent Redis, applies the Drizzle migrations, and runs the web, API, and BullMQ worker services.
+Open [http://localhost:3000](http://localhost:3000). The stack starts PostgreSQL, persistent Redis, MinIO, and a one-shot MinIO bucket initializer; applies the Drizzle migrations; and runs the web, API, and BullMQ worker services.
 
 Stop it with:
 
@@ -120,7 +124,7 @@ pnpm worker
 
 ## Database and migrations
 
-Drizzle ORM accesses PostgreSQL through the server-only `DATABASE_URL`. PostgreSQL owns product data, workflow traces, Gmail checkpoints, and the transactional queue outbox. BullMQ uses `REDIS_URL` for execution state, retries, and stalled-job recovery. The same application code can use the local pgvector Docker image or a compatible hosted PostgreSQL database where the `vector` extension can be enabled.
+Drizzle ORM accesses PostgreSQL through the server-only `DATABASE_URL`. PostgreSQL owns normalized product data, workflow traces, Gmail replica state, audits, and the transactional queue outbox. BullMQ uses `REDIS_URL` for execution state, retries, delayed watch renewal, and stalled-job recovery. Raw MIME and attachment bytes use the S3-compatible endpoint configured by `S3_*`; Docker supplies MinIO. The same application code can use compatible hosted PostgreSQL, Redis, and object-storage services.
 
 After changing `packages/database/src/schema.ts`:
 
@@ -147,6 +151,8 @@ docker compose -f docker/compose.yml config --quiet
 - Next.js contains UI only. It reaches the Fastify API through `/v1`; only the API and worker import database and Gmail packages.
 - Product reads are scoped by user ID. Worker operations use explicit account, synchronization-run, and workflow-step IDs.
 - Email content is treated as untrusted input in every model prompt.
+- Gmail is canonical; provider label and Gmail Draft writes converge locally through Gmail history.
+- Gmail provider labels/drafts are stored separately from Invook AI labels/draft evidence.
 - Inferred Memory requires evidence from at least three messages; global preferences additionally require evidence across at least three contacts.
 - User-written memory wins over inferred memory.
 - A user's applied or dismissed thread label wins over automatic label analysis.
@@ -154,5 +160,6 @@ docker compose -f docker/compose.yml config --quiet
 ## Project documents
 
 - [Product requirements](./docs/product-requirements.md)
+- [Gmail mailbox replica contract](./docs/gmail-replica-contract.md)
 
 The project license has not been selected yet. Do not assume reuse rights until a license is added.

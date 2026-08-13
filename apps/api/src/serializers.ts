@@ -9,7 +9,7 @@ import type {
   MailboxWorkspace,
   MemoryEntry,
   MemoryGenerationProgress,
-  ReplyDraft,
+  AiReplyDraft,
 } from "@invook/contracts";
 import { getMailboxWorkspace } from "@invook/database";
 
@@ -126,8 +126,17 @@ export async function serializeWorkspace(
     aiConfigured: isAiConfigured(),
     batchConfigured: isMemoryBatchConfigured(),
     account: {
-      ...workspace.account,
+      id: workspace.account.id,
+      email: workspace.account.email,
+      status: workspace.account.status,
+      syncState: workspace.account.syncState,
       lastSyncedAt: workspace.account.lastSyncedAt?.toISOString() ?? null,
+      replica: {
+        state: workspace.account.replicaState,
+        readyAt: workspace.account.replicaReadyAt?.toISOString() ?? null,
+        lastAuditAt:
+          workspace.account.replicaLastAuditAt?.toISOString() ?? null,
+      },
     },
     memoryProgress: await serializeMemoryProgress(workspace),
     memories: workspace.memories,
@@ -144,6 +153,7 @@ export async function serializeWorkspace(
             workspace.selectedThread.latestMessageAt?.toISOString() ?? null,
           messages: workspace.selectedThread.messages.map((message) => ({
             ...message,
+            internalDate: message.internalDate.toISOString(),
             sentAt: message.sentAt.toISOString(),
           })),
         }
@@ -180,12 +190,12 @@ export function serializeMemoryEntry(memory: {
 export function serializeReplyDraft(draft: {
   id: string;
   threadId: string;
-  status: ReplyDraft["status"];
+  status: AiReplyDraft["status"];
   generatedText: string | null;
   currentText: string;
   usedMemoryIds: string[];
   updatedAt: Date;
-}): ReplyDraft {
+}): AiReplyDraft {
   if (!draft.generatedText) {
     throw new Error("A generated draft is missing its generated text.");
   }

@@ -1,8 +1,5 @@
 import {
   Airplane01Icon,
-  AppleReminderIcon,
-  Calendar03Icon,
-  CheckmarkCircle02Icon,
   Delete02Icon,
   FileEditIcon,
   HonourStarIcon,
@@ -15,7 +12,6 @@ import {
   Search02Icon,
   SentIcon,
   Settings01Icon,
-  Share01Icon,
   SparklesIcon,
   StarIcon,
   Tag01Icon,
@@ -52,11 +48,7 @@ const labelIcons = {
 
 const mailItems = [
   { label: "Starred", icon: StarIcon, view: "starred" },
-  { label: "Shared", icon: Share01Icon, view: "shared" },
-  { label: "Reminders", icon: AppleReminderIcon, view: "reminders" },
-  { label: "Scheduled", icon: Calendar03Icon, view: "scheduled" },
   { label: "Drafts", icon: FileEditIcon, view: "drafts" },
-  { label: "Done", icon: CheckmarkCircle02Icon, view: "done" },
   { label: "Sent", icon: SentIcon, view: "sent" },
   { label: "Trash", icon: Delete02Icon, view: "trash" },
 ] as const;

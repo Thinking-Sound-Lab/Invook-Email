@@ -1,0 +1,21 @@
+{
+  "name": "@invook/object-storage",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "aws4": "^1.13.2",
+    "axios": "^1.13.6"
+  },
+  "devDependencies": {
+    "@types/aws4": "^1.11.6",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

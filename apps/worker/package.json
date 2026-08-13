@@ -12,6 +12,7 @@
     "@invook/ai": "workspace:*",
     "@invook/database": "workspace:*",
     "@invook/gmail": "workspace:*",
+    "@invook/object-storage": "workspace:*",
     "bullmq": "^5.58.5",
     "ioredis": "^5.7.0"
   },
