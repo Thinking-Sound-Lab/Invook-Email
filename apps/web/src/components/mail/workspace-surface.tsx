@@ -21,7 +21,11 @@ import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 
-function SurfaceHeader({ title }: { title: string }) {
+interface SurfaceHeaderProps {
+  title: string;
+}
+
+function SurfaceHeader({ title }: SurfaceHeaderProps) {
   return (
     <header className="flex h-15 shrink-0 items-center gap-2 border-b border-border/45 px-4">
       <Button asChild variant="ghost" size="icon-sm">
@@ -56,13 +60,15 @@ export function SearchSurface() {
   );
 }
 
+export interface SearchResultsSurfaceProps {
+  query: string;
+  results: MailSearchResult[];
+}
+
 export function SearchResultsSurface({
   query,
   results,
-}: {
-  query: string;
-  results: MailSearchResult[];
-}) {
+}: SearchResultsSurfaceProps) {
   return (
     <section className="flex min-h-0 flex-col bg-background">
       <SurfaceHeader title="Search" />
@@ -165,26 +171,28 @@ export function ComposeSurface() {
   );
 }
 
+export interface SettingsSurfaceProps {
+  memories: MemoryEntry[];
+  syncState: AccountSyncStage;
+  aiConfigured: boolean;
+  labels: MailLabel[];
+  batchConfigured: boolean;
+}
+
 export function SettingsSurface({
   memories,
   syncState,
   aiConfigured,
   labels,
   batchConfigured,
-}: {
-  memories: MemoryEntry[];
-  syncState: AccountSyncStage;
-  aiConfigured: boolean;
-  labels: MailLabel[];
-  batchConfigured: boolean;
-}) {
+}: SettingsSurfaceProps) {
   return (
     <section className="flex min-h-0 flex-col bg-background">
       <SurfaceHeader title="Settings" />
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <LabelSettings initialLabels={labels} batchConfigured={batchConfigured} />
+        <LabelSettings labels={labels} batchConfigured={batchConfigured} />
         <MemorySettings
-          initialMemories={memories}
+          memories={memories}
           syncState={syncState}
           aiConfigured={aiConfigured}
         />

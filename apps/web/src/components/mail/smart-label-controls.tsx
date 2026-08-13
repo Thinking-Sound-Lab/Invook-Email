@@ -8,7 +8,6 @@ import {
   Tag01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import axios from "axios";
 import type {
   InvookThreadLabel,
   MailLabel,
@@ -18,6 +17,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { setThreadLabel } from "@/lib/api/labels";
 import { apiErrorMessage } from "@/lib/http-error";
 
 const labelIcons = {
@@ -29,28 +29,18 @@ const labelIcons = {
 
 export function SmartLabelControls({
   threadId,
-  initialLabels,
+  labels,
   availableLabels,
-}: {
-  threadId: string;
-  initialLabels: InvookThreadLabel[];
-  availableLabels: MailLabel[];
-}) {
+}: SmartLabelControlsProps) {
   const router = useRouter();
-  const [labels, setLabels] = useState(initialLabels);
   const [pendingLabel, setPendingLabel] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function setLabel(labelId: string, applied: boolean) {
+  async function handleSetLabel(labelId: string, applied: boolean) {
     setPendingLabel(labelId);
     setError(null);
     try {
-      const response = await axios.patch<{ labels: InvookThreadLabel[] }>(
-        `/v1/threads/${threadId}/labels`,
-        { labelId, applied },
-      );
-      const body = response.data;
-      setLabels(body.labels);
+      await setThreadLabel({ threadId, labelId, applied });
       router.refresh();
     } catch (cause) {
       setError(apiErrorMessage(cause, "Invook could not save this label."));
@@ -80,7 +70,7 @@ export function SmartLabelControls({
               className="h-8 gap-1.5 px-2.5 text-xs text-muted-foreground data-[state=on]:text-foreground"
               aria-pressed={applied}
               disabled={pendingLabel !== null}
-              onClick={() => void setLabel(definition.id, !applied)}
+              onClick={() => void handleSetLabel(definition.id, !applied)}
             >
               <HugeiconsIcon icon={icon} size={12} />
               {definition.name}
@@ -91,4 +81,10 @@ export function SmartLabelControls({
       {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
     </div>
   );
+}
+
+export interface SmartLabelControlsProps {
+  threadId: string;
+  labels: InvookThreadLabel[];
+  availableLabels: MailLabel[];
 }

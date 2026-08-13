@@ -22,19 +22,21 @@ import { DraftComposer } from "./draft-composer";
 import { SmartLabelControls } from "./smart-label-controls";
 import type { MailboxView, SelectedThread } from "./types";
 
+export interface ThreadReaderProps {
+  thread: SelectedThread;
+  currentView: MailboxView;
+  mailboxCursor?: string;
+  aiConfigured: boolean;
+  availableLabels: MailLabel[];
+}
+
 export function ThreadReader({
   thread,
   currentView,
   mailboxCursor,
   aiConfigured,
   availableLabels,
-}: {
-  thread: SelectedThread;
-  currentView: MailboxView;
-  mailboxCursor?: string;
-  aiConfigured: boolean;
-  availableLabels: MailLabel[];
-}) {
+}: ThreadReaderProps) {
   const mailboxQuery = new URLSearchParams({ view: currentView });
   if (mailboxCursor) mailboxQuery.set("cursor", mailboxCursor);
 
@@ -68,7 +70,7 @@ export function ThreadReader({
           <SmartLabelControls
             key={thread.id}
             threadId={thread.id}
-            initialLabels={thread.invookLabels}
+            labels={thread.invookLabels}
             availableLabels={availableLabels}
           />
 
@@ -109,6 +111,7 @@ export function ThreadReader({
           </div>
 
           <DraftComposer
+            key={thread.id}
             threadId={thread.id}
             initialDraft={thread.aiReplyDraft}
             aiConfigured={aiConfigured}

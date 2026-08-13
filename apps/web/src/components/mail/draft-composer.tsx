@@ -8,50 +8,53 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { AiReplyDraft } from "@invook/contracts";
-import axios from "axios";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  generateReplyDraft,
+  saveReplyDraftToGmail,
+  updateReplyDraft,
+} from "@/lib/api/drafts";
 import { apiErrorMessage } from "@/lib/http-error";
+import { useDraftEditor } from "@/hooks/use-draft-editor";
+
+export interface DraftComposerProps {
+  threadId: string;
+  initialDraft: AiReplyDraft | null;
+  aiConfigured: boolean;
+}
 
 export function DraftComposer({
   threadId,
   initialDraft,
   aiConfigured,
-}: {
-  threadId: string;
-  initialDraft: AiReplyDraft | null;
-  aiConfigured: boolean;
-}) {
+}: DraftComposerProps) {
   const router = useRouter();
-  const [draft, setDraft] = useState(initialDraft);
-  const [text, setText] = useState(initialDraft?.currentText ?? "");
+  const { draft, text, hasUnsavedChanges, setText, acceptDraft } = useDraftEditor({
+    threadId,
+    authoritativeDraft: initialDraft,
+  });
   const [instruction, setInstruction] = useState("");
   const [pending, setPending] = useState<"generate" | "save" | "gmail" | null>(null);
   const [savedToGmail, setSavedToGmail] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const changed = Boolean(draft && text !== draft.currentText);
 
-  async function generateDraft() {
+  async function handleGenerateDraft() {
     setPending("generate");
     setError(null);
     setNotice(null);
     try {
-      const response = await axios.post<{ draft: AiReplyDraft }>(
-        `/v1/threads/${threadId}/drafts`,
-        { instruction },
-      );
-      const body = response.data;
-      setDraft(body.draft);
-      setText(body.draft.currentText);
+      const generatedDraft = await generateReplyDraft({ threadId, instruction });
+      acceptDraft(generatedDraft);
       setSavedToGmail(false);
       setNotice(
-        body.draft.usedMemoryIds.length > 0
-          ? `Drafted with ${body.draft.usedMemoryIds.length} relevant ${body.draft.usedMemoryIds.length === 1 ? "memory" : "memories"}.`
+        generatedDraft.usedMemoryIds.length > 0
+          ? `Drafted with ${generatedDraft.usedMemoryIds.length} relevant ${generatedDraft.usedMemoryIds.length === 1 ? "memory" : "memories"}.`
           : "Drafted from the current conversation. No saved memory was needed.",
       );
       router.refresh();
@@ -62,22 +65,17 @@ export function DraftComposer({
     }
   }
 
-  async function saveChanges() {
+  async function handleSaveChanges() {
     if (!draft) return;
     setPending("save");
     setError(null);
     setNotice(null);
     try {
-      const response = await axios.patch<{ draft: AiReplyDraft }>(
-        `/v1/drafts/${draft.id}`,
-        { currentText: text },
-      );
-      const body = response.data;
-      setDraft(body.draft);
-      setText(body.draft.currentText);
+      const savedDraft = await updateReplyDraft({ draftId: draft.id, currentText: text });
+      acceptDraft(savedDraft);
       setSavedToGmail(false);
       setNotice(
-        body.draft.currentText === body.draft.generatedText
+        savedDraft.currentText === savedDraft.generatedText
           ? "Draft saved."
           : "Changes saved as feedback. Invook learns only when the same edit repeats.",
       );
@@ -89,13 +87,13 @@ export function DraftComposer({
     }
   }
 
-  async function saveToGmailDrafts() {
-    if (!draft || changed) return;
+  async function handleSaveToGmailDrafts() {
+    if (!draft || hasUnsavedChanges) return;
     setPending("gmail");
     setError(null);
     setNotice(null);
     try {
-      await axios.post(`/v1/drafts/${draft.id}/save-to-gmail`);
+      await saveReplyDraftToGmail(draft.id);
       setSavedToGmail(true);
       setNotice("Saved to Gmail drafts. Invook kept the AI draft and its evidence unchanged.");
       router.refresh();
@@ -158,8 +156,8 @@ export function DraftComposer({
               <Button
                 type="button"
                 variant="secondary"
-                onClick={() => void saveToGmailDrafts()}
-                disabled={pending !== null || changed || savedToGmail}
+                onClick={() => void handleSaveToGmailDrafts()}
+                disabled={pending !== null || hasUnsavedChanges || savedToGmail}
               >
                 <HugeiconsIcon
                   icon={savedToGmail ? CheckmarkCircle02Icon : MailAdd01Icon}
@@ -176,7 +174,7 @@ export function DraftComposer({
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => void generateDraft()}
+                onClick={() => void handleGenerateDraft()}
                 disabled={pending !== null || !aiConfigured}
               >
                 <HugeiconsIcon icon={RefreshIcon} size={13} />
@@ -186,8 +184,8 @@ export function DraftComposer({
             {draft ? (
               <Button
                 type="button"
-                onClick={() => void saveChanges()}
-                disabled={pending !== null || !changed}
+                onClick={() => void handleSaveChanges()}
+                disabled={pending !== null || !hasUnsavedChanges}
               >
                 <HugeiconsIcon icon={CheckmarkCircle02Icon} size={13} />
                 {pending === "save" ? "Saving…" : "Save changes"}
@@ -195,7 +193,7 @@ export function DraftComposer({
             ) : (
               <Button
                 type="button"
-                onClick={() => void generateDraft()}
+                onClick={() => void handleGenerateDraft()}
                 disabled={pending !== null || !aiConfigured}
               >
                 <HugeiconsIcon icon={SparklesIcon} size={13} />

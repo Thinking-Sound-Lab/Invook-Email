@@ -51,19 +51,21 @@ function mailboxHref(
   return `/mail?${query.toString()}`;
 }
 
+interface MailRowProps {
+  thread: MailThreadSummary;
+  accountEmail: string;
+  currentView: MailboxView;
+  mailboxCursor?: string;
+  important: boolean;
+}
+
 function MailRow({
   thread,
   accountEmail,
   currentView,
   mailboxCursor,
   important,
-}: {
-  thread: MailThreadSummary;
-  accountEmail: string;
-  currentView: MailboxView;
-  mailboxCursor?: string;
-  important: boolean;
-}) {
+}: MailRowProps) {
   const people = threadPeople(thread.participants, accountEmail);
   const unread = thread.gmailLabels.some(
     (label) => label.providerLabelId === "UNREAD",
@@ -126,19 +128,21 @@ function MailRow({
   );
 }
 
+interface MailRowsProps {
+  threads: MailThreadSummary[];
+  accountEmail: string;
+  currentView: MailboxView;
+  mailboxCursor?: string;
+  important?: boolean;
+}
+
 function MailRows({
   threads,
   accountEmail,
   currentView,
   mailboxCursor,
   important = false,
-}: {
-  threads: MailThreadSummary[];
-  accountEmail: string;
-  currentView: MailboxView;
-  mailboxCursor?: string;
-  important?: boolean;
-}) {
+}: MailRowsProps) {
   return threads.map((thread) => (
     <MailRow
       key={thread.id}
@@ -151,7 +155,11 @@ function MailRows({
   ));
 }
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
+interface SectionLabelProps {
+  children: React.ReactNode;
+}
+
+function SectionLabel({ children }: SectionLabelProps) {
   return (
     <div className="flex h-9 items-center gap-3 px-5">
       <span className="h-px flex-1 bg-border/55" />
@@ -159,6 +167,18 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
       <span className="h-px flex-1 bg-border/55" />
     </div>
   );
+}
+
+export interface MailListProps {
+  account: MailAccount;
+  currentView: MailboxView;
+  importantThreads: MailThreadSummary[];
+  mailboxCursor?: string;
+  pagination: MailboxPagination;
+  remainingThreads: MailThreadSummary[];
+  query?: string;
+  title?: string;
+  importantView?: boolean;
 }
 
 export function MailList({
@@ -171,17 +191,7 @@ export function MailList({
   query,
   title,
   importantView = false,
-}: {
-  account: MailAccount;
-  currentView: MailboxView;
-  importantThreads: MailThreadSummary[];
-  mailboxCursor?: string;
-  pagination: MailboxPagination;
-  remainingThreads: MailThreadSummary[];
-  query?: string;
-  title?: string;
-  importantView?: boolean;
-}) {
+}: MailListProps) {
   const noMail = importantThreads.length === 0 && remainingThreads.length === 0;
   const syncing =
     account.syncState.mailSync === "pending" || account.syncState.mailSync === "running";

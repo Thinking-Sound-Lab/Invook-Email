@@ -120,6 +120,66 @@ docs/                   Product and implementation contracts
 - Keep server data authoritative in the UI. Loading, empty, unavailable, reconnect, and error states must be explicit and honest.
 - Comments explain invariants, external constraints, or non-obvious tradeoffs. Do not narrate the code or add decorative section comments.
 
+## React hooks and Zustand state
+
+- A hook has one clear responsibility and exposes a small, typed return contract. Name hook input interfaces `Use<Capability>Props` and hooks `use<Capability>`.
+- Use `useState` for component-local UI state. When state genuinely needs to be shared across unrelated client components, use a feature-owned Zustand store instead of passing it through several component layers or inventing a custom global event system.
+- When a callback must keep a stable identity while reading the latest changing value, store that value in a typed ref, synchronize the ref in an effect, and let the callback read the ref. An empty dependency array is correct only when the callback reads changing values exclusively through synchronized refs and captures no other reactive value; otherwise declare the complete dependency list.
+
+```typescript
+interface UseFeatureProps {
+  id: string;
+}
+
+export function useFeature({ id }: UseFeatureProps) {
+  const idRef = useRef(id);
+  const [data, setData] = useState<Data | null>(null);
+
+  useEffect(() => {
+    idRef.current = id;
+  }, [id]);
+
+  const fetchData = useCallback(async () => {
+    const nextData = await loadFeature(idRef.current);
+    setData(nextData);
+  }, []);
+
+  return { data, fetchData };
+}
+```
+
+- Zustand stores live under `apps/web/src/stores/<feature>/`. Keep a simple store in `store.ts`; split a complex store into `store.ts` and `types.ts`.
+- Define a reusable typed `initialState`, initialize from it, and implement `reset` from the same source so initialization and reset cannot drift.
+- Wrap product stores in Zustand `devtools` middleware and give each store a stable, feature-specific name.
+- Add `persist` only when the product explicitly requires state to survive a reload. When persistence is required, use `partialize` so only the minimum necessary state is stored; never persist server-owned mailbox data, credentials, provider payloads, or derivable state.
+- Do not add Zustand merely for local component state or server state. A feature must demonstrate a real cross-component client-state need before introducing the dependency or a store.
+
+```typescript
+import { create } from "zustand";
+import { devtools } from "zustand/middleware";
+
+interface FeatureState {
+  items: Item[];
+  setItems: (items: Item[]) => void;
+  reset: () => void;
+}
+
+const initialState: Pick<FeatureState, "items"> = {
+  items: [],
+};
+
+export const useFeatureStore = create<FeatureState>()(
+  devtools(
+    (set) => ({
+      ...initialState,
+      setItems: (items) => set({ items }),
+      reset: () => set(initialState),
+    }),
+    { name: "feature-store" },
+  ),
+);
+```
+
 ## Project invariants
 
 The detailed mailbox synchronization contract lives in `docs/gmail-replica-contract.md`; do not duplicate or weaken it in implementation-specific comments.

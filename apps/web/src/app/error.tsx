@@ -6,7 +6,11 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 
-export default function ErrorPage({ reset }: { reset: () => void }) {
+interface ErrorPageProps {
+  reset: () => void;
+}
+
+export default function ErrorPage({ reset }: ErrorPageProps) {
   return (
     <main className="grid min-h-screen place-items-center bg-background px-5">
       <div className="w-full max-w-md space-y-4">

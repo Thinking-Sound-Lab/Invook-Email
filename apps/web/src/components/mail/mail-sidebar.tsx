@@ -53,17 +53,19 @@ const mailItems = [
   { label: "Trash", icon: Delete02Icon, view: "trash" },
 ] as const;
 
+interface NavLinkProps {
+  label: string;
+  icon: typeof Mail01Icon;
+  active: boolean;
+  href: string;
+}
+
 function NavLink({
   label,
   icon,
   active,
   href,
-}: {
-  label: string;
-  icon: typeof Mail01Icon;
-  active: boolean;
-  href: string;
-}) {
+}: NavLinkProps) {
   return (
     <Link
       href={href}
@@ -80,7 +82,11 @@ function NavLink({
   );
 }
 
-function MemoryProgress({ progress }: { progress: MemoryGenerationProgress }) {
+interface MemoryProgressProps {
+  progress: MemoryGenerationProgress;
+}
+
+function MemoryProgress({ progress }: MemoryProgressProps) {
   const processed =
     progress.completedRequestCount === null && progress.failedRequestCount === null
       ? null
@@ -147,19 +153,21 @@ function MemoryProgress({ progress }: { progress: MemoryGenerationProgress }) {
   );
 }
 
+export interface MailSidebarProps {
+  email: string;
+  currentView: MailboxView;
+  currentSurface: MailSurface;
+  memoryProgress: MemoryGenerationProgress;
+  labels: MailLabel[];
+}
+
 export function MailSidebar({
   email,
   currentView,
   currentSurface,
   memoryProgress,
   labels,
-}: {
-  email: string;
-  currentView: MailboxView;
-  currentSurface: MailSurface;
-  memoryProgress: MemoryGenerationProgress;
-  labels: MailLabel[];
-}) {
+}: MailSidebarProps) {
   return (
     <aside className="flex min-h-0 flex-col bg-sidebar px-2 py-3 lg:px-3" aria-label="Mailbox navigation">
       <div className="flex h-11 items-center gap-2.5 px-1.5 lg:px-2">
