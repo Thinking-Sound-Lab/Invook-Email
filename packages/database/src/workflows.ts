@@ -16,28 +16,25 @@ import {
   embeddingBatchSubmissions,
   gmailAccountCleanups,
   gmailReplicaStates,
+  gmailWatchStates,
   gmailSyncItems,
   gmailSyncPages,
+  mailLabels,
   mailSyncRuns,
   queueOutbox,
   workflowSteps,
 } from "./schema";
-import type { QueueName, WorkflowStepJob } from "./types";
+import { createGmailWatchRecoveryStep } from "./gmail-watch-schedule";
+import type {
+  QueueName,
+  WorkflowStepInput,
+  WorkflowStepJob,
+} from "./types";
 import { toPostgresTextProjection } from "./text";
 import {
   MAIL_INDEX_VERSION,
   MEMORY_SCHEMA_VERSION,
 } from "./versions";
-
-export type WorkflowStepInput = {
-  runId?: string | null;
-  userId?: string | null;
-  accountId?: string | null;
-  stepType: string;
-  payload?: Record<string, unknown>;
-  maxAttempts?: number;
-  idempotencyKey: string;
-};
 
 export type OutboxJob = WorkflowStepJob & {
   queueName: QueueName;
@@ -71,7 +68,7 @@ async function lockMailSyncRun(
   return run ?? null;
 }
 
-function queueNameForStepType(stepType: string): QueueName {
+export function queueNameForStepType(stepType: string): QueueName {
   switch (stepType) {
     case "gmail.sync.page":
     case "gmail.sync.finalize":
@@ -89,18 +86,24 @@ function queueNameForStepType(stepType: string): QueueName {
     case "embedding.incremental":
       return "mail-indexing-live";
     case "memory.extract":
+    case "memory.incremental":
       return "mail-memory-submit";
     case "memory.batch.retry":
     case "memory.batch.event":
       return "mail-memory-events";
     case "memory.feedback":
       return "mail-memory-feedback";
+    case "label.backfill.submit":
+      return "mail-label-submit";
+    case "label.batch.retry":
+    case "label.batch.event":
+      return "mail-label-events";
     default:
       throw new Error(`Unsupported workflow step type: ${stepType}`);
   }
 }
 
-async function enqueueWorkflowStepsWithExecutor(
+export async function enqueueWorkflowStepsWithExecutor(
   inputs: WorkflowStepInput[],
   database: Database,
 ): Promise<Array<{ id: string; idempotencyKey: string }>> {
@@ -137,6 +140,40 @@ async function enqueueWorkflowStepsWithExecutor(
     );
   }
   return inserted;
+}
+
+export function createPostSyncDerivationSteps(input: {
+  userId: string;
+  accountId: string;
+  historyCursor: string;
+  labels: Array<{ id: string; definitionVersion: number }>;
+}): WorkflowStepInput[] {
+  return [
+    {
+      userId: input.userId,
+      accountId: input.accountId,
+      stepType: "embedding.backfill",
+      payload: { indexVersion: MAIL_INDEX_VERSION },
+      idempotencyKey: `embedding.backfill:${input.accountId}:${MAIL_INDEX_VERSION}:${input.historyCursor}`,
+    },
+    {
+      userId: input.userId,
+      accountId: input.accountId,
+      stepType: "memory.extract",
+      payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
+      idempotencyKey: `memory.extract:${input.accountId}:${MEMORY_SCHEMA_VERSION}:${input.historyCursor}`,
+    },
+    ...input.labels.map((label) => ({
+      userId: input.userId,
+      accountId: input.accountId,
+      stepType: "label.backfill.submit",
+      payload: {
+        labelId: label.id,
+        definitionVersion: label.definitionVersion,
+      },
+      idempotencyKey: `label.backfill.submit:${label.id}:${label.definitionVersion}:${input.historyCursor}`,
+    })),
+  ];
 }
 
 export async function enqueueWorkflowStep(
@@ -471,15 +508,17 @@ export async function failWorkflowStep(
   database: Database = getDatabase(),
 ) {
   const message = toPostgresTextProjection(input.message);
+  const failedAt = new Date();
   return database.transaction(async (transaction) => {
+    const executor = transaction as unknown as Database;
     const [updatedStep] = await transaction
       .update(workflowSteps)
       .set({
         status: input.terminal ? "failed" : "queued",
         attempts: input.step.attempts,
         lastError: message,
-        completedAt: input.terminal ? new Date() : null,
-        updatedAt: new Date(),
+        completedAt: input.terminal ? failedAt : null,
+        updatedAt: failedAt,
       })
       .where(
         and(
@@ -501,8 +540,8 @@ export async function failWorkflowStep(
           .set({
             status: input.terminal ? "failed" : "queued",
             lastError: message,
-            completedAt: input.terminal ? new Date() : null,
-            updatedAt: new Date(),
+            completedAt: input.terminal ? failedAt : null,
+            updatedAt: failedAt,
           })
           .where(eq(gmailAccountCleanups.id, cleanupId));
       }
@@ -519,9 +558,48 @@ export async function failWorkflowStep(
         .set({
           state: "failed",
           lastError: message,
-          updatedAt: new Date(),
+          updatedAt: failedAt,
         })
         .where(eq(gmailReplicaStates.accountId, input.step.accountId));
+    }
+    if (
+      input.terminal &&
+      input.step.stepType === "gmail.watch.renew" &&
+      input.step.accountId
+    ) {
+      const [watch] = await transaction
+        .select({
+          userId: connectedAccounts.userId,
+          expirationAt: gmailWatchStates.expirationAt,
+        })
+        .from(connectedAccounts)
+        .innerJoin(
+          gmailWatchStates,
+          eq(gmailWatchStates.accountId, connectedAccounts.id),
+        )
+        .where(
+          and(
+            eq(connectedAccounts.id, input.step.accountId),
+            eq(connectedAccounts.status, "connected"),
+            eq(gmailWatchStates.status, "active"),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (watch) {
+        await enqueueWorkflowStepsWithExecutor(
+          [
+            createGmailWatchRecoveryStep({
+              userId: watch.userId,
+              accountId: input.step.accountId,
+              expectedExpirationAt: watch.expirationAt,
+              recoveryKey: `failed:${input.step.id}`,
+              now: failedAt,
+            }),
+          ],
+          executor,
+        );
+      }
     }
     if (input.terminal && input.step.stepType === "embedding.backfill") {
       await transaction
@@ -568,6 +646,36 @@ export async function failWorkflowStep(
       await transaction.execute(
         sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.step.accountId, state: "failed" })})`,
       );
+    }
+    if (input.step.stepType.startsWith("label.")) {
+      let labelId = input.step.payload.labelId;
+      let definitionVersion = input.step.payload.definitionVersion;
+      if (input.step.stepType === "label.batch.event") {
+        const submissionStepId = input.step.payload.submissionJobId;
+        if (typeof submissionStepId === "string") {
+          const [submission] = await transaction
+            .select({ result: workflowSteps.result })
+            .from(workflowSteps)
+            .where(eq(workflowSteps.id, submissionStepId))
+            .limit(1);
+          if (submission?.result) {
+            labelId = submission.result.labelId;
+            definitionVersion = submission.result.definitionVersion;
+          }
+        }
+      }
+      if (typeof labelId === "string" && typeof definitionVersion === "number") {
+        await transaction
+          .update(mailLabels)
+          .set({ analysisState: "failed", updatedAt: new Date() })
+          .where(
+            and(
+              eq(mailLabels.id, labelId),
+              eq(mailLabels.accountId, input.step.accountId),
+              eq(mailLabels.definitionVersion, definitionVersion),
+            ),
+          );
+      }
     }
     return true;
   });
@@ -1041,23 +1149,20 @@ export async function completeMailSyncRun(
       sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: run.accountId, state: "pending" })})`,
     );
 
+    const labels = await transaction
+      .select({
+        id: mailLabels.id,
+        definitionVersion: mailLabels.definitionVersion,
+      })
+      .from(mailLabels)
+      .where(eq(mailLabels.accountId, run.accountId));
     await enqueueWorkflowStepsWithExecutor(
-      [
-        {
-          userId: run.userId,
-          accountId: run.accountId,
-          stepType: "embedding.backfill",
-          payload: { indexVersion: MAIL_INDEX_VERSION },
-          idempotencyKey: `embedding.backfill:${run.accountId}:${MAIL_INDEX_VERSION}:${input.finalHistoryCursor}`,
-        },
-        {
-          userId: run.userId,
-          accountId: run.accountId,
-          stepType: "memory.extract",
-          payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
-          idempotencyKey: `memory.extract:${run.accountId}:${MEMORY_SCHEMA_VERSION}:${input.finalHistoryCursor}`,
-        },
-      ],
+      createPostSyncDerivationSteps({
+        userId: run.userId,
+        accountId: run.accountId,
+        historyCursor: input.finalHistoryCursor,
+        labels,
+      }),
       executor,
     );
     return true;
@@ -1090,23 +1195,20 @@ export async function enqueuePostSyncWorkflowSteps(
       !account.replicaLastAuditAt ||
       !account.historyCursor
     ) continue;
+    const labels = await database
+      .select({
+        id: mailLabels.id,
+        definitionVersion: mailLabels.definitionVersion,
+      })
+      .from(mailLabels)
+      .where(eq(mailLabels.accountId, account.id));
     const steps = await enqueueWorkflowStepsWithExecutor(
-      [
-        {
-          userId: account.userId,
-          accountId: account.id,
-          stepType: "memory.extract",
-          payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
-          idempotencyKey: `memory.extract:${account.id}:${MEMORY_SCHEMA_VERSION}:${account.historyCursor}`,
-        },
-        {
-          userId: account.userId,
-          accountId: account.id,
-          stepType: "embedding.backfill",
-          payload: { indexVersion: MAIL_INDEX_VERSION },
-          idempotencyKey: `embedding.backfill:${account.id}:${MAIL_INDEX_VERSION}:${account.historyCursor}`,
-        },
-      ],
+      createPostSyncDerivationSteps({
+        userId: account.userId,
+        accountId: account.id,
+        historyCursor: account.historyCursor,
+        labels,
+      }),
       database,
     );
     inserted += steps.length;
@@ -1134,6 +1236,7 @@ export async function getWorkflowStepSubmission(
         eq(workflowSteps.status, "complete"),
         inArray(workflowSteps.stepType, [
           "memory.extract",
+          "memory.incremental",
           "memory.batch.retry",
           "embedding.backfill",
         ]),

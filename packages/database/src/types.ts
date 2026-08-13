@@ -17,14 +17,14 @@ export type WorkflowStepJob = {
   maxAttempts: number;
 };
 
-export type ClaimedJob = {
-  id: string;
-  userId: string | null;
-  accountId: string | null;
-  jobType: string;
-  payload: Record<string, unknown>;
-  attempts: number;
-  maxAttempts: number;
+export type WorkflowStepInput = {
+  runId?: string | null;
+  userId?: string | null;
+  accountId?: string | null;
+  stepType: string;
+  payload?: Record<string, unknown>;
+  maxAttempts?: number;
+  idempotencyKey: string;
 };
 
 export type QueueName =
@@ -35,7 +35,9 @@ export type QueueName =
   | "mail-indexing-live"
   | "mail-memory-submit"
   | "mail-memory-events"
-  | "mail-memory-feedback";
+  | "mail-memory-feedback"
+  | "mail-label-submit"
+  | "mail-label-events";
 
 export type MailboxMessage = {
   userId: string;
