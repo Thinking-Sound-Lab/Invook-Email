@@ -2941,12 +2941,6 @@ async function persistWorkflowFailure(
 ) {
   const stepUpdated = await failWorkflowStep({ step: job, message, terminal });
   if (!stepUpdated) return;
-  if (terminal && job.stepType === "gmail.watch.renew" && job.accountId) {
-    await ensureDailyGmailWatchRenewals({
-      accountId: job.accountId,
-      recoveryForStepId: job.id,
-    });
-  }
   if (job.stepType === "gmail.sync.message" && job.runId) {
     await failMailSyncItem({
       runId: job.runId,
@@ -3093,9 +3087,13 @@ function processLabelEvent(bullJob: WorkflowJob) {
   });
 }
 
-function startBullWorkers(runtime: BullQueueRuntime) {
+function startBullWorkers(
+  runtime: BullQueueRuntime,
+  onReconciliationFailure: (error: Error) => void,
+) {
   const withFailureReconciliation = {
     onTerminalFailure: reconcileTerminalQueueFailure,
+    onTerminalFailureReconciliationError: onReconciliationFailure,
   };
   runtime.createWorker("gmail-pages", processGmailPages, withFailureReconciliation);
   runtime.createWorker("gmail-messages", processGmailMessage, {
@@ -3202,14 +3200,17 @@ async function run() {
   const runtime = new BullQueueRuntime(process.env.REDIS_URL ?? "");
   await runtime.waitUntilReady();
   await runtime.configureGlobalConcurrency();
-  startBullWorkers(runtime);
-
   const outboxSignal = createJobSignal();
   let stopRequested = false;
+  let fatalError: Error | null = null;
   const requestStop = () => {
     stopRequested = true;
     outboxSignal.notify();
   };
+  startBullWorkers(runtime, (error) => {
+    fatalError = error;
+    requestStop();
+  });
   const stopOutboxListening = await listenForOutboxNotifications(outboxSignal.notify);
   const stopRedisReadyListener = runtime.onReady(outboxSignal.notify);
 
@@ -3225,6 +3226,7 @@ async function run() {
     await reconcileSubmittedEmbeddingBatches();
     outboxSignal.notify();
     await runOutboxLoop(outboxSignal, () => stopRequested, runtime);
+    if (fatalError) throw fatalError;
   } finally {
     process.removeListener("SIGINT", requestStop);
     process.removeListener("SIGTERM", requestStop);

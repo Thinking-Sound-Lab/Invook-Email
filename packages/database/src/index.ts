@@ -25,5 +25,6 @@ export type {
   IndexedMessage,
   MailboxMessage,
   QueueName,
+  WorkflowStepInput,
   WorkflowStepJob,
 } from "./types";

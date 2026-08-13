@@ -27,6 +27,7 @@ type WorkerRegistrationOptions = {
   concurrency?: number;
   lockDuration?: number;
   onTerminalFailure?: (job: WorkflowJob, error: Error) => Promise<void>;
+  onTerminalFailureReconciliationError?: (error: Error) => void;
 };
 
 export class BullQueueRuntime {
@@ -124,7 +125,12 @@ export class BullQueueRuntime {
     processor: Processor<WorkflowStepJob, Record<string, unknown>, string>,
     options: WorkerRegistrationOptions = {},
   ) {
-    const { concurrency = 1, lockDuration, onTerminalFailure } = options;
+    const {
+      concurrency = 1,
+      lockDuration,
+      onTerminalFailure,
+      onTerminalFailureReconciliationError,
+    } = options;
     const worker = new Worker<WorkflowStepJob, Record<string, unknown>, string>(
       queueName,
       processor,
@@ -164,19 +170,17 @@ export class BullQueueRuntime {
         message: error.message,
       });
       if (terminal && job && onTerminalFailure) {
-        void onTerminalFailure(job, error).catch((reconciliationError: unknown) => {
+        void onTerminalFailure(job, error).catch((caught: unknown) => {
+          const reconciliationError = caught instanceof Error
+            ? caught
+            : new Error("Unknown terminal failure reconciliation error.");
           console.error("worker: terminal failure reconciliation failed", {
             queueName,
             stepId: job.id,
-            name:
-              reconciliationError instanceof Error
-                ? reconciliationError.name
-                : "UnknownError",
-            message:
-              reconciliationError instanceof Error
-                ? reconciliationError.message
-                : "Unknown reconciliation failure",
+            name: reconciliationError.name,
+            message: reconciliationError.message,
           });
+          onTerminalFailureReconciliationError?.(reconciliationError);
         });
       }
     });

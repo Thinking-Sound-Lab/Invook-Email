@@ -17,6 +17,16 @@ export type WorkflowStepJob = {
   maxAttempts: number;
 };
 
+export type WorkflowStepInput = {
+  runId?: string | null;
+  userId?: string | null;
+  accountId?: string | null;
+  stepType: string;
+  payload?: Record<string, unknown>;
+  maxAttempts?: number;
+  idempotencyKey: string;
+};
+
 export type QueueName =
   | "gmail-pages"
   | "gmail-messages"

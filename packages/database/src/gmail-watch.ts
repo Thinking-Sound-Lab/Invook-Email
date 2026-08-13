@@ -1,65 +1,32 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm";
 
 import { getDatabase, type Database } from "./client";
+import {
+  createDailyGmailWatchRenewalStep,
+  createGmailWatchRecoveryStep,
+  GMAIL_WATCH_RENEWAL_INTERVAL_MS,
+} from "./gmail-watch-schedule";
 import {
   connectedAccounts,
   gmailWatchStates,
   workflowSteps,
 } from "./schema";
-import { enqueueWorkflowStep, type WorkflowStepInput } from "./workflows";
+import { enqueueWorkflowStep } from "./workflows";
 
-const DAILY_WATCH_RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1_000;
-
-export function createDailyGmailWatchRenewalStep(input: {
-  userId: string;
-  accountId: string;
-  renewedAt: Date;
-  expectedExpirationAt: Date;
-}): WorkflowStepInput {
-  const runAt = new Date(
-    input.renewedAt.getTime() + DAILY_WATCH_RENEWAL_INTERVAL_MS,
-  );
-  const renewalDay = runAt.toISOString().slice(0, 10);
-  return {
-    userId: input.userId,
-    accountId: input.accountId,
-    stepType: "gmail.watch.renew",
-    payload: {
-      cadence: "daily",
-      runAt: runAt.toISOString(),
-      expectedExpirationAt: input.expectedExpirationAt.toISOString(),
-    },
-    idempotencyKey: `gmail-watch-renew:${input.accountId}:daily:${renewalDay}`,
-  };
-}
-
-export function createGmailWatchRecoveryStep(input: {
-  userId: string;
-  accountId: string;
-  expectedExpirationAt: Date;
-  recoveryKey: string;
-  now: Date;
-}): WorkflowStepInput {
-  const dailyRunAt = input.now.getTime() + DAILY_WATCH_RENEWAL_INTERVAL_MS;
-  const expirationSafetyRunAt =
-    input.expectedExpirationAt.getTime() - DAILY_WATCH_RENEWAL_INTERVAL_MS;
-  const runAt = new Date(
-    Math.max(input.now.getTime(), Math.min(dailyRunAt, expirationSafetyRunAt)),
-  );
-  return {
-    userId: input.userId,
-    accountId: input.accountId,
-    stepType: "gmail.watch.renew",
-    payload: {
-      cadence: "daily",
-      reason: "terminal_failure_recovery",
-      recoveryKey: input.recoveryKey,
-      runAt: runAt.toISOString(),
-      expectedExpirationAt: input.expectedExpirationAt.toISOString(),
-    },
-    idempotencyKey: `gmail-watch-renew:${input.accountId}:recovery:${input.recoveryKey}`,
-  };
-}
+export {
+  createDailyGmailWatchRenewalStep,
+  createGmailWatchRecoveryStep,
+} from "./gmail-watch-schedule";
 
 export function enqueueDailyGmailWatchRenewal(
   input: {
@@ -81,6 +48,10 @@ export async function ensureDailyGmailWatchRenewals(
   } = {},
   database: Database = getDatabase(),
 ): Promise<number> {
+  const now = input.now ?? new Date();
+  const staleStartedBefore = new Date(
+    now.getTime() - GMAIL_WATCH_RENEWAL_INTERVAL_MS,
+  );
   const accountConditions = [
     eq(connectedAccounts.status, "connected"),
     eq(gmailWatchStates.status, "active"),
@@ -112,6 +83,13 @@ export async function ensureDailyGmailWatchRenewals(
           eq(workflowSteps.accountId, account.id),
           eq(workflowSteps.stepType, "gmail.watch.renew"),
           inArray(workflowSteps.status, ["queued", "running"]),
+          or(
+            lt(workflowSteps.attempts, workflowSteps.maxAttempts),
+            and(
+              eq(workflowSteps.status, "running"),
+              gte(workflowSteps.startedAt, staleStartedBefore),
+            ),
+          ),
           sql`${workflowSteps.input}->>'cadence' = 'daily'`,
         ),
       )
@@ -126,7 +104,21 @@ export async function ensureDailyGmailWatchRenewals(
           and(
             eq(workflowSteps.accountId, account.id),
             eq(workflowSteps.stepType, "gmail.watch.renew"),
-            eq(workflowSteps.status, "failed"),
+            or(
+              eq(workflowSteps.status, "failed"),
+              and(
+                eq(workflowSteps.status, "queued"),
+                gte(workflowSteps.attempts, workflowSteps.maxAttempts),
+              ),
+              and(
+                eq(workflowSteps.status, "running"),
+                gte(workflowSteps.attempts, workflowSteps.maxAttempts),
+                or(
+                  isNull(workflowSteps.startedAt),
+                  lt(workflowSteps.startedAt, staleStartedBefore),
+                ),
+              ),
+            ),
           ),
         )
         .orderBy(desc(workflowSteps.completedAt), desc(workflowSteps.updatedAt))
@@ -141,7 +133,7 @@ export async function ensureDailyGmailWatchRenewals(
         accountId: account.id,
         expectedExpirationAt: account.expirationAt,
         recoveryKey,
-        now: input.now ?? new Date(),
+        now,
       }),
       database,
     );

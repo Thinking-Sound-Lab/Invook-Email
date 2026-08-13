@@ -16,6 +16,7 @@ import {
   embeddingBatchSubmissions,
   gmailAccountCleanups,
   gmailReplicaStates,
+  gmailWatchStates,
   gmailSyncItems,
   gmailSyncPages,
   mailLabels,
@@ -23,22 +24,17 @@ import {
   queueOutbox,
   workflowSteps,
 } from "./schema";
-import type { QueueName, WorkflowStepJob } from "./types";
+import { createGmailWatchRecoveryStep } from "./gmail-watch-schedule";
+import type {
+  QueueName,
+  WorkflowStepInput,
+  WorkflowStepJob,
+} from "./types";
 import { toPostgresTextProjection } from "./text";
 import {
   MAIL_INDEX_VERSION,
   MEMORY_SCHEMA_VERSION,
 } from "./versions";
-
-export type WorkflowStepInput = {
-  runId?: string | null;
-  userId?: string | null;
-  accountId?: string | null;
-  stepType: string;
-  payload?: Record<string, unknown>;
-  maxAttempts?: number;
-  idempotencyKey: string;
-};
 
 export type OutboxJob = WorkflowStepJob & {
   queueName: QueueName;
@@ -512,15 +508,17 @@ export async function failWorkflowStep(
   database: Database = getDatabase(),
 ) {
   const message = toPostgresTextProjection(input.message);
+  const failedAt = new Date();
   return database.transaction(async (transaction) => {
+    const executor = transaction as unknown as Database;
     const [updatedStep] = await transaction
       .update(workflowSteps)
       .set({
         status: input.terminal ? "failed" : "queued",
         attempts: input.step.attempts,
         lastError: message,
-        completedAt: input.terminal ? new Date() : null,
-        updatedAt: new Date(),
+        completedAt: input.terminal ? failedAt : null,
+        updatedAt: failedAt,
       })
       .where(
         and(
@@ -542,8 +540,8 @@ export async function failWorkflowStep(
           .set({
             status: input.terminal ? "failed" : "queued",
             lastError: message,
-            completedAt: input.terminal ? new Date() : null,
-            updatedAt: new Date(),
+            completedAt: input.terminal ? failedAt : null,
+            updatedAt: failedAt,
           })
           .where(eq(gmailAccountCleanups.id, cleanupId));
       }
@@ -560,9 +558,48 @@ export async function failWorkflowStep(
         .set({
           state: "failed",
           lastError: message,
-          updatedAt: new Date(),
+          updatedAt: failedAt,
         })
         .where(eq(gmailReplicaStates.accountId, input.step.accountId));
+    }
+    if (
+      input.terminal &&
+      input.step.stepType === "gmail.watch.renew" &&
+      input.step.accountId
+    ) {
+      const [watch] = await transaction
+        .select({
+          userId: connectedAccounts.userId,
+          expirationAt: gmailWatchStates.expirationAt,
+        })
+        .from(connectedAccounts)
+        .innerJoin(
+          gmailWatchStates,
+          eq(gmailWatchStates.accountId, connectedAccounts.id),
+        )
+        .where(
+          and(
+            eq(connectedAccounts.id, input.step.accountId),
+            eq(connectedAccounts.status, "connected"),
+            eq(gmailWatchStates.status, "active"),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (watch) {
+        await enqueueWorkflowStepsWithExecutor(
+          [
+            createGmailWatchRecoveryStep({
+              userId: watch.userId,
+              accountId: input.step.accountId,
+              expectedExpirationAt: watch.expirationAt,
+              recoveryKey: `failed:${input.step.id}`,
+              now: failedAt,
+            }),
+          ],
+          executor,
+        );
+      }
     }
     if (input.terminal && input.step.stepType === "embedding.backfill") {
       await transaction
