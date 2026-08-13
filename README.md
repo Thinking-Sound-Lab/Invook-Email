@@ -19,13 +19,14 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 8. Saving an edited AI draft records feedback. A new memory is proposed only when the same correction appears across at least three real drafts.
 9. Historical subject/body embeddings use OpenAI Batch. Later stored messages use the regular OpenAI embeddings API with the same explicitly configured model, dimensions, content hash, and index version.
 10. Search combines PostgreSQL full text, sender/recipient metadata, attachment filenames, and available vector similarity. Attachment bytes are replicated to object storage but are not embedded.
-11. The right sidebar runs a tool-using agent that can search mail, inspect a thread, list attachment metadata, and generate a saved reply draft with cited thread and message IDs.
+11. The right sidebar runs a tool-using agent that can search mail, inspect a thread, list attachment metadata, and generate a saved reply draft with cited thread and message IDs. Its typed mailbox query resolves search text, Gmail and Invook labels, Inbox/read state, sender, dates, and pagination only against the ready local replica.
+12. Agent-requested Gmail mutations become frozen, inspectable PostgreSQL proposals. Archive, read state, Trash, Gmail-label changes, and saving an AI draft to Gmail execute through the existing durable outbox/BullMQ path only after an authenticated approval click, then converge locally through stored-cursor Gmail history catch-up.
 
 BullMQ is the only job executor. Purpose-specific queues execute Gmail synchronization, Pub/Sub history catch-up, daily watch renewal, completeness repair, search indexing, Invook-label analysis, and initial or targeted Memory work published through the transactional PostgreSQL outbox. PostgreSQL retains workflow/progress state and provider Batch correlation; notifications wake outbox and SSE consumers. No path uses timer-based polling.
 
 Memory v3 does not depend on search embeddings. Native Batch analysis discovers repeated writing behavior from complete thread context, while exact contact matching and memory type determine which small set of rules is supplied during drafting.
 
-The right panel supports mailbox finding and reply drafting. Sending mail and autonomous inbox automations are not claimed as complete.
+The right panel supports mailbox finding, reply drafting, and explicit one-time approval of exact Gmail mutation proposals. Sending mail and autonomous inbox automations are not claimed as complete.
 
 ## Repository structure
 

@@ -8,6 +8,7 @@ import { MAIL_INDEX_VERSION, searchMailbox } from "@invook/database";
 export async function searchMailForUser(input: {
   userId: string;
   query: string;
+  limit?: number;
   onSemanticError?: (error: unknown) => void;
 }) {
   let embedding:
@@ -35,6 +36,7 @@ export async function searchMailForUser(input: {
   const results = await searchMailbox({
     userId: input.userId,
     query: input.query,
+    limit: input.limit,
     embedding,
   });
   return results.map((result) => ({

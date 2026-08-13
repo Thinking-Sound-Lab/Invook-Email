@@ -75,7 +75,7 @@ The left sidebar contains:
 
 The center pane shows Important mail first, then a divider, then the remaining mail. Selecting a thread replaces the list with the real thread.
 
-The right pane is the future action agent for Find, Write, and Automate. It must not claim an action is available until its API and approval behavior exist.
+The right pane is the action agent for Find and Write. It reads and selects targets only from the fully synchronized Invook replica. Archive, read-state, Trash, Gmail-label, and save-to-Gmail-draft requests create an exact frozen proposal; no Gmail mutation occurs until the current user approves its card. Sending, recurring Inbox Zero, and standing approvals remain unavailable.
 
 ### Label settings
 
@@ -222,6 +222,8 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `gmail_replica_audits`
 - `mailbox_change_events`
 - `gmail_account_cleanups`
+- `mailbox_action_proposals`
+- `mailbox_action_targets`
 - `labels`
 - `thread_labels`
 - `thread_label_analyses`
@@ -266,6 +268,9 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `PATCH/DELETE` | `/v1/gmail/labels/:id` | Update or delete an authoritative custom Gmail label |
 | `PATCH` | `/v1/gmail/messages/:id/labels` | Apply authoritative Gmail message-label changes |
 | `PUT/DELETE` | `/v1/gmail/drafts/:id` | Update or delete an existing Gmail Draft resource |
+| `GET` | `/v1/agent/actions/:id` | Return one authenticated user's exact action proposal and outcomes |
+| `POST` | `/v1/agent/actions/:id/approve` | One-time approve and durably enqueue the frozen Gmail mutation |
+| `POST` | `/v1/agent/actions/:id/cancel` | Cancel a still-pending action proposal |
 
 Every mutation requires an authenticated signed session and an allowed request origin. IDs and bodies are validated before repository calls. User ownership is enforced in every product lookup.
 
@@ -298,7 +303,6 @@ The Memory-first slice is successful when:
 
 After the Memory loop is measured with real use:
 
-1. add conversational right-panel actions with explicit approvals and audit records;
-2. evaluate semantic retrieval for mailbox finding or factual context, independently of Memory extraction;
-3. add sending, scheduling, reminders, and safe automations;
-4. choose an open-source license and add contribution governance.
+1. evaluate broader factual retrieval independently of Memory extraction;
+2. add sending, scheduling, reminders, and safe automations;
+3. choose an open-source license and add contribution governance.

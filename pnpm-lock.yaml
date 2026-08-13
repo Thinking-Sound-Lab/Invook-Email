@@ -139,6 +139,9 @@ importers:
       '@invook/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@invook/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@invook/database':
         specifier: workspace:*
         version: link:../../packages/database

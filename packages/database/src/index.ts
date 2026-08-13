@@ -12,6 +12,7 @@ export {
   encryptGoogleCredential,
   type GoogleCredential,
 } from "./credentials";
+export * from "./mailbox-actions";
 export * from "./gmail-watch";
 export * from "./repositories";
 export * from "./replica";

@@ -173,6 +173,7 @@ export async function getAiReplyDraftForGmailSave(
     .select({
       id: drafts.id,
       currentText: drafts.currentText,
+      updatedAt: drafts.updatedAt,
       threadId: threads.id,
       providerThreadId: threads.providerThreadId,
       subject: threads.subject,

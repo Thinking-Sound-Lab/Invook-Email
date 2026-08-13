@@ -5,12 +5,12 @@ import { after, before, test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { validate as validateUuid } from "uuid";
 
+import { composePlainTextGmailReply } from "@invook/gmail";
 import { ObjectStorageObjectNotFoundError } from "@invook/object-storage";
 
 import { buildApi } from "./app";
 import { createSessionCookie } from "./auth/session";
 import { parseGmailNotification } from "./routes/google-pubsub";
-import { composePlainTextGmailReply } from "./services/gmail-drafts";
 
 let api: FastifyInstance;
 const originalAppUrl = process.env.APP_URL;
@@ -382,6 +382,19 @@ test("Gmail provider writes require an authenticated session", async () => {
   ] as const;
 
   for (const request of requests) {
+    const response = await api.inject(request);
+    assert.equal(response.statusCode, 401, `${request.method} ${request.url}`);
+    assert.equal(response.json().title, "Authentication required");
+  }
+});
+
+test("Agent proposal reads, approvals, and cancellations require authentication", async () => {
+  const proposalId = "4ca9d9d4-b5a2-4a4e-9cc5-ff2de72ee4b2";
+  for (const request of [
+    { method: "GET", url: `/v1/agent/actions/${proposalId}` },
+    { method: "POST", url: `/v1/agent/actions/${proposalId}/approve` },
+    { method: "POST", url: `/v1/agent/actions/${proposalId}/cancel` },
+  ] as const) {
     const response = await api.inject(request);
     assert.equal(response.statusCode, 401, `${request.method} ${request.url}`);
     assert.equal(response.json().title, "Authentication required");

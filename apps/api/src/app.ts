@@ -16,6 +16,7 @@ import { registerIndexingEventRoutes } from "./routes/indexing-events";
 import { registerLabelRoutes } from "./routes/labels";
 import { registerGooglePubSubRoutes } from "./routes/google-pubsub";
 import { registerMailboxEventRoutes } from "./routes/mailbox-events";
+import { registerMailboxActionRoutes } from "./routes/mailbox-actions";
 import { registerMailboxRoutes } from "./routes/mailbox";
 import { registerMemoryRoutes } from "./routes/memories";
 import { registerSessionRoutes } from "./routes/session";
@@ -80,6 +81,7 @@ export async function buildApi(options: {
   await api.register(registerAgentRoutes);
   await api.register(registerIndexingEventRoutes);
   await api.register(registerMailboxEventRoutes);
+  await api.register(registerMailboxActionRoutes);
   await api.register(registerMailboxRoutes);
   await api.register(registerMemoryRoutes, { prefix: "/v1/memories" });
   await api.register(registerLabelRoutes, { prefix: "/v1/labels" });
