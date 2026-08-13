@@ -14,7 +14,6 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
   AccountSyncStage,
-  IndexingStatusEvent,
   MailboxActionProposal,
 } from "@invook/contracts";
 import { DefaultChatTransport, type UIDataTypes, type UIMessage } from "ai";
@@ -22,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useIndexingEvents } from "@/hooks/use-indexing-events";
 import { cn } from "@/lib/utils";
 
 import { formatMailText } from "./mail-format";
@@ -38,7 +38,11 @@ type MailAgentUIMessage = UIMessage<
   }
 >;
 
-function IndexingStatus({ state }: { state: AccountSyncStage }) {
+interface IndexingStatusProps {
+  state: AccountSyncStage;
+}
+
+function IndexingStatus({ state }: IndexingStatusProps) {
   if (state === "complete") return null;
 
   const running = state === "running";
@@ -86,8 +90,11 @@ function IndexingStatus({ state }: { state: AccountSyncStage }) {
   );
 }
 
-function isAccountSyncStage(value: unknown): value is AccountSyncStage {
-  return ["pending", "running", "complete", "failed"].includes(String(value));
+export interface AgentPanelProps {
+  openThreadId?: string;
+  openThreadSubject?: string;
+  aiConfigured: boolean;
+  indexingState: AccountSyncStage;
 }
 
 export function AgentPanel({
@@ -95,12 +102,7 @@ export function AgentPanel({
   openThreadSubject,
   aiConfigured,
   indexingState,
-}: {
-  openThreadId?: string;
-  openThreadSubject?: string;
-  aiConfigured: boolean;
-  indexingState: AccountSyncStage;
-}) {
+}: AgentPanelProps) {
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
@@ -117,7 +119,7 @@ export function AgentPanel({
     setMessages,
   } = useChat<MailAgentUIMessage>({ transport });
   const [input, setInput] = useState("");
-  const [liveIndexingState, setLiveIndexingState] = useState(indexingState);
+  useIndexingEvents();
   const endRef = useRef<HTMLDivElement>(null);
   const busy = status === "submitted" || status === "streaming";
   const suggestions = openThreadId
@@ -136,26 +138,7 @@ export function AgentPanel({
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages, status]);
 
-  useEffect(() => {
-    const events = new EventSource("/v1/indexing/events");
-    const updateIndexingState = (event: MessageEvent<string>) => {
-      try {
-        const payload = JSON.parse(event.data) as IndexingStatusEvent;
-        if (isAccountSyncStage(payload.state)) {
-          setLiveIndexingState(payload.state);
-        }
-      } catch {
-        // Ignore malformed events; EventSource will continue receiving updates.
-      }
-    };
-    events.addEventListener("indexing", updateIndexingState);
-    return () => {
-      events.removeEventListener("indexing", updateIndexingState);
-      events.close();
-    };
-  }, []);
-
-  const submit = (text: string) => {
+  const handleSubmit = (text: string) => {
     const value = text.trim();
     if (!value || !aiConfigured || busy) return;
     void sendMessage({ text: value });
@@ -191,7 +174,7 @@ export function AgentPanel({
       </header>
 
       <div className="mx-3 space-y-2">
-        <IndexingStatus state={liveIndexingState} />
+        <IndexingStatus state={indexingState} />
         {openThreadSubject ? (
           <div className="rounded-lg bg-background/45 px-3 py-2.5">
             <p className="text-xs font-medium text-muted-foreground">Current thread</p>
@@ -211,7 +194,7 @@ export function AgentPanel({
                   key={suggestion.label}
                   type="button"
                   disabled={!aiConfigured || busy}
-                  onClick={() => submit(suggestion.label)}
+                  onClick={() => handleSubmit(suggestion.label)}
                   className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2.5 text-left text-[13px] text-foreground/76 transition-colors hover:bg-accent disabled:opacity-45"
                 >
                   <HugeiconsIcon
@@ -291,7 +274,7 @@ export function AgentPanel({
         className="shrink-0 p-3 pt-0"
         onSubmit={(event) => {
           event.preventDefault();
-          submit(input);
+          handleSubmit(input);
         }}
       >
         <div className="rounded-xl bg-background/72 p-2 shadow-xl shadow-black/15">

@@ -24,7 +24,7 @@ import {
 } from "@/components/mail/workspace-surface";
 import { getMailboxWorkspace, searchMailbox } from "@/lib/api";
 
-type MailPageProps = {
+interface MailPageProps {
   searchParams: Promise<{
     view?: string | string[];
     surface?: string | string[];
@@ -32,7 +32,7 @@ type MailPageProps = {
     q?: string | string[];
     cursor?: string | string[];
   }>;
-};
+}
 
 const mailboxViewSet = new Set<string>(mailboxViews);
 
@@ -107,6 +107,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   if (selectedThread) {
     centerPane = (
       <ThreadReader
+        key={selectedThread.id}
         thread={selectedThread}
         currentView={currentView}
         mailboxCursor={mailboxCursor}
@@ -161,6 +162,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         />
         {centerPane}
         <AgentPanel
+          key={selectedThread?.id ?? "mailbox"}
           openThreadId={selectedThread?.id}
           openThreadSubject={selectedThread?.subject || undefined}
           aiConfigured={workspace.aiConfigured}

@@ -95,12 +95,30 @@ export type MailLabel = {
   totalThreadCount: number;
 };
 
+export type CreateMailLabelRequest = {
+  name: string;
+  description: string;
+};
+
+export type MailLabelResponse = {
+  label: MailLabel;
+};
+
 export type InvookThreadLabel = {
   labelId: string;
   name: string;
   systemKey: SystemLabelKey | null;
   source: "ai" | "user";
   confidence: number | null;
+};
+
+export type SetThreadLabelRequest = {
+  labelId: string;
+  applied: boolean;
+};
+
+export type ThreadLabelsResponse = {
+  labels: InvookThreadLabel[];
 };
 
 export const memoryTypes = ["preference", "contact", "scheduling"] as const;
@@ -121,6 +139,16 @@ export type MemoryEntry = {
   updatedAt: string;
 };
 
+export type SaveMemoryRequest = {
+  type: MemoryType;
+  contactEmail: string | null;
+  statement: string;
+};
+
+export type MemoryEntryResponse = {
+  memory: MemoryEntry;
+};
+
 export type AiReplyDraft = {
   id: string;
   threadId: string;
@@ -129,6 +157,27 @@ export type AiReplyDraft = {
   currentText: string;
   usedMemoryIds: string[];
   updatedAt: string;
+};
+
+export type CreateAiReplyDraftRequest = {
+  instruction?: string;
+};
+
+export type UpdateAiReplyDraftRequest = {
+  currentText: string;
+};
+
+export type AiReplyDraftResponse = {
+  draft: AiReplyDraft;
+};
+
+export type AcceptedMailboxSyncResponse = {
+  accepted: true;
+  stepId: string;
+};
+
+export type DeletedResourceResponse = {
+  deleted: true;
 };
 
 export type SessionState =

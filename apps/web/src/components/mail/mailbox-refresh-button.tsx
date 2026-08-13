@@ -2,11 +2,11 @@
 
 import { RefreshIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import axios from "axios";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { requestMailboxSync } from "@/lib/api/mailbox";
 import { apiErrorMessage } from "@/lib/http-error";
 
 export function MailboxRefreshButton() {
@@ -18,7 +18,7 @@ export function MailboxRefreshButton() {
     setPending(true);
     setError(null);
     try {
-      await axios.post("/v1/mailbox/sync");
+      await requestMailboxSync();
       router.refresh();
     } catch (cause) {
       setError(apiErrorMessage(cause, "Invook could not refresh Gmail."));
