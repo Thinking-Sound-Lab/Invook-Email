@@ -7,6 +7,7 @@ import { validate as validateUuid } from "uuid";
 import { mailboxViews } from "@invook/contracts";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
+import { ComposeSurface } from "@/components/mail/compose-surface";
 import { MailList } from "@/components/mail/mail-list";
 import { MailboxEventSubscriber } from "@/components/mail/mailbox-event-subscriber";
 import { MailSidebar } from "@/components/mail/mail-sidebar";
@@ -20,7 +21,6 @@ import type {
   StaticMailboxView,
 } from "@/components/mail/types";
 import {
-  ComposeSurface,
   PendingSurface,
   SearchResultsSurface,
   SearchSurface,

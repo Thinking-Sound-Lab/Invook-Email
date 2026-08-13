@@ -40,7 +40,10 @@ export {
   type GmailRawMessage,
   type GmailWatchResponse,
 } from "./client";
-export { composePlainTextGmailReply } from "./draft";
+export {
+  composePlainTextGmailMessage,
+  composePlainTextGmailReply,
+} from "./draft";
 export {
   extractEmailAddress,
   isMemoryEligible,

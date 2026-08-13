@@ -152,6 +152,8 @@ Unrelated contact memory is never supplied. The model returns the draft, the IDs
 
 Sending is outside the current slice. The UI may explicitly save an AI reply as a Gmail Draft; that creates a separate provider resource and keeps the AI draft/evidence unchanged. It must not imply that a message was sent.
 
+New-message Compose accepts explicit recipient email addresses, subject, and plain-text body, and saves or updates a Gmail Draft. Gmail is written first; Invook then schedules stored-cursor history catch-up so the provider-owned draft converges into the local replica. Compose does not expose a Send action in this phase.
+
 ## Feedback
 
 Feedback is a core input, not an analytics afterthought.

@@ -8,6 +8,7 @@ import {
   GMAIL_MESSAGE_LIST_MAX_RESULTS,
   getGmailMessage,
   isGoogleReauthenticationRequired,
+  listGmailDrafts,
   listGmailMessages,
 } from "./client";
 
@@ -86,4 +87,21 @@ test("a transient Google provider failure remains retryable", () => {
   );
 
   assert.equal(isGoogleReauthenticationRequired(error), false);
+});
+
+test("Gmail draft listing forwards an exact provider search query", async () => {
+  requests.length = 0;
+  await listGmailDrafts("access-token", {
+    maxResults: 10,
+    query: "rfc822msgid:invook-compose@example.invalid",
+  });
+
+  const request = requests[0];
+  assert.ok(request);
+  const url = new URL(request.url ?? "", request.baseURL);
+  assert.equal(url.pathname, "/users/me/drafts");
+  assert.equal(
+    url.searchParams.get("q"),
+    "rfc822msgid:invook-compose@example.invalid",
+  );
 });

@@ -1,8 +1,4 @@
-import type {
-  FastifyPluginAsync,
-  FastifyReply,
-  FastifyRequest,
-} from "fastify";
+import type { FastifyPluginAsync } from "fastify";
 
 import {
   enqueueGmailHistoryCatchup,
@@ -30,12 +26,11 @@ import {
   requireUuidParameter,
 } from "../access";
 import { sendJson, sendProblem } from "../responses";
+import type { GmailProviderAccess } from "../services/gmail-provider";
 import {
-  getGmailProviderAccess,
-  GmailProviderConfigurationError,
-  GmailProviderReconnectRequiredError,
-  type GmailProviderAccess,
-} from "../services/gmail-provider";
+  getGmailProviderAccessForRequest,
+  sendGmailWriteProblem,
+} from "./gmail-provider-access";
 
 type GmailLabelParams = { gmailLabelId: string };
 type GmailMessageParams = { messageId: string };
@@ -118,64 +113,6 @@ function parseUuidArray(value: unknown): string[] | null {
   return [...new Set(values)];
 }
 
-async function providerAccess(
-  request: FastifyRequest,
-  reply: FastifyReply,
-): Promise<GmailProviderAccess | null> {
-  const session = request.invookSession;
-  if (!session) return null;
-  try {
-    const result = await getGmailProviderAccess(session.userId);
-    if (result.status === "not_found") {
-      await sendProblem(request, reply, 404, "Connected Gmail account not found");
-      return null;
-    }
-    if (result.status === "replica_not_ready") {
-      await sendProblem(request, reply, 409, "Gmail mailbox replica is not ready");
-      return null;
-    }
-    return result.access;
-  } catch (error) {
-    if (error instanceof GmailProviderConfigurationError) {
-      await sendProblem(request, reply, 503, "Gmail provider writes are not configured");
-      return null;
-    }
-    if (error instanceof GmailProviderReconnectRequiredError) {
-      await sendProblem(request, reply, 409, "Gmail account must be reconnected");
-      return null;
-    }
-    if (error instanceof GmailApiError) {
-      await sendGmailWriteProblem(error, request, reply);
-      return null;
-    }
-    throw error;
-  }
-}
-
-async function sendGmailWriteProblem(
-  error: GmailApiError,
-  request: FastifyRequest,
-  reply: FastifyReply,
-) {
-  if (error.status === 400) {
-    await sendProblem(request, reply, 400, "Gmail rejected the provider write");
-    return;
-  }
-  if (error.status === 404) {
-    await sendProblem(request, reply, 404, "Gmail resource not found");
-    return;
-  }
-  if (error.status === 409) {
-    await sendProblem(request, reply, 409, "Gmail provider write conflicted");
-    return;
-  }
-  if (error.status === 0 || error.status === 429 || error.status >= 500) {
-    await sendProblem(request, reply, 503, "Gmail provider is unavailable");
-    return;
-  }
-  await sendProblem(request, reply, 502, "Gmail provider write failed");
-}
-
 async function enqueueProviderCatchup(
   userId: string,
   access: GmailProviderAccess,
@@ -199,7 +136,7 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         await sendProblem(request, reply, 400, "Gmail label input is invalid");
         return;
       }
-      const access = await providerAccess(request, reply);
+      const access = await getGmailProviderAccessForRequest(request, reply);
       if (!access) return;
       try {
         const created = await createGmailLabel(access.accessToken, label as GmailLabelInput);
@@ -232,7 +169,7 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         return;
       }
       const [access, label] = await Promise.all([
-        providerAccess(request, reply),
+        getGmailProviderAccessForRequest(request, reply),
         getGmailProviderLabelForUser({
           userId: session.userId,
           gmailLabelId: request.params.gmailLabelId,
@@ -277,7 +214,7 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
       const session = request.invookSession;
       if (!session) return;
       const [access, label] = await Promise.all([
-        providerAccess(request, reply),
+        getGmailProviderAccessForRequest(request, reply),
         getGmailProviderLabelForUser({
           userId: session.userId,
           gmailLabelId: request.params.gmailLabelId,
@@ -334,7 +271,7 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
       }
       const gmailLabelIds = [...new Set([...addLabelIds, ...removeLabelIds])];
       const [access, context] = await Promise.all([
-        providerAccess(request, reply),
+        getGmailProviderAccessForRequest(request, reply),
         getGmailMessageLabelMutationContext({
           userId: session.userId,
           messageId: request.params.messageId,
@@ -392,7 +329,7 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         return;
       }
       const [access, draft] = await Promise.all([
-        providerAccess(request, reply),
+        getGmailProviderAccessForRequest(request, reply),
         getGmailDraftResourceForUser({
           userId: session.userId,
           gmailDraftId: request.params.gmailDraftId,
@@ -436,7 +373,7 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
       const session = request.invookSession;
       if (!session) return;
       const [access, draft] = await Promise.all([
-        providerAccess(request, reply),
+        getGmailProviderAccessForRequest(request, reply),
         getGmailDraftResourceForUser({
           userId: session.userId,
           gmailDraftId: request.params.gmailDraftId,
@@ -473,7 +410,7 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
       const session = request.invookSession;
       if (!session) return;
       const [access, draft] = await Promise.all([
-        providerAccess(request, reply),
+        getGmailProviderAccessForRequest(request, reply),
         getAiReplyDraftForGmailSave({
           userId: session.userId,
           draftId: request.params.draftId,

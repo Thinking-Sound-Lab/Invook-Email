@@ -845,6 +845,55 @@ export const gmailDrafts = pgTable(
   ],
 );
 
+export const gmailDraftWriteOperations = pgTable(
+  "gmail_draft_write_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    operation: text("operation").$type<"create" | "update">().notNull(),
+    status: text("status").$type<"pending" | "complete">().notNull(),
+    idempotencyKey: uuid("idempotency_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    providerDraftId: text("provider_draft_id"),
+    providerMessageId: text("provider_message_id"),
+    providerThreadId: text("provider_thread_id"),
+    completedAt: timestampWithTimezone("completed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("gmail_draft_write_operations_user_key_idx").on(
+      table.userId,
+      table.idempotencyKey,
+    ),
+    index("gmail_draft_write_operations_account_status_idx").on(
+      table.accountId,
+      table.status,
+      table.createdAt,
+    ),
+    check(
+      "gmail_draft_write_operations_operation_check",
+      sql`${table.operation} in ('create', 'update')`,
+    ),
+    check(
+      "gmail_draft_write_operations_status_check",
+      sql`${table.status} in ('pending', 'complete')`,
+    ),
+    check(
+      "gmail_draft_write_operations_result_check",
+      sql`(${table.status} = 'pending' and ${table.providerDraftId} is null and ${table.providerMessageId} is null and ${table.providerThreadId} is null and ${table.completedAt} is null) or (${table.status} = 'complete' and ${table.providerDraftId} is not null and ${table.providerMessageId} is not null and ${table.providerThreadId} is not null and ${table.completedAt} is not null)`,
+    ),
+  ],
+);
+
 export const mailSyncRuns = pgTable(
   "mail_sync_runs",
   {
