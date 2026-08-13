@@ -79,7 +79,6 @@ export async function withGmailAccountControlLock<T>(
 
 async function listenForDatabaseNotifications(
   channel:
-    | "invook_jobs"
     | "invook_queue_outbox"
     | "invook_account_sync"
     | "invook_mailbox_changes",
@@ -107,10 +106,6 @@ export function listenForAccountSyncNotifications(
   onAccountSyncChanged: (payload: string) => void,
 ) {
   return listenForDatabaseNotifications("invook_account_sync", onAccountSyncChanged);
-}
-
-export function listenForJobNotifications(onJobAvailable: () => void) {
-  return listenForDatabaseNotifications("invook_jobs", onJobAvailable);
 }
 
 export function listenForMailboxChangeNotifications(

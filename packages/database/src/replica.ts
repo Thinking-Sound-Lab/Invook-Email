@@ -421,45 +421,26 @@ export async function setGmailReplicaState(
 }
 
 export async function saveGmailWatchState(
-  input: { accountId: string; watch: GmailWatchInput; scheduleRenewal: boolean },
+  input: { accountId: string; watch: GmailWatchInput; renewedAt: Date },
   database: Database = getDatabase(),
 ) {
-  await database.transaction(async (transaction) => {
-    const [account] = await transaction
-      .select({ userId: connectedAccounts.userId })
-      .from(connectedAccounts)
-      .where(eq(connectedAccounts.id, input.accountId))
-      .limit(1);
-    if (!account) throw new Error("The Gmail account was not found for watch state.");
-    await transaction
-      .insert(gmailWatchStates)
-      .values({ accountId: input.accountId, ...input.watch })
-      .onConflictDoUpdate({
-        target: gmailWatchStates.accountId,
-        set: {
-          ...input.watch,
-          status: "active",
-          lastRenewedAt: new Date(),
-          lastError: null,
-          updatedAt: new Date(),
-        },
-      });
-    if (input.scheduleRenewal) {
-      const renewAt = new Date(
-        Math.max(input.watch.expirationAt.getTime() - 24 * 60 * 60 * 1_000, Date.now()),
-      );
-      await enqueueWorkflowStep(
-        {
-          userId: account.userId,
-          accountId: input.accountId,
-          stepType: "gmail.watch.renew",
-          payload: { runAt: renewAt.toISOString() },
-          idempotencyKey: `gmail-watch-renew:${input.accountId}:${input.watch.expirationAt.toISOString()}`,
-        },
-        transaction as unknown as Database,
-      );
-    }
-  });
+  await database
+    .insert(gmailWatchStates)
+    .values({
+      accountId: input.accountId,
+      ...input.watch,
+      lastRenewedAt: input.renewedAt,
+    })
+    .onConflictDoUpdate({
+      target: gmailWatchStates.accountId,
+      set: {
+        ...input.watch,
+        status: "active",
+        lastRenewedAt: input.renewedAt,
+        lastError: null,
+        updatedAt: input.renewedAt,
+      },
+    });
 }
 
 export async function ingestGmailPushEvent(

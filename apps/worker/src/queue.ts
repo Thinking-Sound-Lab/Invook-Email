@@ -12,6 +12,8 @@ export const queueNames: QueueName[] = [
   "mail-memory-submit",
   "mail-memory-events",
   "mail-memory-feedback",
+  "mail-label-submit",
+  "mail-label-events",
 ];
 
 export type WorkflowJob = Job<WorkflowStepJob, Record<string, unknown>, string>;
