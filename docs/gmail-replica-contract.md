@@ -41,7 +41,7 @@ For a matching connected account, one PostgreSQL transaction locks replica state
 
 ## Incremental catch-up
 
-Gmail control work is serialized per account with a PostgreSQL advisory lock. A catch-up rereads the committed history cursor, applies provider history, advances the cursor in the same transaction as replica changes, and clears pending state only when the applied cursor reaches it. If a higher notification cursor commits while the worker runs, the worker continues from its new committed cursor.
+Gmail control work is serialized per account with a PostgreSQL advisory lock. A catch-up rereads the committed history cursor, applies one provider-history range, advances the cursor in the same transaction as replica changes, and clears pending state only when the applied cursor reaches it. If a higher notification cursor remains, the worker creates a distinct durable continuation step and yields the account lock; the next control job continues from the new committed cursor.
 
 History work is operation-specific:
 

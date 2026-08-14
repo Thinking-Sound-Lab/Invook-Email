@@ -7,6 +7,7 @@ import postgres from "postgres";
 import { v4 as uuidv4 } from "uuid";
 
 import {
+  createGmailHistoryContinuationStep,
   highestGmailHistoryCursor,
   applyGmailHistoryBatch,
   markGmailReplicaReady,
@@ -16,6 +17,7 @@ import {
   connectedAccounts,
   gmailReplicaStates,
   profiles,
+  queueOutbox,
   workflowSteps,
 } from "./schema";
 import * as schema from "./schema";
@@ -63,6 +65,25 @@ test("duplicate and reordered Gmail notifications retain the highest cursor", ()
   assert.equal(
     highestGmailHistoryCursor("99999999999999999999", "100000000000000000000"),
     "100000000000000000000",
+  );
+});
+
+test("each catch-up activation creates one deterministic continuation contract", () => {
+  assert.deepEqual(
+    createGmailHistoryContinuationStep({
+      userId: "11111111-1111-4111-8111-111111111111",
+      accountId: "22222222-2222-4222-8222-222222222222",
+      sourceStepId: "33333333-3333-4333-8333-333333333333",
+      pendingHistoryCursor: "150",
+    }),
+    {
+      userId: "11111111-1111-4111-8111-111111111111",
+      accountId: "22222222-2222-4222-8222-222222222222",
+      stepType: "gmail.history.catchup",
+      payload: { reason: "continuation", pendingHistoryCursor: "150" },
+      idempotencyKey:
+        "gmail-history-continuation:22222222-2222-4222-8222-222222222222:33333333-3333-4333-8333-333333333333",
+    },
   );
 });
 
@@ -125,11 +146,53 @@ test(
         );
       assert.equal(catchups.length, 2);
 
-      const applied = await applyGmailHistoryBatch(
+      const continuationSourceStepId = uuidv4();
+      const firstApplied = await applyGmailHistoryBatch(
         {
           userId,
           accountId,
           expectedCursor: "120",
+          nextCursor: "130",
+          messages: [],
+          labelChanges: [],
+          deletedMessageIds: [],
+          continuationSourceStepId,
+        },
+        database,
+      );
+      assert.equal(firstApplied.applied, true);
+      assert.equal(firstApplied.pendingHistoryCursor, "150");
+      assert.ok(firstApplied.continuationStepId);
+
+      const [continuation] = await database
+        .select({
+          id: workflowSteps.id,
+          idempotencyKey: workflowSteps.idempotencyKey,
+          payload: workflowSteps.input,
+          status: workflowSteps.status,
+        })
+        .from(workflowSteps)
+        .where(eq(workflowSteps.id, firstApplied.continuationStepId));
+      assert.deepEqual(continuation, {
+        id: firstApplied.continuationStepId,
+        idempotencyKey:
+          `gmail-history-continuation:${accountId}:${continuationSourceStepId}`,
+        payload: { reason: "continuation", pendingHistoryCursor: "150" },
+        status: "queued",
+      });
+      const continuationOutbox = await database
+        .select({ workflowStepId: queueOutbox.workflowStepId })
+        .from(queueOutbox)
+        .where(eq(queueOutbox.workflowStepId, firstApplied.continuationStepId));
+      assert.deepEqual(continuationOutbox, [
+        { workflowStepId: firstApplied.continuationStepId },
+      ]);
+
+      const secondApplied = await applyGmailHistoryBatch(
+        {
+          userId,
+          accountId,
+          expectedCursor: "130",
           nextCursor: "160",
           messages: [],
           labelChanges: [],
@@ -137,8 +200,9 @@ test(
         },
         database,
       );
-      assert.equal(applied.applied, true);
-      assert.equal(applied.pendingHistoryCursor, null);
+      assert.equal(secondApplied.applied, true);
+      assert.equal(secondApplied.pendingHistoryCursor, null);
+      assert.equal(secondApplied.continuationStepId, null);
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));
       await client.end();

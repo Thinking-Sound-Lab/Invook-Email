@@ -20,8 +20,11 @@ import {
   messages,
   threads,
 } from "./schema";
-import type { IndexedMessage } from "./types";
-import { enqueueWorkflowStep } from "./workflows";
+import type { IndexedMessage, WorkflowStepInput } from "./types";
+import {
+  enqueueWorkflowStep,
+  enqueueWorkflowStepWithExecutor,
+} from "./workflows";
 
 type DatabaseTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
@@ -807,6 +810,24 @@ export async function enqueueGmailHistoryCatchup(
   );
 }
 
+export function createGmailHistoryContinuationStep(input: {
+  userId: string;
+  accountId: string;
+  sourceStepId: string;
+  pendingHistoryCursor: string;
+}): WorkflowStepInput {
+  return {
+    userId: input.userId,
+    accountId: input.accountId,
+    stepType: "gmail.history.catchup",
+    payload: {
+      reason: "continuation",
+      pendingHistoryCursor: input.pendingHistoryCursor,
+    },
+    idempotencyKey: `gmail-history-continuation:${input.accountId}:${input.sourceStepId}`,
+  };
+}
+
 export async function enqueueGmailHistoryCatchupForUser(
   userId: string,
   database: Database = getDatabase(),
@@ -858,6 +879,7 @@ export async function applyGmailHistoryBatch(
     }>;
     deletedMessageIds: Array<{ providerMessageId: string; providerHistoryId: string | null }>;
     stateAfterApply?: "ready" | "replaying" | "repairing";
+    continuationSourceStepId?: string;
   },
   database: Database = getDatabase(),
 ): Promise<{
@@ -865,6 +887,7 @@ export async function applyGmailHistoryBatch(
   changedThreadIds: string[];
   eventId: string | null;
   pendingHistoryCursor: string | null;
+  continuationStepId: string | null;
 }> {
   return database.transaction(async (transaction) => {
     const [account] = await transaction
@@ -884,6 +907,7 @@ export async function applyGmailHistoryBatch(
         changedThreadIds: [],
         eventId: null,
         pendingHistoryCursor: null,
+        continuationStepId: null,
       };
     }
     const [replica] = await transaction
@@ -904,6 +928,7 @@ export async function applyGmailHistoryBatch(
         changedThreadIds: [],
         eventId: null,
         pendingHistoryCursor: replica.pendingHistoryCursor,
+        continuationStepId: null,
       };
     }
 
@@ -939,15 +964,16 @@ export async function applyGmailHistoryBatch(
       );
       if (result.changed && result.threadId) changedThreadIds.add(result.threadId);
     }
+    const pendingHistoryCursor =
+      replica.pendingHistoryCursor &&
+      BigInt(replica.pendingHistoryCursor) > BigInt(input.nextCursor)
+        ? replica.pendingHistoryCursor
+        : null;
     await transaction
       .update(gmailReplicaStates)
       .set({
         historyCursor: input.nextCursor,
-        pendingHistoryCursor:
-          replica.pendingHistoryCursor &&
-          BigInt(replica.pendingHistoryCursor) > BigInt(input.nextCursor)
-            ? replica.pendingHistoryCursor
-            : null,
+        pendingHistoryCursor,
         state: input.stateAfterApply ?? "ready",
         lastHistoryAt: new Date(),
         lastError: null,
@@ -967,15 +993,24 @@ export async function applyGmailHistoryBatch(
         changedThreadIds: Array.from(changedThreadIds),
       },
     });
+    const continuationStepId =
+      pendingHistoryCursor && input.continuationSourceStepId
+        ? await enqueueWorkflowStepWithExecutor(
+            createGmailHistoryContinuationStep({
+              userId: input.userId,
+              accountId: input.accountId,
+              sourceStepId: input.continuationSourceStepId,
+              pendingHistoryCursor,
+            }),
+            transaction,
+          )
+        : null;
     return {
       applied: true,
       changedThreadIds: Array.from(changedThreadIds),
       eventId,
-      pendingHistoryCursor:
-        replica.pendingHistoryCursor &&
-        BigInt(replica.pendingHistoryCursor) > BigInt(input.nextCursor)
-          ? replica.pendingHistoryCursor
-          : null,
+      pendingHistoryCursor,
+      continuationStepId,
     };
   });
 }

@@ -159,6 +159,7 @@ import {
   applyGmailHistoryWithExpiredCursorRepair,
   shouldRepairNonReadyGmailReplica,
 } from "./gmail-history-recovery";
+import { gmailHistoryCatchupDisposition } from "./gmail-history-catchup";
 import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
@@ -584,6 +585,7 @@ async function applyHistoryRange(options: {
   startHistoryId: string;
   expectedCursor: string;
   stateAfterApply?: "ready" | "replaying" | "repairing";
+  continuationSourceStepId?: string;
   ingestionMode: "initial" | "incremental";
 }) {
   let pageToken: string | undefined;
@@ -731,6 +733,7 @@ async function applyHistoryRange(options: {
         labelChanges,
         deletedMessageIds,
         stateAfterApply: options.stateAfterApply,
+        continuationSourceStepId: options.continuationSourceStepId,
       }),
   );
   if (applied.applied) {
@@ -923,67 +926,90 @@ async function repairExpiredHistory(options: {
 
 async function catchUpGmailHistory(options: {
   accountId: string;
+  sourceStepId: string;
   resumeNonReady?: boolean;
   resumeFailedReplica?: boolean;
 }) {
-  for (;;) {
-    const replica = await getGmailReplicaContext(options.accountId);
-    if (!replica) throw new Error("The Gmail replica state was not found.");
-    if (replica.state !== "ready") {
-      if (shouldRepairNonReadyGmailReplica({
-        isFailed: replica.state === "failed",
-        resumeNonReady: options.resumeNonReady,
-        resumeFailedReplica: options.resumeFailedReplica,
-      })) {
-        const { account, credential } = await getMailSyncContext(options.accountId);
-        const repair = await repairExpiredHistory({
-          accessToken: credential.accessToken,
-          userId: account.userId,
-          accountId: account.id,
-        });
-        return { status: "repair_queued", ...repair, changedThreadCount: 0 };
-      }
-      return {
-        status: "deferred",
-        state: replica.state,
-        historyCursor: replica.historyCursor,
-      };
-    }
-    const { account, credential } = await getMailSyncContext(options.accountId);
-    const expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
-    const replayOrRepair = await applyGmailHistoryWithExpiredCursorRepair({
-      apply: () => applyHistoryRange({
+  const replica = await getGmailReplicaContext(options.accountId);
+  if (!replica) throw new Error("The Gmail replica state was not found.");
+  if (replica.state !== "ready") {
+    if (shouldRepairNonReadyGmailReplica({
+      isFailed: replica.state === "failed",
+      resumeNonReady: options.resumeNonReady,
+      resumeFailedReplica: options.resumeFailedReplica,
+    })) {
+      const { account, credential } = await getMailSyncContext(options.accountId);
+      const repair = await repairExpiredHistory({
         accessToken: credential.accessToken,
         userId: account.userId,
         accountId: account.id,
-        accountEmail: account.email,
-        startHistoryId: expectedCursor,
-        expectedCursor,
-        stateAfterApply: "ready",
-        ingestionMode: "incremental",
-      }),
-      repair: () => repairExpiredHistory({
-        accessToken: credential.accessToken,
-        userId: account.userId,
-        accountId: account.id,
-      }),
-    });
-    if (replayOrRepair.outcome === "repaired") {
-      return {
-        status: "repair_queued",
-        ...replayOrRepair.result,
-        changedThreadCount: 0,
-      };
+      });
+      return { status: "repair_queued", ...repair, changedThreadCount: 0 };
     }
-    const replay = replayOrRepair.result;
-    if (!replay.applied) continue;
-    if (replay.pendingHistoryCursor) continue;
     return {
-      status: "complete",
+      status: "deferred",
+      state: replica.state,
+      historyCursor: replica.historyCursor,
+    };
+  }
+  const { account, credential } = await getMailSyncContext(options.accountId);
+  const expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
+  const replayOrRepair = await applyGmailHistoryWithExpiredCursorRepair({
+    apply: () => applyHistoryRange({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+      accountEmail: account.email,
+      startHistoryId: expectedCursor,
+      expectedCursor,
+      stateAfterApply: "ready",
+      ingestionMode: "incremental",
+      continuationSourceStepId: options.sourceStepId,
+    }),
+    repair: () => repairExpiredHistory({
+      accessToken: credential.accessToken,
+      userId: account.userId,
+      accountId: account.id,
+    }),
+  });
+  if (replayOrRepair.outcome === "repaired") {
+    return {
+      status: "repair_queued",
+      ...replayOrRepair.result,
+      changedThreadCount: 0,
+    };
+  }
+  const replay = replayOrRepair.result;
+  const disposition = gmailHistoryCatchupDisposition(replay);
+  if (disposition === "superseded") {
+    return {
+      status: "superseded",
       historyCursor: replay.historyId,
+      changedThreadCount: 0,
+    };
+  }
+  if (disposition === "continue_durably") {
+    const pendingHistoryCursor = replay.pendingHistoryCursor;
+    if (!pendingHistoryCursor) {
+      throw new Error("The Gmail history continuation cursor is missing.");
+    }
+    const continuationStepId = replay.continuationStepId;
+    if (!continuationStepId) {
+      throw new Error("The Gmail history continuation step is missing.");
+    }
+    return {
+      status: "continued",
+      historyCursor: replay.historyId,
+      pendingHistoryCursor,
+      continuationStepId,
       changedThreadCount: replay.changedThreadIds.length,
     };
   }
+  return {
+    status: "complete",
+    historyCursor: replay.historyId,
+    changedThreadCount: replay.changedThreadIds.length,
+  };
 }
 
 async function runGmailFinalize(job: WorkflowStepJob) {
@@ -1071,6 +1097,7 @@ async function runGmailHistoryCatchup(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The Gmail history job has no account.");
   const result = await catchUpGmailHistory({
     accountId: job.accountId,
+    sourceStepId: job.id,
     resumeNonReady: job.attempts > 1,
   });
   if (result.status === "complete" && typeof result.historyCursor === "string") {
@@ -1090,6 +1117,7 @@ async function runGmailWatchRenewal(job: WorkflowStepJob) {
     renew: () => renewGmailWatch(account.id, credential.accessToken),
     catchUp: () => catchUpGmailHistory({
       accountId: account.id,
+      sourceStepId: job.id,
       resumeNonReady: job.attempts > 1,
       resumeFailedReplica: true,
     }),
