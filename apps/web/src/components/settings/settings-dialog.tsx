@@ -31,6 +31,7 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { useAccountSyncStore } from "@/stores/account-sync/store";
 
 import { LabelSettings } from "./label-settings";
 import { MemorySettings } from "./memory-settings";
@@ -107,9 +108,9 @@ function BillingSettings() {
         <span className="mx-auto grid size-10 place-items-center rounded-xl bg-secondary text-muted-foreground">
           <HugeiconsIcon icon={CreditCardIcon} size={18} />
         </span>
-        <p className="mt-4 text-sm font-semibold">No billing plan is configured</p>
+        <p className="mt-4 text-sm font-semibold">Billing details are unavailable</p>
         <p className="mx-auto mt-1.5 max-w-sm text-sm leading-6 text-muted-foreground">
-          This installation has no billing provider or paid plan attached.
+          This build does not expose a billing provider or plan status yet.
         </p>
       </div>
     </section>
@@ -134,6 +135,9 @@ export function SettingsDialog({
   triggerClassName,
 }: SettingsDialogProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const liveMemoryState = useAccountSyncStore(
+    (state) => state.progress?.memory,
+  );
 
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
@@ -193,7 +197,7 @@ export function SettingsDialog({
           <TabsContent value="memory" className="min-h-0 overflow-y-auto">
             <MemorySettings
               memories={memories}
-              syncState={account.syncState.memory}
+              syncState={liveMemoryState ?? account.syncState.memory}
               aiConfigured={aiConfigured}
             />
           </TabsContent>
