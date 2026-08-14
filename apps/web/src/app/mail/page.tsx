@@ -7,7 +7,6 @@ import { validate as validateUuid } from "uuid";
 import { mailboxViews } from "@invook/contracts";
 
 import { AgentPanel } from "@/components/mail/agent-panel";
-import { AccountSyncEventSubscriber } from "@/components/mail/account-sync-event-subscriber";
 import { ComposeSurface } from "@/components/mail/compose-surface";
 import { MailList } from "@/components/mail/mail-list";
 import { MailboxEventSubscriber } from "@/components/mail/mailbox-event-subscriber";
@@ -25,7 +24,6 @@ import {
   PendingSurface,
   SearchResultsSurface,
   SearchSurface,
-  SettingsSurface,
 } from "@/components/mail/workspace-surface";
 import { getMailboxWorkspace, searchMailbox } from "@/lib/api";
 
@@ -45,7 +43,6 @@ const mailSurfaces = new Set<MailSurface>([
   "mail",
   "compose",
   "search",
-  "settings",
   "automations",
 ]);
 
@@ -151,16 +148,6 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     centerPane = <SearchSurface />;
   } else if (currentSurface === "search" && query) {
     centerPane = <SearchResultsSurface query={query} results={searchResults} />;
-  } else if (currentSurface === "settings") {
-    centerPane = (
-      <SettingsSurface
-        memories={workspace.memories}
-        syncState={workspace.account.syncState.memory}
-        aiConfigured={workspace.aiConfigured}
-        labels={workspace.labels}
-        batchConfigured={workspace.batchConfigured}
-      />
-    );
   } else if (currentSurface === "automations") {
     centerPane = <PendingSurface />;
   } else {
@@ -181,15 +168,16 @@ export default async function MailPage({ searchParams }: MailPageProps) {
 
   return (
     <main className="h-dvh overflow-hidden bg-background">
-      <AccountSyncEventSubscriber />
       <MailboxEventSubscriber />
       <div className="grid h-full grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
         <MailSidebar
-          email={workspace.account.email}
+          account={workspace.account}
           currentView={currentView}
           currentSurface={currentSurface}
-          syncProgress={workspace.account.mailSyncProgress}
+          memories={workspace.memories}
           labels={workspace.labels}
+          aiConfigured={workspace.aiConfigured}
+          batchConfigured={workspace.batchConfigured}
         />
         <div
           data-slot="mail-workspace-content"
@@ -202,7 +190,6 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           openThreadId={selectedThread?.id}
           openThreadSubject={selectedThread?.subject || undefined}
           aiConfigured={workspace.aiConfigured}
-          indexingProgress={workspace.account.indexingProgress}
         />
       </div>
     </main>

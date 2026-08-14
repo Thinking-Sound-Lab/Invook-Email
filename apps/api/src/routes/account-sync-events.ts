@@ -2,6 +2,7 @@ import type { FastifyPluginAsync, FastifyReply } from "fastify";
 
 import type { AccountSyncStatusEvent } from "@invook/contracts";
 import {
+  getAccountSyncStateForAccount,
   getIndexingProgressForAccount,
   getIndexingProgressForUser,
   getMailSyncProgressForAccount,
@@ -33,15 +34,18 @@ export const registerAccountSyncEventRoutes: FastifyPluginAsync = async (api) =>
   const getDurableProgress = async (
     accountId: string,
   ): Promise<AccountSyncStatusEvent | null> => {
-    const [mailSync, indexing] = await Promise.all([
+    const [mailSync, indexing, syncState] = await Promise.all([
       getMailSyncProgressForAccount({ accountId }),
       getIndexingProgressForAccount({
         accountId,
         modelId,
         indexVersion: MAIL_INDEX_VERSION,
       }),
+      getAccountSyncStateForAccount({ accountId }),
     ]);
-    return mailSync && indexing ? { mailSync, indexing } : null;
+    return mailSync && indexing && syncState
+      ? { mailSync, indexing, memory: syncState.memory }
+      : null;
   };
   const broadcastDurableProgress = async (accountId: string) => {
     const progress = await getDurableProgress(accountId);
@@ -87,10 +91,11 @@ export const registerAccountSyncEventRoutes: FastifyPluginAsync = async (api) =>
         await sendProblem(request, reply, 404, "Connected Gmail account not found");
         return;
       }
-      const mailSync = await getMailSyncProgressForAccount({
-        accountId: indexing.accountId,
-      });
-      if (!mailSync) {
+      const [mailSync, syncState] = await Promise.all([
+        getMailSyncProgressForAccount({ accountId: indexing.accountId }),
+        getAccountSyncStateForAccount({ accountId: indexing.accountId }),
+      ]);
+      if (!mailSync || !syncState) {
         await sendProblem(request, reply, 404, "Connected Gmail account not found");
         return;
       }
@@ -114,7 +119,11 @@ export const registerAccountSyncEventRoutes: FastifyPluginAsync = async (api) =>
       };
       request.raw.once("close", removeStream);
       reply.raw.once("close", removeStream);
-      writeEvent(reply.raw, { mailSync, indexing: indexing.progress });
+      writeEvent(reply.raw, {
+        mailSync,
+        indexing: indexing.progress,
+        memory: syncState.memory,
+      });
     },
   );
 };

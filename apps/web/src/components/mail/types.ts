@@ -13,7 +13,7 @@ export type StaticMailboxView = Exclude<
 
 export type MailboxView = ContractMailboxView | `label:${string}`;
 
-export type MailSurface = "mail" | "compose" | "search" | "settings" | "automations";
+export type MailSurface = "mail" | "compose" | "search" | "automations";
 
 export type MailThreadSummary = MailboxThreadSummary;
 export type ThreadMessage = MailboxThreadMessage;

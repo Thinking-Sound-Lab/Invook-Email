@@ -4,16 +4,9 @@ import {
   WorkflowSquare01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type {
-  AccountSyncStage,
-  MailLabel,
-  MailSearchResult,
-  MemoryEntry,
-} from "@invook/contracts";
+import type { MailSearchResult } from "@invook/contracts";
 import Link from "next/link";
 
-import { MemorySettings } from "@/components/settings/memory-settings";
-import { LabelSettings } from "@/components/settings/label-settings";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SurfaceHeader } from "@/components/mail/surface-header";
@@ -113,36 +106,6 @@ export function SearchResultsSurface({
             ))}
           </div>
         )}
-      </div>
-    </section>
-  );
-}
-
-export interface SettingsSurfaceProps {
-  memories: MemoryEntry[];
-  syncState: AccountSyncStage;
-  aiConfigured: boolean;
-  labels: MailLabel[];
-  batchConfigured: boolean;
-}
-
-export function SettingsSurface({
-  memories,
-  syncState,
-  aiConfigured,
-  labels,
-  batchConfigured,
-}: SettingsSurfaceProps) {
-  return (
-    <section className="flex min-h-0 flex-col bg-background">
-      <SurfaceHeader title="Settings" />
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <LabelSettings labels={labels} batchConfigured={batchConfigured} />
-        <MemorySettings
-          memories={memories}
-          syncState={syncState}
-          aiConfigured={aiConfigured}
-        />
       </div>
     </section>
   );

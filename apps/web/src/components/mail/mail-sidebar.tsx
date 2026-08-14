@@ -1,6 +1,5 @@
 import {
   Airplane01Icon,
-  CloudSyncIcon,
   Delete02Icon,
   FileEditIcon,
   HonourStarIcon,
@@ -12,33 +11,38 @@ import {
   PencilEdit01Icon,
   Search02Icon,
   SentIcon,
-  Settings01Icon,
   StarIcon,
   Tag01Icon,
   WorkflowSquare01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
+  MailboxAccount,
   MailLabel,
-  MailSyncProgress,
+  MemoryEntry,
   SystemLabelKey,
 } from "@invook/contracts";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
+import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { cn } from "@/lib/utils";
 
+import { AccountPipelineProgress } from "./account-pipeline-progress";
 import { initials } from "./mail-format";
-import { getGmailSyncProgressPresentation } from "./gmail-sync-progress";
+import { MailNavigationPending } from "./mail-navigation-pending";
 import type { MailboxView, MailSurface } from "./types";
 
 const workspaceItems = [
   { label: "Compose", icon: PencilEdit01Icon, surface: "compose" },
   { label: "Search", icon: Search02Icon, surface: "search" },
-  { label: "Settings", icon: Settings01Icon, surface: "settings" },
-  { label: "Automations", icon: WorkflowSquare01Icon, surface: "automations" },
 ] as const;
+
+const automationsItem = {
+  label: "Automations",
+  icon: WorkflowSquare01Icon,
+  surface: "automations",
+} as const;
 
 const labelIcons = {
   important: HonourStarIcon,
@@ -61,6 +65,14 @@ interface NavLinkProps {
   href: string;
 }
 
+function navItemClassName(active: boolean): string {
+  return cn(
+    "group flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-sm font-medium text-sidebar-foreground/58 transition-colors",
+    "hover:bg-sidebar-accent/70 hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+    active && "bg-sidebar-accent text-sidebar-foreground",
+  );
+}
+
 function NavLink({
   label,
   icon,
@@ -71,89 +83,43 @@ function NavLink({
     <Link
       href={href}
       aria-current={active ? "page" : undefined}
-      className={cn(
-        "group flex h-9 items-center gap-2.5 rounded-md px-2.5 text-sm font-medium text-sidebar-foreground/58 transition-colors",
-        "hover:bg-sidebar-accent/70 hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
-        active && "bg-sidebar-accent text-sidebar-foreground",
-      )}
+      className={navItemClassName(active)}
     >
       <HugeiconsIcon icon={icon} size={15} strokeWidth={1.65} className="shrink-0" />
       <span className="hidden truncate lg:block">{label}</span>
+      <MailNavigationPending />
     </Link>
   );
 }
 
-interface GmailSyncProgressProps {
-  progress: MailSyncProgress;
-}
-
-function GmailSyncProgress({ progress }: GmailSyncProgressProps) {
-  const presentation = getGmailSyncProgressPresentation(progress);
-  if (!presentation) return null;
-  const { title, detail, percentage, isFailed } = presentation;
-
-  return (
-    <div
-      role={isFailed ? "alert" : "status"}
-      aria-live="polite"
-      className="hidden px-2 pb-1 lg:block"
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          <HugeiconsIcon
-            icon={CloudSyncIcon}
-            size={14}
-            strokeWidth={1.7}
-            className={cn(
-              "shrink-0 text-primary",
-              isFailed && "text-destructive",
-            )}
-          />
-          <p className="truncate text-[13px] font-semibold text-sidebar-foreground">{title}</p>
-        </div>
-        {percentage !== null ? (
-          <span className="text-xs tabular-nums text-sidebar-foreground/55">
-            {percentage}%
-          </span>
-        ) : null}
-      </div>
-      <Progress
-        value={percentage}
-        aria-label={title}
-        className={cn(
-          "mt-2 h-1 bg-sidebar-accent",
-          isFailed && "[&_[data-slot=progress-indicator]]:bg-destructive",
-        )}
-      />
-      <p className="mt-2 text-xs leading-4 text-sidebar-foreground/48">{detail}</p>
-    </div>
-  );
-}
-
 export interface MailSidebarProps {
-  email: string;
+  account: MailboxAccount;
   currentView: MailboxView;
   currentSurface: MailSurface;
-  syncProgress: MailSyncProgress;
+  memories: MemoryEntry[];
   labels: MailLabel[];
+  aiConfigured: boolean;
+  batchConfigured: boolean;
 }
 
 export function MailSidebar({
-  email,
+  account,
   currentView,
   currentSurface,
-  syncProgress,
+  memories,
   labels,
+  aiConfigured,
+  batchConfigured,
 }: MailSidebarProps) {
   return (
     <aside className="flex min-h-0 flex-col bg-sidebar px-2 py-3 lg:px-3" aria-label="Mailbox navigation">
       <div className="flex h-11 items-center gap-2.5 px-1.5 lg:px-2">
         <span className="grid size-8 shrink-0 place-items-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-foreground">
-          {initials(email)}
+          {initials(account.email)}
         </span>
         <div className="hidden min-w-0 flex-1 lg:block">
           <p className="truncate text-sm font-semibold text-sidebar-foreground">Invook</p>
-          <p className="truncate text-xs text-sidebar-foreground/45">{email}</p>
+          <p className="truncate text-xs text-sidebar-foreground/45">{account.email}</p>
         </div>
         <form action="/v1/auth/sign-out" method="post" className="hidden lg:block">
           <Button
@@ -178,6 +144,20 @@ export function MailSidebar({
             href={`/mail?surface=${item.surface}`}
           />
         ))}
+        <SettingsDialog
+          account={account}
+          memories={memories}
+          labels={labels}
+          aiConfigured={aiConfigured}
+          batchConfigured={batchConfigured}
+          triggerClassName={navItemClassName(false)}
+        />
+        <NavLink
+          label={automationsItem.label}
+          icon={automationsItem.icon}
+          active={currentSurface === automationsItem.surface}
+          href={`/mail?surface=${automationsItem.surface}`}
+        />
       </nav>
 
       <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
@@ -221,7 +201,13 @@ export function MailSidebar({
         </nav>
       </div>
 
-      <GmailSyncProgress progress={syncProgress} />
+      <AccountPipelineProgress
+        initialProgress={{
+          mailSync: account.mailSyncProgress,
+          indexing: account.indexingProgress,
+          memory: account.syncState.memory,
+        }}
+      />
     </aside>
   );
 }

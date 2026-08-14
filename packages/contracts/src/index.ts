@@ -28,6 +28,7 @@ export type MailSyncProgress = {
 export type AccountSyncStatusEvent = {
   mailSync: MailSyncProgress;
   indexing: IndexingProgress;
+  memory: AccountSyncStage;
 };
 
 export const mailboxViews = [
