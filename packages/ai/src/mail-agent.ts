@@ -1,9 +1,5 @@
-import type {
-  MailboxActionProposal,
-  MailboxQueryResult,
-  MailSearchResult,
-} from "@invook/contracts";
-import { isStepCount, jsonSchema, tool, ToolLoopAgent, zodSchema } from "ai";
+import type { MailboxQueryResult, MailSearchResult } from "@invook/contracts";
+import { isStepCount, tool, ToolLoopAgent } from "ai";
 import { z } from "zod";
 
 import { getAiModel } from "./model";
@@ -45,10 +41,6 @@ export type MailAgentOperations = {
     instruction?: string,
   ): Promise<{ draftId: string; threadId: string; text: string }>;
   queryInvookMailbox(input: QueryInvookMailboxInput): Promise<MailboxQueryResult>;
-  proposeMailboxAction(
-    input: ProposeMailboxActionInput,
-    toolCallId: string,
-  ): Promise<MailboxActionProposal>;
 };
 
 const isoDateTimeSchema = z.string().refine(
@@ -71,53 +63,9 @@ export const queryInvookMailboxInputSchema = z
   })
   .strict();
 
-const messageActionSchema = z
-  .object({
-    operation: z.enum(["archive", "mark_read", "mark_unread", "trash"]),
-    messageIds: z.array(z.string().uuid()).min(1).max(100),
-  })
-  .strict();
-
-const labelActionSchema = z
-  .object({
-    operation: z.enum(["apply_gmail_label", "remove_gmail_label"]),
-    messageIds: z.array(z.string().uuid()).min(1).max(100),
-    gmailLabelId: z.string().uuid(),
-  })
-  .strict();
-
-const saveDraftActionSchema = z
-  .object({
-    operation: z.literal("save_draft_to_gmail"),
-    draftId: z.string().uuid(),
-  })
-  .strict();
-
-export const proposeMailboxActionInputSchema = z.discriminatedUnion("operation", [
-  messageActionSchema,
-  labelActionSchema,
-  saveDraftActionSchema,
-]);
-
 export type QueryInvookMailboxInput = z.infer<
   typeof queryInvookMailboxInputSchema
 >;
-export type ProposeMailboxActionInput = z.infer<
-  typeof proposeMailboxActionInputSchema
->;
-
-const proposeMailboxActionZodInputSchema = zodSchema(
-  proposeMailboxActionInputSchema,
-);
-
-export const proposeMailboxActionToolInputSchema =
-  jsonSchema<ProposeMailboxActionInput>(
-    async () => ({
-      ...(await proposeMailboxActionZodInputSchema.jsonSchema),
-      type: "object",
-    }),
-    { validate: proposeMailboxActionZodInputSchema.validate },
-  );
 
 export function createMailAgentInstructions(context?: {
   currentThreadId: string;
@@ -131,9 +79,7 @@ export function createMailAgentInstructions(context?: {
     "A semantic-only search result is a candidate, not proof. Inspect the thread and claim a match only when stored text or attachment metadata supports it.",
     "Use draftReply only when the user asks to draft or write a reply. Clearly identify the saved draft and its thread.",
     "For structured mailbox selection, use queryInvookMailbox. It resolves only against Invook's fully synchronized local PostgreSQL replica and returns exact local IDs. Never invent, transform, or guess target IDs.",
-    "For archive, read-state, trash, Gmail-label, or save-to-Gmail-draft requests, first resolve the exact local targets, then use proposeMailboxAction. That tool only creates a proposal and never performs a provider write.",
-    "A user's natural-language request is not approval. Every proposed Gmail mutation must wait for the user to click Approve on the proposal card. Never claim a proposal executed.",
-    "Do not send email. Creating or editing a local Invook reply draft does not require provider approval, but saving that draft to Gmail does.",
+    "Do not send email or mutate Gmail. Creating or editing a local Invook reply draft is allowed only when requested.",
     "If the tools do not return evidence, say that the mailbox search did not find it. Do not invent mail, attachments, facts, or actions.",
     context
       ? `The currently open mailbox thread ID is ${context.currentThreadId}. Treat references such as this thread as that thread.`
@@ -183,13 +129,6 @@ export function createMailAgent(
           "Query exact messages and available label IDs in the authenticated user's fully synchronized local Invook replica by stored search text, Gmail or Invook labels, Inbox/read state, sender, date range, and cursor.",
         inputSchema: queryInvookMailboxInputSchema,
         execute: (input) => operations.queryInvookMailbox(input),
-      }),
-      proposeMailboxAction: tool({
-        description:
-          "Persist a non-executing Gmail mutation proposal for exact local message IDs or one existing AI draft ID. This never writes to Gmail; the user must approve the returned proposal card.",
-        inputSchema: proposeMailboxActionToolInputSchema,
-        execute: (input, { toolCallId }) =>
-          operations.proposeMailboxAction(input, toolCallId),
       }),
     },
   });

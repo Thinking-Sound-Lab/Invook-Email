@@ -7,7 +7,6 @@ export type IndexingPrerequisiteState = {
     | "pending"
     | "snapshotting"
     | "replaying"
-    | "auditing"
     | "ready"
     | "repairing"
     | "failed"

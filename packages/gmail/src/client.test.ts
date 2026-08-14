@@ -7,9 +7,11 @@ import {
   GmailApiError,
   GMAIL_MESSAGE_LIST_MAX_RESULTS,
   getGmailMessage,
+  getGmailMessageState,
   isGoogleReauthenticationRequired,
   listGmailDrafts,
   listGmailMessages,
+  modifyGmailThreadLabels,
   sendGmailDraft,
 } from "./client";
 
@@ -52,6 +54,17 @@ test("each listed Gmail message is fetched as raw MIME", async () => {
   assert.equal(request.baseURL, "https://gmail.googleapis.com/gmail/v1");
   assert.equal(url.pathname, "/users/me/messages/message%2Fwith%20spaces");
   assert.equal(url.searchParams.get("format"), "raw");
+});
+
+test("label-only history reads minimal state without downloading raw MIME", async () => {
+  requests.length = 0;
+  await getGmailMessageState("access-token", "label-only-message");
+
+  const request = requests[0];
+  assert.ok(request);
+  const url = new URL(request.url ?? "", request.baseURL);
+  assert.equal(url.pathname, "/users/me/messages/label-only-message");
+  assert.equal(url.searchParams.get("format"), "minimal");
 });
 
 test("a rejected Google refresh token requires immediate reauthentication", () => {
@@ -117,4 +130,22 @@ test("sending uses Gmail's existing-draft endpoint and provider draft identity",
   assert.equal(url.pathname, "/users/me/drafts/send");
   assert.equal(request.method, "POST");
   assert.deepEqual(request.data, { id: "provider-draft" });
+});
+
+test("thread label writes use Gmail's authoritative thread endpoint", async () => {
+  requests.length = 0;
+  await modifyGmailThreadLabels("access-token", "thread/with spaces", {
+    addLabelIds: ["STARRED"],
+    removeLabelIds: ["INBOX"],
+  });
+
+  const request = requests[0];
+  assert.ok(request);
+  const url = new URL(request.url ?? "", request.baseURL);
+  assert.equal(url.pathname, "/users/me/threads/thread%2Fwith%20spaces/modify");
+  assert.equal(request.method, "POST");
+  assert.deepEqual(request.data, {
+    addLabelIds: ["STARRED"],
+    removeLabelIds: ["INBOX"],
+  });
 });

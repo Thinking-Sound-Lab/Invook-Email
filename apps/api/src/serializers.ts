@@ -45,8 +45,6 @@ export async function serializeWorkspace(
       replica: {
         state: workspace.account.replicaState,
         readyAt: workspace.account.replicaReadyAt?.toISOString() ?? null,
-        lastAuditAt:
-          workspace.account.replicaLastAuditAt?.toISOString() ?? null,
       },
     },
     memories: workspace.memories,
@@ -99,15 +97,15 @@ export function serializeMemoryEntry(memory: {
 
 export function serializeReplyDraft(draft: {
   id: string;
-  threadId: string;
+  threadId: string | null;
   status: AiReplyDraft["status"];
   generatedText: string | null;
   currentText: string;
   usedMemoryIds: string[];
   updatedAt: Date;
 }): AiReplyDraft {
-  if (!draft.generatedText) {
-    throw new Error("A generated draft is missing its generated text.");
+  if (!draft.threadId || !draft.generatedText) {
+    throw new Error("A generated draft is missing its local thread contract.");
   }
   return {
     id: draft.id,

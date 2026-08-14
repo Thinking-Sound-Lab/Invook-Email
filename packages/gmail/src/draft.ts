@@ -64,6 +64,7 @@ export function composePlainTextGmailReply(input: {
   accountEmail: string;
   subject: string;
   currentText: string;
+  messageId?: string;
   replyTarget: {
     sender: { raw: string; email: string };
     headerLines: HeaderLine[];
@@ -90,6 +91,11 @@ export function composePlainTextGmailReply(input: {
     `From: ${sender}`,
     `To: ${recipient}`,
     `Subject: ${replySubject(input.subject)}`,
+    ...(input.messageId
+      ? [
+          `Message-ID: <${safeHeaderValue(input.messageId).replace(/^<|>$/g, "")}>`,
+        ]
+      : []),
     ...(messageId ? [`In-Reply-To: ${messageId}`] : []),
     ...(references ? [`References: ${references}`] : []),
     "MIME-Version: 1.0",

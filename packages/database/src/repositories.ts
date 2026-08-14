@@ -13,6 +13,7 @@ import {
   and,
   asc,
   count,
+  countDistinct,
   desc,
   eq,
   gt,
@@ -45,19 +46,12 @@ import { enqueueDailyGmailWatchRenewal } from "./gmail-watch";
 import { deriveMailSyncProgress } from "./mail-sync-progress";
 import {
   accountSecrets,
-  auditEvents,
   connectedAccounts,
   drafts,
   embeddingBatchSubmissions,
-  gmailDrafts,
-  gmailLabels,
-  gmailMessageLabels,
-  gmailMessageTombstones,
-  gmailPushEvents,
-  gmailReplicaAudits,
   gmailReplicaStates,
   gmailWatchStates,
-  mailLabels,
+  labels,
   mailboxChangeEvents,
   mailSyncRuns,
   memoryDeletions,
@@ -67,8 +61,8 @@ import {
   messageEmbeddings,
   messages,
   profiles,
-  threadLabels,
-  threadLabelAnalyses,
+  messageLabels,
+  messageLabelDecisions,
   threads,
   workflowSteps,
 } from "./schema";
@@ -79,6 +73,7 @@ import type {
 } from "./types";
 import {
   createInitialMailSyncRun,
+  createRepairMailSyncRun,
   enqueueWorkflowStep,
   enqueueWorkflowStepWithExecutor,
   enqueueWorkflowStepsWithExecutor,
@@ -177,10 +172,10 @@ function mailboxViewCondition(view: MailboxView) {
     const labelId = view.slice(6);
     return sql<boolean>`exists (
       select 1
-      from ${threadLabels}
-      where ${threadLabels.threadId} = ${threads.id}
-        and ${threadLabels.labelId} = ${labelId}::uuid
-        and ${threadLabels.state} = 'applied'
+      from ${messages}
+      inner join ${messageLabels} on ${messageLabels.messageId} = ${messages.id}
+      where ${messages.threadId} = ${threads.id}
+        and ${messageLabels.labelId} = ${labelId}::uuid
     )`;
   }
   switch (view) {
@@ -192,11 +187,12 @@ function mailboxViewCondition(view: MailboxView) {
     case "newsletter":
       return sql<boolean>`exists (
         select 1
-        from ${threadLabels}
-        inner join ${mailLabels} on ${mailLabels.id} = ${threadLabels.labelId}
-        where ${threadLabels.threadId} = ${threads.id}
-          and ${mailLabels.systemKey} = ${view}
-          and ${threadLabels.state} = 'applied'
+        from ${messages}
+        inner join ${messageLabels} on ${messageLabels.messageId} = ${messages.id}
+        inner join ${labels} on ${labels.id} = ${messageLabels.labelId}
+        where ${messages.threadId} = ${threads.id}
+          and ${labels.kind} = 'invook'
+          and ${labels.systemKey} = ${view}
       )`;
     case "starred":
     case "drafts":
@@ -206,12 +202,13 @@ function mailboxViewCondition(view: MailboxView) {
       return sql<boolean>`exists (
         select 1
         from ${messages}
-        inner join ${gmailMessageLabels}
-          on ${gmailMessageLabels.messageId} = ${messages.id}
-        inner join ${gmailLabels}
-          on ${gmailLabels.id} = ${gmailMessageLabels.gmailLabelId}
+        inner join ${messageLabels}
+          on ${messageLabels.messageId} = ${messages.id}
+        inner join ${labels}
+          on ${labels.id} = ${messageLabels.labelId}
         where ${messages.threadId} = ${threads.id}
-          and ${gmailLabels.providerLabelId} = ${providerLabelId}
+          and ${labels.kind} = 'gmail'
+          and ${labels.providerLabelId} = ${providerLabelId}
       )`;
     }
   }
@@ -452,13 +449,11 @@ async function saveReturningGmailAuthentication(
   });
 
   if (authenticationAction === "repair") {
-    await enqueueWorkflowStep(
+    await createRepairMailSyncRun(
       {
         userId: input.userId,
         accountId: account.id,
-        stepType: "gmail.replica.audit",
-        payload: { reason: "oauth_reauthentication" },
-        idempotencyKey: `gmail-reconnect-recovery:${account.id}:${input.authenticatedAt.toISOString()}`,
+        startingHistoryCursor: input.currentHistoryId,
       },
       transaction as unknown as Database,
     );
@@ -487,15 +482,6 @@ async function saveReturningGmailAuthentication(
       );
     }
   }
-
-  await transaction.insert(auditEvents).values({
-    userId: input.userId,
-    accountId: account.id,
-    eventType: "gmail.reauthenticated",
-    targetType: "connected_account",
-    targetId: account.id,
-    metadata: { scopes: input.scopes },
-  });
   return { id: account.id };
 }
 
@@ -566,10 +552,11 @@ export async function saveNewGmailConnection(
         ...input.watch,
         lastRenewedAt: input.authenticatedAt,
       });
-    await transaction.insert(mailLabels).values(
+    await transaction.insert(labels).values(
       systemLabelDefinitions.map((definition) => ({
         userId: input.userId,
         accountId: account.id,
+        kind: "invook" as const,
         name: definition.name,
         normalizedName: definition.name.toLowerCase(),
         description: definition.description,
@@ -597,19 +584,6 @@ export async function saveNewGmailConnection(
       },
       transaction as unknown as Database,
     );
-
-    await transaction.insert(auditEvents).values({
-      userId: input.userId,
-      accountId: account.id,
-      eventType: "gmail.connected",
-      targetType: "connected_account",
-      targetId: account.id,
-      metadata: {
-        scopes: input.scopes,
-        initialHistoryId: input.initialHistoryId,
-        watchExpiration: input.watch.expirationAt.toISOString(),
-      },
-    });
 
     return { ...account, created: true };
   });
@@ -647,7 +621,6 @@ export async function getMailboxSetupSummary(
       lastSyncedAt: connectedAccounts.lastSyncedAt,
       replicaState: gmailReplicaStates.state,
       replicaReadyAt: gmailReplicaStates.readyAt,
-      replicaLastAuditAt: gmailReplicaStates.lastAuditAt,
     })
     .from(connectedAccounts)
     .innerJoin(
@@ -1088,7 +1061,6 @@ export async function getMailboxWorkspace(
       lastSyncedAt: connectedAccounts.lastSyncedAt,
       replicaState: gmailReplicaStates.state,
       replicaReadyAt: gmailReplicaStates.readyAt,
-      replicaLastAuditAt: gmailReplicaStates.lastAuditAt,
     })
     .from(connectedAccounts)
     .innerJoin(
@@ -1203,39 +1175,44 @@ export async function getMailboxWorkspace(
       ),
     database
       .select({
-        id: mailLabels.id,
-        name: mailLabels.name,
-        description: mailLabels.description,
-        systemKey: mailLabels.systemKey,
-        definitionVersion: mailLabels.definitionVersion,
-        analysisState: mailLabels.analysisState,
-        createdAt: mailLabels.createdAt,
+        id: labels.id,
+        name: labels.name,
+        description: labels.description,
+        systemKey: labels.systemKey,
+        definitionVersion: labels.definitionVersion,
+        analysisState: labels.analysisState,
+        createdAt: labels.createdAt,
       })
-      .from(mailLabels)
+      .from(labels)
       .where(
-        and(eq(mailLabels.userId, userId), eq(mailLabels.accountId, account.id)),
+        and(
+          eq(labels.userId, userId),
+          eq(labels.accountId, account.id),
+          eq(labels.kind, "invook"),
+        ),
       )
-      .orderBy(asc(mailLabels.createdAt), asc(mailLabels.name)),
+      .orderBy(asc(labels.createdAt), asc(labels.name)),
     database
       .select({ value: count(threads.id) })
       .from(threads)
       .where(and(eq(threads.userId, userId), eq(threads.accountId, account.id))),
     database
       .select({
-        labelId: threadLabelAnalyses.labelId,
-        definitionVersion: threadLabelAnalyses.definitionVersion,
-        value: count(threadLabelAnalyses.id),
+        labelId: messageLabelDecisions.labelId,
+        definitionVersion: messageLabelDecisions.definitionVersion,
+        value: countDistinct(messages.threadId),
       })
-      .from(threadLabelAnalyses)
+      .from(messageLabelDecisions)
+      .innerJoin(messages, eq(messages.id, messageLabelDecisions.messageId))
       .where(
         and(
-          eq(threadLabelAnalyses.userId, userId),
-          eq(threadLabelAnalyses.accountId, account.id),
+          eq(messageLabelDecisions.userId, userId),
+          eq(messageLabelDecisions.accountId, account.id),
         ),
       )
       .groupBy(
-        threadLabelAnalyses.labelId,
-        threadLabelAnalyses.definitionVersion,
+        messageLabelDecisions.labelId,
+        messageLabelDecisions.definitionVersion,
       ),
     selectedThreadPromise,
   ]);
@@ -1304,37 +1281,50 @@ export async function getMailboxWorkspace(
     ? await Promise.all([
         database
           .select({
-            threadId: threadLabels.threadId,
-            labelId: threadLabels.labelId,
-            name: mailLabels.name,
-            systemKey: mailLabels.systemKey,
-            source: threadLabels.source,
-            confidence: threadLabels.confidence,
+            threadId: messages.threadId,
+            labelId: messageLabels.labelId,
+            name: labels.name,
+            systemKey: labels.systemKey,
+            source: messageLabels.source,
+            confidence: messageLabelDecisions.confidence,
           })
-          .from(threadLabels)
-          .innerJoin(mailLabels, eq(mailLabels.id, threadLabels.labelId))
+          .from(messages)
+          .innerJoin(messageLabels, eq(messageLabels.messageId, messages.id))
+          .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+          .leftJoin(
+            messageLabelDecisions,
+            and(
+              eq(messageLabelDecisions.messageId, messages.id),
+              eq(messageLabelDecisions.labelId, messageLabels.labelId),
+            ),
+          )
           .where(
             and(
-              inArray(threadLabels.threadId, threadIds),
-              eq(threadLabels.state, "applied"),
+              inArray(messages.threadId, threadIds),
+              eq(labels.kind, "invook"),
             ),
           ),
         database
           .select({
             threadId: messages.threadId,
-            id: gmailLabels.id,
-            providerLabelId: gmailLabels.providerLabelId,
-            name: gmailLabels.name,
-            type: gmailLabels.type,
-            color: gmailLabels.color,
+            id: labels.id,
+            providerLabelId: labels.providerLabelId,
+            name: labels.name,
+            type: labels.providerType,
+            color: labels.color,
           })
           .from(messages)
           .innerJoin(
-            gmailMessageLabels,
-            eq(gmailMessageLabels.messageId, messages.id),
+            messageLabels,
+            eq(messageLabels.messageId, messages.id),
           )
-          .innerJoin(gmailLabels, eq(gmailLabels.id, gmailMessageLabels.gmailLabelId))
-          .where(inArray(messages.threadId, threadIds)),
+          .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+          .where(
+            and(
+              inArray(messages.threadId, threadIds),
+              eq(labels.kind, "gmail"),
+            ),
+          ),
       ])
     : [[], []];
   const labelsByThread = new Map<string, typeof appliedLabelRows>();
@@ -1358,20 +1348,32 @@ export async function getMailboxWorkspace(
   }
   const attachLabels = <T extends { id: string }>(thread: T) => ({
     ...thread,
-    gmailLabels: (gmailLabelsByThread.get(thread.id) ?? []).map((label) => ({
-      id: label.id,
-      providerLabelId: label.providerLabelId,
-      name: label.name,
-      type: label.type,
-      color: label.color,
-    })),
-    invookLabels: (labelsByThread.get(thread.id) ?? []).map((label) => ({
-      labelId: label.labelId,
-      name: label.name,
-      systemKey: label.systemKey,
-      source: label.source,
-      confidence: label.confidence === null ? null : Number(label.confidence),
-    })),
+    gmailLabels: (gmailLabelsByThread.get(thread.id) ?? []).flatMap((label) =>
+      label.providerLabelId && label.type
+        ? [{
+            id: label.id,
+            providerLabelId: label.providerLabelId,
+            name: label.name,
+            type: label.type,
+            color: label.color,
+          }]
+        : [],
+    ),
+    invookLabels: Array.from(
+      new Map(
+        (labelsByThread.get(thread.id) ?? []).map((label) => [
+          label.labelId,
+          {
+            labelId: label.labelId,
+            name: label.name,
+            systemKey: label.systemKey,
+            source: label.source === "user" ? "user" as const : "ai" as const,
+            confidence:
+              label.confidence === null ? null : Number(label.confidence),
+          },
+        ]),
+      ).values(),
+    ),
   });
   const mailboxThreadsWithLabels = mailboxThreads.map(attachLabels);
   const serializedMemories = memoryRows.map((memory) => ({
@@ -1428,6 +1430,7 @@ export async function getMailboxWorkspace(
       .where(
         and(
           eq(drafts.userId, userId),
+          eq(drafts.kind, "invook"),
           eq(drafts.threadId, selectedThread.id),
           eq(drafts.status, "editing"),
           isNotNull(drafts.generatedText),
@@ -1437,21 +1440,22 @@ export async function getMailboxWorkspace(
       .limit(1),
     database
       .select({
-        id: gmailDrafts.id,
-        providerDraftId: gmailDrafts.providerDraftId,
-        providerMessageId: gmailDrafts.providerMessageId,
-        providerThreadId: gmailDrafts.providerThreadId,
-        updatedAt: gmailDrafts.updatedAt,
+        id: drafts.id,
+        providerDraftId: drafts.providerDraftId,
+        providerMessageId: drafts.providerMessageId,
+        providerThreadId: drafts.providerThreadId,
+        updatedAt: drafts.updatedAt,
       })
-      .from(gmailDrafts)
+      .from(drafts)
       .where(
         and(
-          eq(gmailDrafts.accountId, account.id),
-          eq(gmailDrafts.providerThreadId, selectedThread.providerThreadId),
-          isNotNull(gmailDrafts.providerMessageId),
+          eq(drafts.accountId, account.id),
+          eq(drafts.kind, "gmail"),
+          eq(drafts.providerThreadId, selectedThread.providerThreadId),
+          isNotNull(drafts.providerMessageId),
         ),
       )
-      .orderBy(desc(gmailDrafts.updatedAt)),
+      .orderBy(desc(drafts.updatedAt)),
   ]);
 
   const messageIds = threadMessages.map((message) => message.id);
@@ -1475,16 +1479,21 @@ export async function getMailboxWorkspace(
           .orderBy(asc(messageAttachments.filename)),
         database
           .select({
-            messageId: gmailMessageLabels.messageId,
-            id: gmailLabels.id,
-            providerLabelId: gmailLabels.providerLabelId,
-            name: gmailLabels.name,
-            type: gmailLabels.type,
-            color: gmailLabels.color,
+            messageId: messageLabels.messageId,
+            id: labels.id,
+            providerLabelId: labels.providerLabelId,
+            name: labels.name,
+            type: labels.providerType,
+            color: labels.color,
           })
-          .from(gmailMessageLabels)
-          .innerJoin(gmailLabels, eq(gmailLabels.id, gmailMessageLabels.gmailLabelId))
-          .where(inArray(gmailMessageLabels.messageId, messageIds)),
+          .from(messageLabels)
+          .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+          .where(
+            and(
+              inArray(messageLabels.messageId, messageIds),
+              eq(labels.kind, "gmail"),
+            ),
+          ),
       ])
     : [[], []];
   const attachmentsByMessage = new Map<string, typeof attachmentRows>();
@@ -1519,14 +1528,17 @@ export async function getMailboxWorkspace(
               separator >= 0 ? header.line.slice(separator + 1).trimStart() : "",
           };
         }),
-        gmailLabels: (gmailLabelsByMessage.get(message.id) ?? []).map(
-          (label) => ({
-            id: label.id,
-            providerLabelId: label.providerLabelId,
-            name: label.name,
-            type: label.type,
-            color: label.color,
-          }),
+        gmailLabels: (gmailLabelsByMessage.get(message.id) ?? []).flatMap(
+          (label) =>
+            label.providerLabelId && label.type
+              ? [{
+                  id: label.id,
+                  providerLabelId: label.providerLabelId,
+                  name: label.name,
+                  type: label.type,
+                  color: label.color,
+                }]
+              : [],
         ),
         rawMime:
           message.rawChecksumSha256 && message.rawContentLength !== null
@@ -1538,20 +1550,26 @@ export async function getMailboxWorkspace(
         attachments: attachmentsByMessage.get(message.id) ?? [],
       })),
       aiReplyDraft:
-        threadDraft && threadDraft.generatedText
+        threadDraft && threadDraft.threadId && threadDraft.generatedText
           ? {
-              ...threadDraft,
+              id: threadDraft.id,
+              threadId: threadDraft.threadId,
+              status: threadDraft.status,
               generatedText: threadDraft.generatedText,
+              currentText: threadDraft.currentText,
+              usedMemoryIds: threadDraft.usedMemoryIds,
               updatedAt: threadDraft.updatedAt.toISOString(),
             }
           : null,
       gmailDrafts: providerDrafts.flatMap((draft) =>
-        draft.providerMessageId === null
+        !draft.providerDraftId || !draft.providerMessageId || !draft.providerThreadId
           ? []
           : [
               {
-                ...draft,
+                id: draft.id,
+                providerDraftId: draft.providerDraftId,
                 providerMessageId: draft.providerMessageId,
+                providerThreadId: draft.providerThreadId,
                 updatedAt: draft.updatedAt.toISOString(),
               },
             ],
@@ -1785,16 +1803,33 @@ async function invalidateThreadAnalysis(
   accountId: string,
   threadId: string,
 ) {
+  const threadMessages = await transaction
+    .select({ id: messages.id })
+    .from(messages)
+    .where(eq(messages.threadId, threadId));
+  const messageIds = threadMessages.map((message) => message.id);
+  if (messageIds.length > 0) {
+    await transaction
+      .delete(messageLabelDecisions)
+      .where(
+        and(
+          inArray(messageLabelDecisions.messageId, messageIds),
+          isNull(messageLabelDecisions.userOverride),
+        ),
+      );
+    await transaction
+      .delete(messageLabels)
+      .where(
+        and(
+          inArray(messageLabels.messageId, messageIds),
+          eq(messageLabels.source, "ai"),
+        ),
+      );
+  }
   await transaction
-    .delete(threadLabelAnalyses)
-    .where(eq(threadLabelAnalyses.threadId, threadId));
-  await transaction
-    .delete(threadLabels)
-    .where(and(eq(threadLabels.threadId, threadId), eq(threadLabels.source, "ai")));
-  await transaction
-    .update(mailLabels)
+    .update(labels)
     .set({ analysisState: "pending", updatedAt: new Date() })
-    .where(eq(mailLabels.accountId, accountId));
+    .where(and(eq(labels.accountId, accountId), eq(labels.kind, "invook")));
 }
 
 async function refreshIndexedThread(
@@ -1965,13 +2000,18 @@ export async function upsertIndexedMessage(
       .limit(1);
     const existingMemberships = existingMessage
       ? await transaction
-          .select({ providerLabelId: gmailLabels.providerLabelId })
-          .from(gmailMessageLabels)
-          .innerJoin(gmailLabels, eq(gmailLabels.id, gmailMessageLabels.gmailLabelId))
-          .where(eq(gmailMessageLabels.messageId, existingMessage.id))
+          .select({ providerLabelId: labels.providerLabelId })
+          .from(messageLabels)
+          .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+          .where(
+            and(
+              eq(messageLabels.messageId, existingMessage.id),
+              eq(labels.kind, "gmail"),
+            ),
+          )
       : [];
-    const currentGmailLabelIds = existingMemberships.map(
-      (membership) => membership.providerLabelId,
+    const currentGmailLabelIds = existingMemberships.flatMap((membership) =>
+      membership.providerLabelId ? [membership.providerLabelId] : [],
     );
     const analysisChanged =
       !existingMessage ||
@@ -2057,18 +2097,24 @@ export async function upsertIndexedMessage(
       const requestedProviderLabelIds = Array.from(new Set(input.gmailLabelIds));
       let providerLabels: Array<{ id: string; providerLabelId: string }> = [];
       if (requestedProviderLabelIds.length > 0) {
-        providerLabels = await transaction
+        const providerLabelRows = await transaction
           .select({
-            id: gmailLabels.id,
-            providerLabelId: gmailLabels.providerLabelId,
+            id: labels.id,
+            providerLabelId: labels.providerLabelId,
           })
-          .from(gmailLabels)
+          .from(labels)
           .where(
             and(
-              eq(gmailLabels.accountId, input.accountId),
-              inArray(gmailLabels.providerLabelId, requestedProviderLabelIds),
+              eq(labels.accountId, input.accountId),
+              eq(labels.kind, "gmail"),
+              inArray(labels.providerLabelId, requestedProviderLabelIds),
             ),
           );
+        providerLabels = providerLabelRows.flatMap((label) =>
+          label.providerLabelId
+            ? [{ id: label.id, providerLabelId: label.providerLabelId }]
+            : [],
+        );
         const storedProviderLabelIds = new Set(
           providerLabels.map((label) => label.providerLabelId),
         );
@@ -2084,25 +2130,24 @@ export async function upsertIndexedMessage(
         }
       }
       await transaction
-        .delete(gmailMessageLabels)
-        .where(eq(gmailMessageLabels.messageId, messageId));
+        .delete(messageLabels)
+        .where(
+          and(
+            eq(messageLabels.messageId, messageId),
+            eq(messageLabels.source, "gmail"),
+          ),
+        );
       if (providerLabels.length > 0) {
-        await transaction.insert(gmailMessageLabels).values(
+        await transaction.insert(messageLabels).values(
           providerLabels.map((label) => ({
+            userId: input.userId,
             accountId: input.accountId,
             messageId,
-            gmailLabelId: label.id,
+            labelId: label.id,
+            source: "gmail" as const,
           })),
         );
       }
-      await transaction
-        .delete(gmailMessageTombstones)
-        .where(
-          and(
-            eq(gmailMessageTombstones.accountId, input.accountId),
-            eq(gmailMessageTombstones.providerMessageId, input.providerMessageId),
-          ),
-        );
 
       if (analysisChanged) {
         await invalidateThreadAnalysis(transaction, input.accountId, threadId);
@@ -2249,6 +2294,7 @@ export async function deleteIndexedMessage(
         providerThreadId: threads.providerThreadId,
         providerHistoryId: messages.providerHistoryId,
         rawObjectKey: messages.rawObjectKey,
+        updatedAt: messages.updatedAt,
       })
       .from(messages)
       .innerJoin(threads, eq(threads.id, messages.threadId))
@@ -2268,33 +2314,28 @@ export async function deleteIndexedMessage(
     const objectKeys = [
       storedMessage.rawObjectKey,
       ...attachmentObjects.map((attachment) => attachment.objectKey),
-    ].filter((key): key is string => Boolean(key));
-    await transaction
-      .insert(gmailMessageTombstones)
-      .values({
+    ]
+      .filter((key): key is string => Boolean(key))
+      .sort();
+    await enqueueWorkflowStepWithExecutor(
+      {
         userId: storedMessage.userId,
         accountId: input.accountId,
-        providerMessageId: input.providerMessageId,
-        providerThreadId: storedMessage.providerThreadId,
-        providerHistoryId:
-          input.providerHistoryId ?? storedMessage.providerHistoryId,
-        objectKeys,
-        deletedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: [
-          gmailMessageTombstones.accountId,
-          gmailMessageTombstones.providerMessageId,
-        ],
-        set: {
-          providerThreadId: storedMessage.providerThreadId,
-          providerHistoryId:
-            input.providerHistoryId ?? storedMessage.providerHistoryId,
-          objectKeys,
-          deletedAt: new Date(),
-          updatedAt: new Date(),
+        stepType: "gmail.objects.delete",
+        payload: {
+          manifest: {
+            providerMessageId: input.providerMessageId,
+            providerThreadId: storedMessage.providerThreadId,
+            providerHistoryId:
+              input.providerHistoryId ?? storedMessage.providerHistoryId,
+            objectKeys,
+          },
         },
-      });
+        idempotencyKey: `gmail-object-delete:${input.accountId}:${input.providerMessageId}:${storedMessage.updatedAt.toISOString()}`,
+        maxAttempts: 10,
+      },
+      transaction,
+    );
 
     await transaction.delete(messages).where(eq(messages.id, storedMessage.id));
     await invalidateThreadAnalysis(
@@ -2320,6 +2361,23 @@ export async function getIndexedMessageIds(
   return storedMessages.map((message) => message.providerMessageId);
 }
 
+export async function getStoredProviderMessageIds(
+  input: { accountId: string; providerMessageIds: string[] },
+  database: Database = getDatabase(),
+): Promise<string[]> {
+  if (input.providerMessageIds.length === 0) return [];
+  const storedMessages = await database
+    .select({ providerMessageId: messages.providerMessageId })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.accountId, input.accountId),
+        inArray(messages.providerMessageId, input.providerMessageIds),
+      ),
+    );
+  return storedMessages.map((message) => message.providerMessageId);
+}
+
 export function createMessageContentHash(
   input: Pick<MailboxMessage, "subject" | "bodyText">,
 ): string {
@@ -2329,6 +2387,114 @@ export function createMessageContentHash(
 }
 
 export const upsertMailboxMessage = upsertIndexedMessage;
+
+export async function replaceGmailMessageLabels(
+  input: {
+    userId: string;
+    accountId: string;
+    providerMessageId: string;
+    providerHistoryId: string | null;
+    providerLabelIds: string[];
+  },
+  database: Database = getDatabase(),
+): Promise<{ found: boolean; changed: boolean; threadId: string | null }> {
+  return database.transaction(async (transaction) => {
+    const [message] = await transaction
+      .select({ id: messages.id, threadId: messages.threadId })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.accountId, input.accountId),
+          eq(messages.providerMessageId, input.providerMessageId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!message) return { found: false, changed: false, threadId: null };
+
+    const requestedProviderLabelIds = Array.from(
+      new Set(input.providerLabelIds),
+    );
+    const providerLabelRows =
+      requestedProviderLabelIds.length > 0
+        ? await transaction
+            .select({ id: labels.id, providerLabelId: labels.providerLabelId })
+            .from(labels)
+            .where(
+              and(
+                eq(labels.accountId, input.accountId),
+                eq(labels.kind, "gmail"),
+                inArray(labels.providerLabelId, requestedProviderLabelIds),
+              ),
+            )
+        : [];
+    const providerLabels = providerLabelRows.flatMap((label) =>
+      label.providerLabelId
+        ? [{ id: label.id, providerLabelId: label.providerLabelId }]
+        : [],
+    );
+    const storedProviderLabelIds = new Set(
+      providerLabels.map((label) => label.providerLabelId),
+    );
+    const missingProviderLabelIds = requestedProviderLabelIds.filter(
+      (providerLabelId) => !storedProviderLabelIds.has(providerLabelId),
+    );
+    if (missingProviderLabelIds.length > 0) {
+      throw new GmailLabelCatalogMismatchError({
+        accountId: input.accountId,
+        providerMessageId: input.providerMessageId,
+        missingProviderLabelIds,
+      });
+    }
+
+    const existingMemberships = await transaction
+      .select({ providerLabelId: labels.providerLabelId })
+      .from(messageLabels)
+      .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+      .where(
+        and(
+          eq(messageLabels.messageId, message.id),
+          eq(messageLabels.source, "gmail"),
+        ),
+      );
+    const currentProviderLabelIds = existingMemberships.flatMap((membership) =>
+      membership.providerLabelId ? [membership.providerLabelId] : [],
+    );
+    const changed = !equalStringArrays(
+      currentProviderLabelIds,
+      requestedProviderLabelIds,
+    );
+    if (changed) {
+      await transaction
+        .delete(messageLabels)
+        .where(
+          and(
+            eq(messageLabels.messageId, message.id),
+            eq(messageLabels.source, "gmail"),
+          ),
+        );
+      if (providerLabels.length > 0) {
+        await transaction.insert(messageLabels).values(
+          providerLabels.map((label) => ({
+            userId: input.userId,
+            accountId: input.accountId,
+            messageId: message.id,
+            labelId: label.id,
+            source: "gmail" as const,
+          })),
+        );
+      }
+    }
+    await transaction
+      .update(messages)
+      .set({
+        providerHistoryId: input.providerHistoryId,
+        updatedAt: new Date(),
+      })
+      .where(eq(messages.id, message.id));
+    return { found: true, changed, threadId: message.threadId };
+  });
+}
 
 export async function countMemoryEligibleMessages(
   accountId: string,
@@ -2382,7 +2548,6 @@ export async function createUserLabel(
           syncState: connectedAccounts.syncState,
           historyCursor: gmailReplicaStates.historyCursor,
           replicaState: gmailReplicaStates.state,
-          replicaLastAuditAt: gmailReplicaStates.lastAuditAt,
         })
         .from(connectedAccounts)
         .innerJoin(
@@ -2401,22 +2566,24 @@ export async function createUserLabel(
 
       const normalizedName = normalizeLabelName(input.name);
       const [existing] = await transaction
-        .select({ id: mailLabels.id })
-        .from(mailLabels)
+        .select({ id: labels.id })
+        .from(labels)
         .where(
           and(
-            eq(mailLabels.accountId, account.id),
-            eq(mailLabels.normalizedName, normalizedName),
+            eq(labels.accountId, account.id),
+            eq(labels.kind, "invook"),
+            eq(labels.normalizedName, normalizedName),
           ),
         )
         .limit(1);
       if (existing) throw new LabelConflictError();
 
       const [label] = await transaction
-        .insert(mailLabels)
+        .insert(labels)
         .values({
           userId: input.userId,
           accountId: account.id,
+          kind: "invook",
           name: input.name.trim().replace(/\s+/g, " "),
           normalizedName,
           description: input.description.trim().replace(/\s+/g, " "),
@@ -2430,7 +2597,6 @@ export async function createUserLabel(
       if (
         account.syncState.mailSync === "complete" &&
         account.replicaState === "ready" &&
-        account.replicaLastAuditAt &&
         account.historyCursor
       ) {
         await enqueueWorkflowStep(
@@ -2444,15 +2610,6 @@ export async function createUserLabel(
           transaction as unknown as Database,
         );
       }
-
-      await transaction.insert(auditEvents).values({
-        userId: input.userId,
-        accountId: account.id,
-        eventType: "label.created",
-        targetType: "label",
-        targetId: label.id,
-        metadata: { name: label.name },
-      });
 
       const [threadTotal] = await transaction
         .select({ value: count(threads.id) })
@@ -2484,27 +2641,23 @@ export async function deleteUserLabel(
   return database.transaction(async (transaction) => {
     const [label] = await transaction
       .select({
-        id: mailLabels.id,
-        accountId: mailLabels.accountId,
-        name: mailLabels.name,
-        systemKey: mailLabels.systemKey,
+        id: labels.id,
+        accountId: labels.accountId,
+        name: labels.name,
+        systemKey: labels.systemKey,
       })
-      .from(mailLabels)
+      .from(labels)
       .where(
-        and(eq(mailLabels.id, input.labelId), eq(mailLabels.userId, input.userId)),
+        and(
+          eq(labels.id, input.labelId),
+          eq(labels.userId, input.userId),
+          eq(labels.kind, "invook"),
+        ),
       )
       .limit(1);
     if (!label) return false;
 
-    await transaction.delete(mailLabels).where(eq(mailLabels.id, label.id));
-    await transaction.insert(auditEvents).values({
-      userId: input.userId,
-      accountId: label.accountId,
-      eventType: "label.deleted",
-      targetType: "label",
-      targetId: label.id,
-      metadata: { name: label.name, systemKey: label.systemKey },
-    });
+    await transaction.delete(labels).where(eq(labels.id, label.id));
     return true;
   });
 }
@@ -2516,16 +2669,22 @@ export async function getLabelForAnalysis(
 ) {
   const [label] = await database
     .select({
-      id: mailLabels.id,
-      userId: mailLabels.userId,
-      accountId: mailLabels.accountId,
-      name: mailLabels.name,
-      description: mailLabels.description,
-      definitionVersion: mailLabels.definitionVersion,
-      analysisState: mailLabels.analysisState,
+      id: labels.id,
+      userId: labels.userId,
+      accountId: labels.accountId,
+      name: labels.name,
+      description: labels.description,
+      definitionVersion: labels.definitionVersion,
+      analysisState: labels.analysisState,
     })
-    .from(mailLabels)
-    .where(and(eq(mailLabels.id, labelId), eq(mailLabels.accountId, accountId)))
+    .from(labels)
+    .where(
+      and(
+        eq(labels.id, labelId),
+        eq(labels.accountId, accountId),
+        eq(labels.kind, "invook"),
+      ),
+    )
     .limit(1);
   return label ?? null;
 }
@@ -2605,20 +2764,21 @@ export async function getThreadsForLabelBackfill(
   const candidateRows = await database
     .select({ id: threads.id })
     .from(threads)
-    .leftJoin(
-      threadLabelAnalyses,
-      and(
-        eq(threadLabelAnalyses.threadId, threads.id),
-        eq(threadLabelAnalyses.labelId, input.labelId),
-      ),
-    )
     .where(
       and(
         eq(threads.accountId, input.accountId),
-        or(
-          isNull(threadLabelAnalyses.id),
-          ne(threadLabelAnalyses.definitionVersion, input.definitionVersion),
-        ),
+        sql<boolean>`exists (
+          select 1
+          from ${messages}
+          left join ${messageLabelDecisions}
+            on ${messageLabelDecisions.messageId} = ${messages.id}
+            and ${messageLabelDecisions.labelId} = ${input.labelId}::uuid
+          where ${messages.threadId} = ${threads.id}
+            and (
+              ${messageLabelDecisions.id} is null
+              or ${messageLabelDecisions.definitionVersion} <> ${input.definitionVersion}
+            )
+        )`,
       ),
     )
     .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt))
@@ -2648,7 +2808,7 @@ export async function setLabelAnalysisState(
   database: Database = getDatabase(),
 ) {
   await database
-    .update(mailLabels)
+    .update(labels)
     .set({
       analysisState: input.state,
       lastAnalyzedAt: input.state === "complete" ? new Date() : undefined,
@@ -2656,9 +2816,10 @@ export async function setLabelAnalysisState(
     })
     .where(
       and(
-        eq(mailLabels.id, input.labelId),
-        eq(mailLabels.accountId, input.accountId),
-        eq(mailLabels.definitionVersion, input.definitionVersion),
+        eq(labels.id, input.labelId),
+        eq(labels.accountId, input.accountId),
+        eq(labels.kind, "invook"),
+        eq(labels.definitionVersion, input.definitionVersion),
       ),
     );
 }
@@ -2681,13 +2842,13 @@ export async function saveLabelBatchResults(
 ) {
   return database.transaction(async (transaction) => {
     const [label] = await transaction
-      .select({ id: mailLabels.id })
-      .from(mailLabels)
+      .select({ id: labels.id })
+      .from(labels)
       .where(
         and(
-          eq(mailLabels.id, input.labelId),
-          eq(mailLabels.accountId, input.accountId),
-          eq(mailLabels.definitionVersion, input.definitionVersion),
+          eq(labels.id, input.labelId),
+          eq(labels.accountId, input.accountId),
+          eq(labels.definitionVersion, input.definitionVersion),
         ),
       )
       .for("update")
@@ -2722,55 +2883,99 @@ export async function saveLabelBatchResults(
 
       savedThreadCount += results.length;
       const threadIds = results.map((result) => result.threadId);
-      await transaction
-        .delete(threadLabels)
+      const currentMessages = await transaction
+        .select({ id: messages.id, threadId: messages.threadId })
+        .from(messages)
+        .where(inArray(messages.threadId, threadIds));
+      const messageIds = currentMessages.map((message) => message.id);
+      if (messageIds.length === 0) continue;
+      const existingDecisions = await transaction
+        .select({
+          messageId: messageLabelDecisions.messageId,
+          userOverride: messageLabelDecisions.userOverride,
+        })
+        .from(messageLabelDecisions)
         .where(
           and(
-            inArray(threadLabels.threadId, threadIds),
-            eq(threadLabels.labelId, input.labelId),
-            eq(threadLabels.source, "ai"),
+            inArray(messageLabelDecisions.messageId, messageIds),
+            eq(messageLabelDecisions.labelId, input.labelId),
           ),
         );
-
-      const matches = results.filter((result) => result.matched);
-      if (matches.length > 0) {
-        await transaction
-          .insert(threadLabels)
-          .values(matches.map((result) => ({
-            userId: input.userId,
-            accountId: input.accountId,
-            threadId: result.threadId,
-            labelId: input.labelId,
-            source: "ai" as const,
-            state: "applied" as const,
-            confidence: result.confidence.toFixed(2),
-            modelId: input.modelId,
-            analysisVersion: input.definitionVersion,
-          })))
-          .onConflictDoNothing({
-            target: [threadLabels.threadId, threadLabels.labelId],
-          });
-      }
+      const userOverridesByMessageId = new Map(
+        existingDecisions.map((decision) => [
+          decision.messageId,
+          decision.userOverride,
+        ]),
+      );
+      const resultsByThreadId = new Map(
+        results.map((result) => [result.threadId, result]),
+      );
 
       await transaction
-        .insert(threadLabelAnalyses)
-        .values(results.map((result) => ({
-          userId: input.userId,
-          accountId: input.accountId,
-          threadId: result.threadId,
-          labelId: input.labelId,
-          definitionVersion: input.definitionVersion,
-          modelId: input.modelId,
-          analyzedAt: new Date(),
-        })))
+        .insert(messageLabelDecisions)
+        .values(
+          currentMessages.flatMap((message) => {
+            const result = resultsByThreadId.get(message.threadId);
+            if (!result) return [];
+            return [{
+              userId: input.userId,
+              accountId: input.accountId,
+              messageId: message.id,
+              labelId: input.labelId,
+              aiDecision: result.matched
+                ? ("applied" as const)
+                : ("not_applied" as const),
+              confidence: result.confidence.toFixed(2),
+              modelId: input.modelId,
+              definitionVersion: input.definitionVersion,
+              analyzedAt: new Date(),
+            }];
+          }),
+        )
         .onConflictDoUpdate({
-          target: [threadLabelAnalyses.threadId, threadLabelAnalyses.labelId],
+          target: [
+            messageLabelDecisions.messageId,
+            messageLabelDecisions.labelId,
+          ],
           set: {
-            definitionVersion: input.definitionVersion,
+            aiDecision: sql`excluded.ai_decision`,
+            confidence: sql`excluded.confidence`,
             modelId: input.modelId,
+            definitionVersion: input.definitionVersion,
             analyzedAt: new Date(),
           },
         });
+
+      await transaction
+        .delete(messageLabels)
+        .where(
+          and(
+            inArray(messageLabels.messageId, messageIds),
+            eq(messageLabels.labelId, input.labelId),
+          ),
+        );
+      const appliedMemberships = currentMessages.flatMap((message) => {
+        const result = resultsByThreadId.get(message.threadId);
+        if (!result) return [];
+        const userOverride = userOverridesByMessageId.get(message.id) ?? null;
+        if (userOverride === "suppressed") return [];
+        if (userOverride !== "applied" && !result.matched) return [];
+        return [{
+          userId: input.userId,
+          accountId: input.accountId,
+          messageId: message.id,
+          labelId: input.labelId,
+          source: userOverride === "applied" ? ("user" as const) : ("ai" as const),
+        }];
+      });
+      if (appliedMemberships.length > 0) {
+        await transaction
+          .insert(messageLabels)
+          .values(appliedMemberships)
+          .onConflictDoNothing({
+            target: [messageLabels.messageId, messageLabels.labelId],
+          });
+      }
     }
     return { savedThreadCount, staleThreadIds: Array.from(staleThreadIds) };
   });
@@ -2795,75 +3000,114 @@ export async function setUserThreadLabel(
 
     const [label] = await transaction
       .select({
-        id: mailLabels.id,
-        name: mailLabels.name,
-        definitionVersion: mailLabels.definitionVersion,
+        id: labels.id,
+        name: labels.name,
+        definitionVersion: labels.definitionVersion,
       })
-      .from(mailLabels)
+      .from(labels)
       .where(
         and(
-          eq(mailLabels.id, input.labelId),
-          eq(mailLabels.userId, input.userId),
-          eq(mailLabels.accountId, thread.accountId),
+          eq(labels.id, input.labelId),
+          eq(labels.userId, input.userId),
+          eq(labels.accountId, thread.accountId),
+          eq(labels.kind, "invook"),
         ),
       )
       .limit(1);
     if (!label) return null;
 
-    await transaction
-      .insert(threadLabels)
-      .values({
-        userId: input.userId,
-        accountId: thread.accountId,
-        threadId: thread.id,
-        labelId: label.id,
-        source: "user",
-        state: input.applied ? "applied" : "dismissed",
-        confidence: null,
-        modelId: null,
-        analysisVersion: label.definitionVersion,
-      })
-      .onConflictDoUpdate({
-        target: [threadLabels.threadId, threadLabels.labelId],
-        set: {
-          source: "user",
-          state: input.applied ? "applied" : "dismissed",
-          confidence: null,
-          modelId: null,
-          updatedAt: new Date(),
-        },
-      });
-
-    await transaction.insert(auditEvents).values({
-      userId: input.userId,
-      accountId: thread.accountId,
-      eventType: input.applied ? "thread.label_applied" : "thread.label_dismissed",
-      targetType: "thread",
-      targetId: thread.id,
-      metadata: { labelId: label.id, labelName: label.name },
-    });
+    const threadMessages = await transaction
+      .select({ id: messages.id })
+      .from(messages)
+      .where(eq(messages.threadId, thread.id));
+    const messageIds = threadMessages.map((message) => message.id);
+    if (messageIds.length > 0) {
+      await transaction
+        .insert(messageLabelDecisions)
+        .values(
+          messageIds.map((messageId) => ({
+            userId: input.userId,
+            accountId: thread.accountId,
+            messageId,
+            labelId: label.id,
+            aiDecision: "not_applied" as const,
+            confidence: null,
+            modelId: null,
+            definitionVersion: label.definitionVersion,
+            userOverride: input.applied
+              ? ("applied" as const)
+              : ("suppressed" as const),
+          })),
+        )
+        .onConflictDoUpdate({
+          target: [
+            messageLabelDecisions.messageId,
+            messageLabelDecisions.labelId,
+          ],
+          set: {
+            userOverride: input.applied ? "applied" : "suppressed",
+          },
+        });
+      await transaction
+        .delete(messageLabels)
+        .where(
+          and(
+            inArray(messageLabels.messageId, messageIds),
+            eq(messageLabels.labelId, label.id),
+          ),
+        );
+      if (input.applied) {
+        await transaction.insert(messageLabels).values(
+          messageIds.map((messageId) => ({
+            userId: input.userId,
+            accountId: thread.accountId,
+            messageId,
+            labelId: label.id,
+            source: "user" as const,
+          })),
+        );
+      }
+    }
 
     const appliedLabels = await transaction
       .select({
-        labelId: threadLabels.labelId,
-        name: mailLabels.name,
-        systemKey: mailLabels.systemKey,
-        source: threadLabels.source,
-        confidence: threadLabels.confidence,
+        labelId: messageLabels.labelId,
+        name: labels.name,
+        systemKey: labels.systemKey,
+        source: messageLabels.source,
+        confidence: messageLabelDecisions.confidence,
       })
-      .from(threadLabels)
-      .innerJoin(mailLabels, eq(mailLabels.id, threadLabels.labelId))
+      .from(messages)
+      .innerJoin(messageLabels, eq(messageLabels.messageId, messages.id))
+      .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+      .leftJoin(
+        messageLabelDecisions,
+        and(
+          eq(messageLabelDecisions.messageId, messages.id),
+          eq(messageLabelDecisions.labelId, messageLabels.labelId),
+        ),
+      )
       .where(
-        and(eq(threadLabels.threadId, thread.id), eq(threadLabels.state, "applied")),
+        and(eq(messages.threadId, thread.id), eq(labels.kind, "invook")),
       );
 
-    return appliedLabels.map((label) => ({
-      labelId: label.labelId,
-      name: label.name,
-      systemKey: label.systemKey,
-      source: label.source,
-      confidence: label.confidence === null ? null : Number(label.confidence),
-    }));
+    return Array.from(
+      new Map(
+        appliedLabels.map((appliedLabel) => [
+          appliedLabel.labelId,
+          {
+            labelId: appliedLabel.labelId,
+            name: appliedLabel.name,
+            systemKey: appliedLabel.systemKey,
+            source: appliedLabel.source === "user" ? "user" as const : "ai" as const,
+            confidence:
+              appliedLabel.confidence === null
+                ? null
+                : Number(appliedLabel.confidence),
+          },
+        ]),
+      ).values(),
+    );
   });
 }
 
@@ -3117,15 +3361,6 @@ export async function createUserMemory(
       })
       .returning();
     if (!memory) throw new Error("The memory could not be saved.");
-
-    await transaction.insert(auditEvents).values({
-      userId: input.userId,
-      accountId: account.id,
-      eventType: "memory.created",
-      targetType: "memory",
-      targetId: memory.id,
-      metadata: { type: value.type, contactEmail: value.contactEmail },
-    });
     return memory;
   });
 }
@@ -3215,15 +3450,6 @@ export async function updateUserMemory(
       .where(eq(memoryEntries.id, existing.id))
       .returning();
     if (!memory) return null;
-
-    await transaction.insert(auditEvents).values({
-      userId: input.userId,
-      accountId: existing.accountId,
-      eventType: "memory.updated",
-      targetType: "memory",
-      targetId: memory.id,
-      metadata: { type: value.type, contactEmail: value.contactEmail },
-    });
     return memory;
   });
 }
@@ -3259,14 +3485,6 @@ export async function deleteUserMemory(
         },
       });
     await transaction.delete(memoryEntries).where(eq(memoryEntries.id, memory.id));
-    await transaction.insert(auditEvents).values({
-      userId: memory.userId,
-      accountId: memory.accountId,
-      eventType: "memory.deleted",
-      targetType: "memory",
-      targetId: memory.id,
-      metadata: { type: memory.memoryType, contactEmail: memory.contactEmail },
-    });
     return true;
   });
 }
@@ -3386,15 +3604,6 @@ export async function saveExtractedMemories(
         .returning({ id: memoryEntries.id });
       savedCount += inserted.length;
     }
-
-    await transaction.insert(auditEvents).values({
-      userId: input.userId,
-      accountId: input.accountId,
-      eventType: `memory.${input.source}_refreshed`,
-      targetType: "connected_account",
-      targetId: input.accountId,
-      metadata: { savedCount, schemaVersion: MEMORY_SCHEMA_VERSION },
-    });
 
     if (input.source === "inferred" && input.markComplete !== false) {
       await transaction
@@ -4337,6 +4546,7 @@ export async function saveGeneratedDraft(
       .where(
         and(
           eq(drafts.userId, input.userId),
+          eq(drafts.kind, "invook"),
           eq(drafts.threadId, input.threadId),
           eq(drafts.status, "editing"),
         ),
@@ -4347,6 +4557,7 @@ export async function saveGeneratedDraft(
       .values({
         userId: input.userId,
         accountId: input.accountId,
+        kind: "invook",
         threadId: input.threadId,
         status: "editing",
         generatedText: input.text,
@@ -4380,6 +4591,7 @@ export async function saveDraftEdit(
         and(
           eq(drafts.id, input.draftId),
           eq(drafts.userId, input.userId),
+          eq(drafts.kind, "invook"),
           eq(drafts.status, "editing"),
         ),
       )
@@ -4412,15 +4624,6 @@ export async function saveDraftEdit(
         transaction as unknown as Database,
       );
     }
-
-    await transaction.insert(auditEvents).values({
-      userId: input.userId,
-      accountId: existing.accountId,
-      eventType: "draft.edited",
-      targetType: "draft",
-      targetId: existing.id,
-      metadata: { changed: existing.generatedText !== input.currentText },
-    });
     return draft;
   });
 }
@@ -4557,7 +4760,6 @@ export async function enqueuePendingAnalysisWorkflowSteps(
       userId: connectedAccounts.userId,
       historyCursor: gmailReplicaStates.historyCursor,
       replicaState: gmailReplicaStates.state,
-      replicaLastAuditAt: gmailReplicaStates.lastAuditAt,
       syncState: connectedAccounts.syncState,
     })
     .from(connectedAccounts)
@@ -4572,20 +4774,24 @@ export async function enqueuePendingAnalysisWorkflowSteps(
     indexedAccountIds.length > 0
       ? await database
           .select({
-            id: mailLabels.id,
-            accountId: mailLabels.accountId,
-            definitionVersion: mailLabels.definitionVersion,
-            analysisState: mailLabels.analysisState,
+            id: labels.id,
+            accountId: labels.accountId,
+            definitionVersion: labels.definitionVersion,
+            analysisState: labels.analysisState,
           })
-          .from(mailLabels)
-          .where(inArray(mailLabels.accountId, indexedAccountIds))
+          .from(labels)
+          .where(
+            and(
+              inArray(labels.accountId, indexedAccountIds),
+              eq(labels.kind, "invook"),
+            ),
+          )
       : [];
 
   const analysisJobs = indexedAccounts.flatMap((account) => {
     if (
       account.syncState.mailSync !== "complete" ||
       account.replicaState !== "ready" ||
-      !account.replicaLastAuditAt ||
       !account.historyCursor
     ) return [];
     return [

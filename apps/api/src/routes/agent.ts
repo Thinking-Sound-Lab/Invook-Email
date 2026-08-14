@@ -10,10 +10,7 @@ import { pipeAgentUIStreamToResponse } from "ai";
 import { mutationAccessHooks, requireSession } from "../access";
 import { sendJson, sendProblem } from "../responses";
 import { generateDraftForUser } from "../services/drafts";
-import {
-  createMailboxActionProposalForUser,
-  queryMailboxForUser,
-} from "../services/mailbox-actions";
+import { queryMailboxForUser } from "../services/mailbox-query";
 import { searchMailForUser } from "../services/search";
 
 type SearchQuery = { q?: unknown };
@@ -133,12 +130,6 @@ export const registerAgentRoutes: FastifyPluginAsync = async (api) => {
           },
           queryInvookMailbox: (input) =>
             queryMailboxForUser({ userId: session.userId, ...input }),
-          proposeMailboxAction: (input, toolCallId) =>
-            createMailboxActionProposalForUser({
-              userId: session.userId,
-              toolCallId,
-              ...input,
-            }),
         },
         currentThread ? { currentThreadId: currentThread.id } : undefined,
       );

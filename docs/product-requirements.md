@@ -1,7 +1,7 @@
 # Invook product requirements
 
 **Status:** Mailbox-replica and Memory implementation
-**Updated:** August 13, 2026
+**Updated:** August 14, 2026
 
 ## Product statement
 
@@ -56,14 +56,14 @@ Google OAuth must:
 - return to `/mail` after a valid callback;
 - encrypt refresh and access credentials before persistence;
 - on first connection, capture H0, register a Gmail watch, and create exactly one durable full-mailbox replication run without blocking the callback;
-- on returning authentication, refresh the session, profile, and encrypted credentials without resetting replica, cursor, audit, watch, sync-stage, or mailbox state;
+- on returning authentication, refresh the session, profile, and encrypted credentials without resetting replica, cursor, watch, sync-stage, or mailbox state;
 - keep an existing initial replication run, or enqueue stored-cursor history catch-up for a ready replica only when Gmail reports newer history.
 
 Signing out clears only the browser session cookie. It does not revoke Google credentials, stop the Gmail watch, cancel durable work, or change the mailbox replica. Account deletion remains the explicit destructive lifecycle.
 
-The first connection follows every Gmail result page with Spam and Trash included, stores exact raw MIME and attachment bytes in S3-compatible storage, and stores complete headers, text/HTML, normalized provider labels, Gmail Draft resources, tombstones, cursor/watch state, and audit state in PostgreSQL. It replays history from H0 and passes a completeness audit before indexing or Memory can start. Authenticated Pub/Sub pushes durably queue serialized history catch-up from the stored cursor. An expired cursor triggers watch renewal, full snapshot repair, replay, label/draft refresh, and another audit. Gmail remains canonical. The detailed boundary is defined in `docs/gmail-replica-contract.md`.
+The first connection follows every Gmail result page with Spam and Trash included, stores exact raw MIME and attachment bytes in S3-compatible storage, and stores complete headers, text/HTML, normalized message-level labels, Gmail Draft resources, applied/pending cursors, watch state, and workflow checkpoints in PostgreSQL. It replays history from H0, performs a final locked catch-up, and atomically becomes ready before indexing or Memory can start. Authenticated Pub/Sub pushes coalesce into the highest pending cursor and durable workflow/outbox work without storing raw events. An expired cursor creates an exceptional full repair `mail_sync_run`. Gmail remains canonical. The detailed boundary is defined in `docs/gmail-replica-contract.md`.
 
-Each connected account also has one durable daily watch-renewal action. A successful renewal catches up from the stored cursor and schedules its successor; routine renewal never runs the full-mailbox/object audit. Complete audits remain limited to initial readiness, expired-history repair, and explicit manual audit.
+Each connected account also has one durable daily watch-renewal action. A successful renewal catches up from the stored cursor and schedules its successor. Normal initial synchronization, catch-up, and renewal do not run a full replica audit.
 
 Historical search indexing uses durable 2,000-message provider batches. A signed terminal provider webhook commits current-content embeddings, provider-submission completion, any retry or next-batch outbox step, and account progress in one PostgreSQL transaction. Duplicate webhook delivery is idempotent. Indexing is complete only when every current message has a complete embedding for the configured model, dimensions, content hash, and index version; unavailable mailbox prerequisites surface as failed rather than continuing in process memory.
 
@@ -77,7 +77,7 @@ The left sidebar contains:
 
 The center pane shows Important mail first, then a divider, then the remaining mail. Selecting a thread replaces the list with the real thread.
 
-The right pane is the action agent for Find and Write. It reads and selects targets only from the fully synchronized Invook replica. Archive, read-state, Trash, Gmail-label, and save-to-Gmail-draft requests create an exact frozen proposal; no Gmail mutation occurs until the current user approves its card. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
+The right pane is the agent for Find and local Write. It reads only from the fully synchronized Invook replica and may create local drafts, but it has no Gmail mutation tools. Explicit product actions for archive, read state, star, Trash, Gmail labels, and Gmail Drafts write Gmail first and converge through provider history. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
 
 ### Label settings
 
@@ -181,7 +181,7 @@ Model classification may apply zero or more of:
 - **Pitch:** sales, recruiting, partnership, fundraising, sponsorship, or service proposals;
 - **Newsletter:** recurring editorial, digest, product update, community update, or bulk marketing publication.
 
-Every classification stores source, confidence, model ID, and analysis version. User-applied and user-dismissed states take precedence over AI.
+Every applied relationship is message-level. AI confidence, model ID, definition version, and explicit user override or suppression live in `message_label_decisions`; the visible relationship lives only in `message_labels`. Thread display is aggregated from current messages.
 
 ## Architecture
 
@@ -197,7 +197,7 @@ Browser
 Worker
   -> PostgreSQL workflow runs, checkpoints, and transactional outbox
   -> BullMQ queues in persistent Redis
-  -> Gmail snapshot, history replay, Pub/Sub catch-up, watch renewal, and audits
+  -> Gmail snapshot, history replay, Pub/Sub catch-up, watch renewal, and repair runs
   -> S3-compatible raw MIME and attachment object storage
   -> BullMQ search indexing, Invook-label analysis, and initial or incremental Memory
   -> selected OpenAI or Azure OpenAI Batch provider for labels and Memory
@@ -214,35 +214,28 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `profiles`
 - `connected_accounts`
 - `account_secrets`
-- `threads`
-- `messages`
-- `gmail_labels`
-- `gmail_message_labels`
-- `gmail_message_tombstones`
-- `gmail_drafts`
 - `gmail_replica_states`
 - `gmail_watch_states`
-- `gmail_push_events`
-- `gmail_replica_audits`
-- `mailbox_change_events`
-- `gmail_account_cleanups`
-- `mailbox_action_proposals`
-- `mailbox_action_targets`
 - `labels`
-- `thread_labels`
-- `thread_label_analyses`
-- `memory_entries`
-- `memory_deletions`
-- `memory_pending_evidence`
-- `drafts`
+- `threads`
+- `messages`
+- `message_labels`
 - `message_attachments`
+- `drafts`
+- `message_label_decisions`
 - `message_embeddings`
+- `memory_entries`
+- `memory_pending_evidence`
+- `memory_deletions`
+- `gmail_draft_write_operations`
 - `mail_sync_runs`
 - `gmail_sync_pages`
 - `gmail_sync_items`
 - `workflow_steps`
 - `queue_outbox`
-- `audit_events`
+- `embedding_batch_submissions`
+- `gmail_account_cleanups`
+- `mailbox_change_events`
 
 BullMQ is the only job executor and owns queue locks, retries, and stalled-job recovery in Redis. PostgreSQL workflow tables retain user-visible progress, page-level resumability, provider-Batch correlation, and reliable publication across the PostgreSQL/Redis boundary. New tables should be added only for a working feature and demonstrated query need.
 
@@ -254,11 +247,10 @@ Current mailbox, label, Memory, and draft endpoints include:
 | --- | --- | --- |
 | `GET` | `/v1/mailbox` | Return the connected mailbox workspace |
 | `POST` | `/v1/mailbox/sync` | Durably queue Gmail history catch-up from the stored replica cursor |
-| `POST` | `/v1/mailbox/audit` | Durably queue a manual completeness audit and repair |
 | `DELETE` | `/v1/mailbox/account` | Stop the watch, clean object storage, then delete the connected account |
 | `GET` | `/v1/attachments/:id/download` | Authorize the attachment and download its private stored bytes |
 | `GET` | `/v1/mailbox/events` | Stream authenticated durable mailbox-change events over SSE |
-| `POST` | `/v1/webhooks/google-pubsub` | Authenticate and durably deduplicate a Gmail Pub/Sub push |
+| `POST` | `/v1/webhooks/google-pubsub` | Authenticate a Gmail Pub/Sub push and coalesce its pending cursor |
 | `POST` | `/v1/labels` | Create a label and queue its full indexed-mailbox backfill |
 | `DELETE` | `/v1/labels/:labelId` | Delete any account-owned label and its decisions |
 | `GET` | `/v1/memories` | Return the connected account's real Memory and status |
@@ -271,10 +263,9 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `POST` | `/v1/gmail/labels` | Create an authoritative custom label at Gmail |
 | `PATCH/DELETE` | `/v1/gmail/labels/:id` | Update or delete an authoritative custom Gmail label |
 | `PATCH` | `/v1/gmail/messages/:id/labels` | Apply authoritative Gmail message-label changes |
+| `PATCH` | `/v1/gmail/threads/:id/labels` | Apply Gmail labels to every current message in a thread |
+| `POST` | `/v1/gmail/messages/:id/actions` | Apply read, star, archive, or Trash state at Gmail first |
 | `PUT/DELETE` | `/v1/gmail/drafts/:id` | Update or delete an existing Gmail Draft resource |
-| `GET` | `/v1/agent/actions/:id` | Return one authenticated user's exact action proposal and outcomes |
-| `POST` | `/v1/agent/actions/:id/approve` | One-time approve and durably enqueue the frozen Gmail mutation |
-| `POST` | `/v1/agent/actions/:id/cancel` | Cancel a still-pending action proposal |
 
 Every mutation requires an authenticated signed session and an allowed request origin. IDs and bodies are validated before repository calls. User ownership is enforced in every product lookup.
 

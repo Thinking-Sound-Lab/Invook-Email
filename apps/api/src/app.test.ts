@@ -197,15 +197,13 @@ test("mailbox refresh requires an authenticated session", async () => {
   assert.equal(response.json().title, "Authentication required");
 });
 
-test("mailbox audit and deletion require an authenticated session", async () => {
-  for (const request of [
-    { method: "POST", url: "/v1/mailbox/audit" },
-    { method: "DELETE", url: "/v1/mailbox/account" },
-  ] as const) {
-    const response = await api.inject(request);
-    assert.equal(response.statusCode, 401);
-    assert.equal(response.json().title, "Authentication required");
-  }
+test("mailbox deletion requires an authenticated session", async () => {
+  const response = await api.inject({
+    method: "DELETE",
+    url: "/v1/mailbox/account",
+  });
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().title, "Authentication required");
 });
 
 test("attachment downloads require authentication and a valid attachment ID", async () => {
@@ -386,6 +384,8 @@ test("Gmail provider writes require an authenticated session", async () => {
     { method: "PATCH", url: "/v1/gmail/labels/not-a-uuid" },
     { method: "DELETE", url: "/v1/gmail/labels/not-a-uuid" },
     { method: "PATCH", url: "/v1/gmail/messages/not-a-uuid/labels" },
+    { method: "POST", url: "/v1/gmail/messages/not-a-uuid/actions" },
+    { method: "PATCH", url: "/v1/gmail/threads/not-a-uuid/labels" },
     { method: "PUT", url: "/v1/gmail/drafts/not-a-uuid" },
     { method: "DELETE", url: "/v1/gmail/drafts/not-a-uuid" },
     { method: "POST", url: "/v1/gmail/compose-drafts" },
@@ -398,19 +398,6 @@ test("Gmail provider writes require an authenticated session", async () => {
   ] as const;
 
   for (const request of requests) {
-    const response = await api.inject(request);
-    assert.equal(response.statusCode, 401, `${request.method} ${request.url}`);
-    assert.equal(response.json().title, "Authentication required");
-  }
-});
-
-test("Agent proposal reads, approvals, and cancellations require authentication", async () => {
-  const proposalId = "4ca9d9d4-b5a2-4a4e-9cc5-ff2de72ee4b2";
-  for (const request of [
-    { method: "GET", url: `/v1/agent/actions/${proposalId}` },
-    { method: "POST", url: `/v1/agent/actions/${proposalId}/approve` },
-    { method: "POST", url: `/v1/agent/actions/${proposalId}/cancel` },
-  ] as const) {
     const response = await api.inject(request);
     assert.equal(response.statusCode, 401, `${request.method} ${request.url}`);
     assert.equal(response.json().title, "Authentication required");

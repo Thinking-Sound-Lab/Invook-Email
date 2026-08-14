@@ -14,8 +14,8 @@ export {
 } from "./credentials";
 export * from "./gmail-draft-writes";
 export * from "./embedding-indexing";
-export * from "./mailbox-actions";
 export * from "./mail-sync-progress";
+export * from "./mailbox-query";
 export * from "./gmail-watch";
 export * from "./repositories";
 export * from "./replica";

@@ -3,7 +3,6 @@ import type { FastifyPluginAsync } from "fastify";
 import { mailboxViews, type MailboxView } from "@invook/contracts";
 import {
   enqueueGmailHistoryCatchupForUser,
-  enqueueGmailReplicaAuditForUser,
   getMailboxWorkspace,
   markGmailReplicaDeletingForUser,
   parseMailboxCursor,
@@ -94,21 +93,6 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
         accepted: true,
         stepId: result.stepId,
       });
-    },
-  );
-
-  api.post(
-    "/v1/mailbox/audit",
-    { onRequest: mutationAccessHooks },
-    async (request, reply) => {
-      const session = request.invookSession;
-      if (!session) return;
-      const result = await enqueueGmailReplicaAuditForUser(session.userId);
-      if (result.stepId === null) {
-        await sendProblem(request, reply, 404, "Connected Gmail account not found");
-        return;
-      }
-      await sendJson(reply, 202, { accepted: true, stepId: result.stepId });
     },
   );
 

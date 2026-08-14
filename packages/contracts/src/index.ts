@@ -200,13 +200,11 @@ export type MailboxAccount = {
       | "pending"
       | "snapshotting"
       | "replaying"
-      | "auditing"
       | "ready"
       | "repairing"
       | "failed"
       | "deleting";
     readyAt: string | null;
-    lastAuditAt: string | null;
   };
 };
 
@@ -289,56 +287,6 @@ export type MailSearchResult = {
   attachments: MailboxAttachment[];
   matches: MailSearchMatch[];
   score: number;
-};
-
-export const mailboxActionOperations = [
-  "archive",
-  "mark_read",
-  "mark_unread",
-  "trash",
-  "apply_gmail_label",
-  "remove_gmail_label",
-  "save_draft_to_gmail",
-] as const;
-
-export type MailboxActionOperation = (typeof mailboxActionOperations)[number];
-
-export type MailboxActionStatus =
-  | "pending"
-  | "executing"
-  | "completed"
-  | "partial_failure"
-  | "failed"
-  | "cancelled";
-
-export type MailboxActionTargetStatus =
-  | "pending"
-  | "executing"
-  | "completed"
-  | "failed"
-  | "stale";
-
-export type MailboxActionTarget = {
-  id: string;
-  messageId: string | null;
-  draftId: string | null;
-  threadId: string;
-  subject: string;
-  sender: string | null;
-  sentAt: string | null;
-  status: MailboxActionTargetStatus;
-  errorCode: string | null;
-};
-
-export type MailboxActionProposal = {
-  id: string;
-  operation: MailboxActionOperation;
-  status: MailboxActionStatus;
-  gmailLabel: { id: string; name: string } | null;
-  targets: MailboxActionTarget[];
-  createdAt: string;
-  approvedAt: string | null;
-  completedAt: string | null;
 };
 
 export type MailboxQueryMessage = {

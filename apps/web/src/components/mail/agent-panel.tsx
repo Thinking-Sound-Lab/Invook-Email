@@ -9,8 +9,7 @@ import {
   SparklesIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { MailboxActionProposal } from "@invook/contracts";
-import { DefaultChatTransport, type UIDataTypes, type UIMessage } from "ai";
+import { DefaultChatTransport, type UIMessage } from "ai";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -18,18 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 import { formatMailText } from "./mail-format";
-import { ActionProposalCard } from "./action-proposal-card";
-
-type MailAgentUIMessage = UIMessage<
-  never,
-  UIDataTypes,
-  {
-    proposeMailboxAction: {
-      input: unknown;
-      output: MailboxActionProposal;
-    };
-  }
->;
+type MailAgentUIMessage = UIMessage;
 
 export interface AgentPanelProps {
   openThreadId?: string;
@@ -163,17 +151,6 @@ export function AgentPanel({
                       <p key={index} className="whitespace-pre-wrap">
                         {part.text}
                       </p>
-                    );
-                  }
-                  if (
-                    part.type === "tool-proposeMailboxAction" &&
-                    part.state === "output-available"
-                  ) {
-                    return (
-                      <ActionProposalCard
-                        key={part.toolCallId}
-                        initialProposal={part.output}
-                      />
                     );
                   }
                   if (part.type.startsWith("tool-")) {
