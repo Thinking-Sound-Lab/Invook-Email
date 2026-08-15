@@ -226,7 +226,7 @@ export function MailList({
 
   return (
     <section
-      className="mx-3 flex min-h-0 flex-col border-x border-border/35 bg-background"
+      className="mx-4 flex min-h-0 flex-col bg-background"
       aria-label="Mailbox"
     >
       <header className="flex h-15 shrink-0 items-center justify-between border-b border-border/45 px-5">
