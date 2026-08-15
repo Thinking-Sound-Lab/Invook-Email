@@ -181,6 +181,7 @@ function mailboxViewCondition(view: MailboxView) {
   switch (view) {
     case "all":
       return undefined;
+    case "important":
     case "starred":
     case "drafts":
     case "sent":

@@ -83,6 +83,8 @@ The right pane is the agent for Find and local Write. It reads only authoritativ
 
 Settings lists the built-in Newsletter definition and user-created Invook labels. Newsletter cannot be deleted. Creating or editing a custom label requires both a name and description. The creation flow previews sample matches from stored mail and asks whether to enqueue an optional 7-, 30-, or 90-day historical application. Editing stores only the new definition version and does not enqueue historical work. Deleting a custom label removes its decisions and memberships through database ownership constraints.
 
+The mailbox sidebar groups All, Starred, Drafts, Sent, Spam, and Trash under Mail. Labels begins with Gmail-owned Important, followed by Newsletter and the user-created Invook labels.
+
 ### Memory settings
 
 Settings contains a Memory section with exactly three tabs.

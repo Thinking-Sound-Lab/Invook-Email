@@ -26,6 +26,7 @@ import type {
 
 const viewTitles: Record<StaticMailboxView, string> = {
   all: "All mail",
+  important: "Important",
   starred: "Starred",
   drafts: "Drafts",
   sent: "Sent",

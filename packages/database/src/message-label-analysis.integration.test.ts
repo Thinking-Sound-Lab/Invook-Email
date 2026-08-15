@@ -302,6 +302,15 @@ test(
       );
       assert.equal(visible?.threads[0]?.isOthers, false);
       assert.equal(visible?.selectedThread?.messages[0]?.labelAnalysisState, "complete");
+      const important = await getMailboxWorkspace(
+        userId,
+        { view: "important" },
+        database,
+      );
+      assert.deepEqual(
+        important?.threads.map((thread) => thread.id),
+        [initial.threadId],
+      );
 
       const retry = await completeMessageLabelAnalysis(
         {

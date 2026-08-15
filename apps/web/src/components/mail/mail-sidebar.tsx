@@ -3,6 +3,7 @@ import {
   Delete02Icon,
   FileEditIcon,
   InboxIcon,
+  LabelImportantIcon,
   Logout01Icon,
   Mail01Icon,
   PencilEdit01Icon,
@@ -151,14 +152,35 @@ export function MailSidebar({
 
       <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
         <p className="mb-1.5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">
-          Labels
+          Mail
         </p>
-        <nav className="space-y-0.5" aria-label="Labels">
+        <nav className="space-y-0.5" aria-label="Mail">
           <NavLink
             label="All"
             icon={InboxIcon}
             active={currentSurface === "mail" && currentView === "all"}
             href="/mail?view=all"
+          />
+          {mailItems.map((item) => (
+            <NavLink
+              key={item.label}
+              label={item.label}
+              icon={item.icon}
+              active={currentSurface === "mail" && currentView === item.view}
+              href={`/mail?view=${item.view}`}
+            />
+          ))}
+        </nav>
+
+        <p className="mb-1.5 mt-5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">
+          Labels
+        </p>
+        <nav className="space-y-0.5" aria-label="Labels">
+          <NavLink
+            label="Important"
+            icon={LabelImportantIcon}
+            active={currentSurface === "mail" && currentView === "important"}
+            href="/mail?view=important"
           />
           {labels.map((label) => {
             const view = `label:${label.id}` as const;
@@ -172,21 +194,6 @@ export function MailSidebar({
               />
             );
           })}
-        </nav>
-
-        <p className="mb-1.5 mt-5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">
-          Mail
-        </p>
-        <nav className="space-y-0.5" aria-label="Mail">
-          {mailItems.map((item) => (
-            <NavLink
-              key={item.label}
-              label={item.label}
-              icon={item.icon}
-              active={currentSurface === "mail" && currentView === item.view}
-              href={`/mail?view=${item.view}`}
-            />
-          ))}
         </nav>
       </div>
     </aside>

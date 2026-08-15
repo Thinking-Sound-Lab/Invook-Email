@@ -33,6 +33,7 @@ export type AccountSyncStatusEvent = {
 
 export const mailboxViews = [
   "all",
+  "important",
   "starred",
   "drafts",
   "sent",
