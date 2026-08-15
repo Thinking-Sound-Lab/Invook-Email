@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
 import { MailboxRefreshButton } from "./mailbox-refresh-button";
 import { MailNavigationPending } from "./mail-navigation-pending";
+import { listMailRowLabels, type MailRowLabel } from "./mail-row-labels";
 import type {
   MailAccount,
   MailboxView,
@@ -49,6 +50,29 @@ interface MailRowProps {
   mailboxCursor?: string;
 }
 
+interface MailLabelChipProps {
+  label: MailRowLabel;
+}
+
+function MailLabelChip({ label }: MailLabelChipProps) {
+  const sourceName = label.kind === "gmail" ? "Gmail" : "Invook";
+
+  return (
+    <span
+      aria-label={`${label.name}, ${sourceName} label`}
+      title={`${label.name} (${sourceName})`}
+      className={cn(
+        "min-w-0 max-w-28 truncate rounded px-1.5 py-0.5 text-[11px] font-medium",
+        label.kind === "gmail"
+          ? "bg-secondary text-muted-foreground"
+          : "bg-primary/12 text-primary",
+      )}
+    >
+      {label.name}
+    </span>
+  );
+}
+
 function MailRow({
   thread,
   accountEmail,
@@ -62,7 +86,7 @@ function MailRow({
   const starred = thread.gmailLabels.some(
     (label) => label.providerLabelId === "STARRED",
   );
-  const primaryLabel = thread.invookLabels[0];
+  const labels = listMailRowLabels(thread);
 
   return (
     <Link
@@ -93,15 +117,15 @@ function MailRow({
         <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {formatMailText(thread.snippet) || "No message preview is available."}
         </p>
-        {primaryLabel ? (
-          <span
-            className={cn(
-              "hidden shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium capitalize 2xl:inline-flex",
-              "bg-secondary text-muted-foreground",
-            )}
+        {labels.length > 0 ? (
+          <div
+            className="hidden min-w-0 max-w-[40%] shrink items-center gap-1 overflow-hidden lg:flex"
+            aria-label="User-created labels"
           >
-            {primaryLabel.name}
-          </span>
+            {labels.map((label) => (
+              <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
+            ))}
+          </div>
         ) : null}
         {starred ? (
           <HugeiconsIcon icon={StarIcon} size={13} className="shrink-0 text-warning" fill="currentColor" />
