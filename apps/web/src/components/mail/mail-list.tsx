@@ -81,10 +81,10 @@ function MailRow({
   mailboxCursor,
 }: MailRowProps) {
   const people = threadPeople(thread.participants, accountEmail);
-  const unread = thread.gmailLabels.some(
+  const isUnread = thread.gmailLabels.some(
     (label) => label.providerLabelId === "UNREAD",
   );
-  const starred = thread.gmailLabels.some(
+  const isStarred = thread.gmailLabels.some(
     (label) => label.providerLabelId === "STARRED",
   );
   const labels = listMailRowLabels(thread);
@@ -96,12 +96,27 @@ function MailRow({
       className={cn(
         "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_auto] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors",
         "hover:bg-accent/55 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-        unread && "bg-card/45",
+        isUnread && "bg-card/45",
       )}
     >
       <MailNavigationPending variant="edge" />
       <div className="flex min-w-0 items-center gap-2">
-        <p className={cn("truncate text-sm", unread ? "font-semibold" : "font-medium text-foreground/78")}>
+        <span
+          aria-hidden="true"
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            isUnread ? "bg-blue-500" : "bg-transparent",
+          )}
+        />
+        <span className="sr-only">{isUnread ? "Unread" : "Read"}</span>
+        <p
+          className={cn(
+            "truncate text-sm",
+            isUnread
+              ? "font-semibold"
+              : "font-normal text-foreground/70",
+          )}
+        >
           {people}
           {thread.messageCount > 1 ? (
             <span className="ml-1.5 text-xs font-normal tabular-nums text-muted-foreground">
@@ -112,7 +127,14 @@ function MailRow({
       </div>
 
       <div className="flex min-w-0 items-center gap-2">
-        <p className={cn("shrink-0 truncate text-sm", unread ? "max-w-[48%] font-semibold" : "max-w-[42%] font-medium text-foreground/86")}>
+        <p
+          className={cn(
+            "shrink-0 truncate text-sm",
+            isUnread
+              ? "max-w-[48%] font-semibold"
+              : "max-w-[42%] font-normal text-foreground/76",
+          )}
+        >
           {formatMailText(thread.subject) || "(No subject)"}
         </p>
         <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
@@ -128,7 +150,7 @@ function MailRow({
             ))}
           </div>
         ) : null}
-        {starred ? (
+        {isStarred ? (
           <HugeiconsIcon icon={StarIcon} size={13} className="shrink-0 text-warning" fill="currentColor" />
         ) : null}
       </div>
@@ -203,7 +225,10 @@ export function MailList({
     account.syncState.mailSync === "pending" || account.syncState.mailSync === "running";
 
   return (
-    <section className="flex min-h-0 flex-col bg-background" aria-label="Mailbox">
+    <section
+      className="mx-3 flex min-h-0 flex-col border-x border-border/35 bg-background"
+      aria-label="Mailbox"
+    >
       <header className="flex h-15 shrink-0 items-center justify-between border-b border-border/45 px-5">
         <h1 className="truncate text-base font-semibold tracking-[-0.025em]">
           {query
