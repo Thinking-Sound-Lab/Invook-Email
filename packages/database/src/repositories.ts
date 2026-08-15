@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   MAIL_EMBEDDING_DIMENSIONS,
   type IndexingProgress,
+  type LabelHistoryWindowDays,
   type MailSyncProgress,
   type MailboxView,
 } from "@invook/contracts";
@@ -40,6 +41,7 @@ import {
   type IndexingPrerequisiteState,
 } from "./embedding-indexing";
 import {
+  enqueueHistoricalMessageLabelAnalysis,
   enqueueMessageLabelAnalysisWithExecutor,
   ensureBuiltInInvookLabels,
   refreshVisibleThread,
@@ -2562,7 +2564,12 @@ function isUniqueViolation(error: unknown) {
 }
 
 export async function createInvookLabel(
-  input: { userId: string; name: string; description: string },
+  input: {
+    userId: string;
+    name: string;
+    description: string;
+    applyToPastDays?: LabelHistoryWindowDays | null;
+  },
   database: Database = getDatabase(),
 ) {
   try {
@@ -2609,12 +2616,28 @@ export async function createInvookLabel(
         })
         .returning();
       if (!label) throw new Error("The label could not be created.");
+      const windowDays = input.applyToPastDays ?? null;
+      const queuedMessageCount = windowDays
+        ? await enqueueHistoricalMessageLabelAnalysis(
+            {
+              userId: input.userId,
+              accountId: account.id,
+              labelId: label.id,
+              definitionVersion: label.definitionVersion,
+              after: new Date(Date.now() - windowDays * 24 * 60 * 60 * 1_000),
+            },
+            transaction,
+          )
+        : 0;
       return {
         id: label.id,
         name: label.name,
         description: label.description,
         systemKey: label.systemKey,
         definitionVersion: label.definitionVersion,
+        historicalAnalysis: windowDays
+          ? { windowDays, queuedMessageCount }
+          : null,
       };
     });
   } catch (error) {
@@ -2732,7 +2755,8 @@ export async function setUserThreadLabel(
     const threadMessages = await transaction
       .select({ id: messages.id })
       .from(messages)
-      .where(eq(messages.threadId, thread.id));
+      .where(eq(messages.threadId, thread.id))
+      .for("update");
     const messageIds = threadMessages.map((message) => message.id);
     if (messageIds.length > 0) {
       await transaction

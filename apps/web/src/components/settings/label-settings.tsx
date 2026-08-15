@@ -5,6 +5,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import type {
   CreateInvookLabelRequest,
   InvookLabel,
+  PreviewInvookLabelRequest,
 } from "@invook/contracts";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -13,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import {
   createInvookLabel,
   deleteInvookLabel,
+  previewInvookLabel,
 } from "@/lib/api/labels";
 import { apiErrorMessage } from "@/lib/http-error";
 
@@ -39,6 +41,10 @@ export function LabelSettings({ invookLabels }: LabelSettingsProps) {
   async function handleCreateLabel(request: CreateInvookLabelRequest) {
     await createInvookLabel(request);
     router.refresh();
+  }
+
+  function handlePreviewLabel(request: PreviewInvookLabelRequest) {
+    return previewInvookLabel(request);
   }
 
   async function handleDeleteInvookLabel(label: InvookLabel) {
@@ -68,7 +74,7 @@ export function LabelSettings({ invookLabels }: LabelSettingsProps) {
           onClick={handleOpenEditor}
         >
           <HugeiconsIcon icon={Add01Icon} size={14} />
-          New Invook label
+          Add label
         </Button>
       </div>
 
@@ -111,6 +117,7 @@ export function LabelSettings({ invookLabels }: LabelSettingsProps) {
         <CreateLabelDialog
           onClose={() => setIsEditorOpen(false)}
           onCreate={handleCreateLabel}
+          onPreview={handlePreviewLabel}
         />
       ) : null}
     </section>

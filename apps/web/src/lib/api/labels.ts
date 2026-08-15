@@ -1,9 +1,10 @@
 import type {
   CreateInvookLabelRequest,
+  CreateInvookLabelResponse,
   DeletedResourceResponse,
-  InvookLabel,
-  InvookLabelResponse,
+  InvookLabelPreviewResponse,
   InvookThreadLabel,
+  PreviewInvookLabelRequest,
   SetThreadLabelRequest,
   ThreadLabelsResponse,
 } from "@invook/contracts";
@@ -11,9 +12,22 @@ import axios from "axios";
 
 export async function createInvookLabel(
   input: CreateInvookLabelRequest,
-): Promise<InvookLabel> {
-  const response = await axios.post<InvookLabelResponse>("/v1/labels", input);
-  return response.data.label;
+): Promise<CreateInvookLabelResponse> {
+  const response = await axios.post<CreateInvookLabelResponse>(
+    "/v1/labels",
+    input,
+  );
+  return response.data;
+}
+
+export async function previewInvookLabel(
+  input: PreviewInvookLabelRequest,
+): Promise<InvookLabelPreviewResponse> {
+  const response = await axios.post<InvookLabelPreviewResponse>(
+    "/v1/labels/preview",
+    input,
+  );
+  return response.data;
 }
 
 export async function deleteInvookLabel(labelId: string): Promise<void> {

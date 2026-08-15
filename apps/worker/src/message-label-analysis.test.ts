@@ -8,10 +8,13 @@ import type {
 } from "@invook/database";
 
 import {
+  createRunHistoricalMessageLabelAnalysis,
   createRunMessageLabelAnalysis,
   failTerminalMessageLabelAnalysis,
   messageLabelAnalysisErrorCode,
+  parseHistoricalMessageLabelAnalysisJob,
   parseMessageLabelAnalysisJob,
+  type HistoricalMessageLabelAnalysisDependencies,
   type MessageLabelAnalysisDependencies,
 } from "./message-label-analysis";
 
@@ -32,6 +35,27 @@ function analysisJob(
       contentHash: CONTENT_HASH,
       analysisVersion: 3,
       definitionHash: DEFINITION_HASH,
+    },
+    attempts: 1,
+    maxAttempts: 5,
+    ...overrides,
+  };
+}
+
+function historicalJob(
+  overrides: Partial<WorkflowStepJob> = {},
+): WorkflowStepJob {
+  return {
+    id: "step-2",
+    userId: "user-1",
+    accountId: "account-1",
+    runId: null,
+    stepType: "label.message.apply",
+    payload: {
+      messageId: "message-1",
+      contentHash: CONTENT_HASH,
+      labelId: "security-label",
+      definitionVersion: 2,
     },
     attempts: 1,
     maxAttempts: 5,
@@ -152,6 +176,106 @@ test("analysis classifies only the stored message and current definitions", asyn
     eventId: "event-1",
     messageId: "message-1",
   });
+});
+
+test("historical label jobs carry identifiers and classify the stored message only", async () => {
+  assert.deepEqual(parseHistoricalMessageLabelAnalysisJob(historicalJob()), {
+    userId: "user-1",
+    accountId: "account-1",
+    checkpoint: {
+      messageId: "message-1",
+      contentHash: CONTENT_HASH,
+      labelId: "security-label",
+      definitionVersion: 2,
+    },
+  });
+
+  const calls: string[] = [];
+  const dependencies: HistoricalMessageLabelAnalysisDependencies = {
+    async begin(input) {
+      calls.push("begin");
+      assert.equal(input.checkpoint.labelId, "security-label");
+      return {
+        status: "ready",
+        message: {
+          id: "message-1",
+          subject: "Security notice",
+          sender: {
+            raw: "Security <security@example.test>",
+            email: "security@example.test",
+          },
+          recipients: ["owner@example.test"],
+          bodyText: "A stored account security alert",
+        },
+        definition: {
+          id: "security-label",
+          name: "Security",
+          description: "Account security and authentication notices",
+          definitionVersion: 2,
+        },
+      };
+    },
+    async classify(input) {
+      calls.push("classify");
+      assert.equal(input.message.bodyText, "A stored account security alert");
+      assert.deepEqual(input.labelDefinitions.map(({ id }) => id), [
+        "security-label",
+      ]);
+      return {
+        modelId: "model-1",
+        decisions: [
+          {
+            labelId: "security-label",
+            matched: true,
+            confidence: 94,
+            definitionVersion: 2,
+          },
+        ],
+      };
+    },
+    async complete(input) {
+      calls.push("complete");
+      assert.equal(input.decision.labelId, "security-label");
+      return { status: "complete" };
+    },
+  };
+
+  const result = await createRunHistoricalMessageLabelAnalysis(dependencies)(
+    historicalJob(),
+  );
+  assert.deepEqual(calls, ["begin", "classify", "complete"]);
+  assert.deepEqual(result, {
+    status: "complete",
+    messageId: "message-1",
+    labelId: "security-label",
+  });
+});
+
+test("missing, superseded, and current historical work no-op before the model", async () => {
+  for (const status of ["missing", "superseded", "current"] as const) {
+    let classified = false;
+    const dependencies: HistoricalMessageLabelAnalysisDependencies = {
+      async begin() {
+        return { status };
+      },
+      async classify() {
+        classified = true;
+        throw new Error("The classifier must not run.");
+      },
+      async complete() {
+        throw new Error("Completion must not run.");
+      },
+    };
+    const result = await createRunHistoricalMessageLabelAnalysis(dependencies)(
+      historicalJob(),
+    );
+    assert.deepEqual(result, {
+      status,
+      messageId: "message-1",
+      labelId: "security-label",
+    });
+    assert.equal(classified, false);
+  }
 });
 
 test("missing, deleted, superseded, and resolved work no-op before the model", async () => {

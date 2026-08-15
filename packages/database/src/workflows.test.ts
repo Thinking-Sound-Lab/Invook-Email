@@ -85,4 +85,8 @@ test("ready-replica derivations fan out to independent BullMQ queues", () => {
     queueNameForStepType("label.message.analyze"),
     "mail-label-submit",
   );
+  assert.equal(
+    queueNameForStepType("label.message.apply"),
+    "mail-label-submit",
+  );
 });

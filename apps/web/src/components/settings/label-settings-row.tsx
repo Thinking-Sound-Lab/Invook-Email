@@ -1,6 +1,6 @@
 import {
-  AiMagicIcon,
   Delete02Icon,
+  Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -34,13 +34,11 @@ export function LabelSettingsRow({
 }: LabelSettingsRowProps) {
   return (
     <article className="group flex min-h-14 items-center gap-3 rounded-lg px-2.5 py-2 transition-colors hover:bg-muted/35">
-      <span
-        className="grid size-7 shrink-0 place-items-center rounded-md bg-primary/12 text-primary"
-      >
+      <span className="grid size-4 shrink-0 place-items-center rounded-[4px] bg-primary text-primary-foreground">
         <HugeiconsIcon
-          icon={AiMagicIcon}
-          size={14}
-          strokeWidth={1.8}
+          icon={Tick02Icon}
+          size={11}
+          strokeWidth={2.4}
         />
       </span>
 

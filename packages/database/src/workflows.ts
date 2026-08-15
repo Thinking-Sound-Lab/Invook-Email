@@ -272,6 +272,7 @@ export function queueNameForStepType(stepType: string): QueueName {
     case "memory.feedback":
       return "mail-memory-feedback";
     case "label.message.analyze":
+    case "label.message.apply":
       return "mail-label-submit";
     default:
       throw new Error(`Unsupported workflow step type: ${stepType}`);

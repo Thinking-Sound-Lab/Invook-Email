@@ -156,8 +156,9 @@ import {
 import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
 import {
   failTerminalMessageLabelAnalysis,
+  isMessageLabelWorkflowStep,
   messageLabelAnalysisErrorCode,
-  runMessageLabelAnalysis,
+  runLabelSubmission,
 } from "./message-label-analysis";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
@@ -2284,7 +2285,7 @@ function workflowStepFromBullJob(bullJob: WorkflowJob): WorkflowStepJob {
 async function reconcileTerminalQueueFailure(bullJob: WorkflowJob, error: Error) {
   const job = workflowStepFromBullJob(bullJob);
   const message =
-    job.stepType === "label.message.analyze"
+    isMessageLabelWorkflowStep(job.stepType)
       ? messageLabelAnalysisErrorCode(error)
       : isBullMqStalledTerminalFailure(error) && job.stepType.startsWith("gmail.")
         ? "gmail_workflow_stalled"
@@ -2320,7 +2321,7 @@ async function executeWorkflowJob(
       maxAttempts: job.maxAttempts,
     });
     const persistedMessage =
-      job.stepType === "label.message.analyze"
+      isMessageLabelWorkflowStep(job.stepType)
         ? messageLabelAnalysisErrorCode(error)
         : failure.persistedMessage;
     if (failure.isTerminal) {
@@ -2335,7 +2336,7 @@ async function executeWorkflowJob(
     if (failure.isReconnectRequired) {
       throw new UnrecoverableError(persistedMessage);
     }
-    if (job.stepType === "label.message.analyze") {
+    if (isMessageLabelWorkflowStep(job.stepType)) {
       throw new Error(persistedMessage, { cause: error });
     }
     throw error;
@@ -2415,7 +2416,7 @@ function processMemoryFeedback(bullJob: WorkflowJob) {
 }
 
 function processLabelSubmission(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, runMessageLabelAnalysis);
+  return executeWorkflowJob(bullJob, runLabelSubmission);
 }
 
 function startBullWorkers(

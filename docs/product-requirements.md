@@ -26,7 +26,7 @@ Invook never ships dummy mailbox, contact, memory, label, or draft data. If Gmai
 
 ### Opinionated defaults, user authority
 
-A user may add an account-owned Invook label with an explicit description. It applies only to messages whose required analysis has not completed yet or that are ingested afterward; creating or editing a definition never scans historical mail. Explicit user applications and suppressions win over model output.
+A user may add an account-owned Invook label with an explicit description. Before creation, Invook can preview matches by classifying up to 100 recent canonical stored messages without persisting those sample results. At final confirmation the user may explicitly apply the new label to stored messages from the last 7, 30, or 90 days; that choice creates durable per-message work. Without that choice, and for definition edits, the label applies only to messages whose required analysis has not completed yet or that are ingested afterward. Explicit user applications and suppressions win over model output.
 
 User-written Memory is authoritative. Automatic inference must not silently overwrite it.
 
@@ -81,7 +81,7 @@ The right pane is the agent for Find and local Write. It reads only authoritativ
 
 ### Label settings
 
-Settings lists the built-in Newsletter definition and user-created Invook labels. Newsletter cannot be deleted. Creating or editing a custom label requires both a name and description and stores only the new definition version; it does not enqueue historical work. Deleting a custom label removes its decisions and memberships through database ownership constraints.
+Settings lists the built-in Newsletter definition and user-created Invook labels. Newsletter cannot be deleted. Creating or editing a custom label requires both a name and description. The creation flow previews sample matches from stored mail and asks whether to enqueue an optional 7-, 30-, or 90-day historical application. Editing stores only the new definition version and does not enqueue historical work. Deleting a custom label removes its decisions and memberships through database ownership constraints.
 
 ### Memory settings
 
@@ -245,7 +245,8 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `GET` | `/v1/attachments/:id/download` | Authorize the attachment and download its private stored bytes |
 | `GET` | `/v1/mailbox/events` | Stream authenticated durable mailbox-change events over SSE |
 | `POST` | `/v1/webhooks/google-pubsub` | Authenticate a Gmail Pub/Sub push and coalesce its pending cursor |
-| `POST` | `/v1/labels` | Create a custom Invook label definition without historical backfill |
+| `POST` | `/v1/labels/preview` | Preview a custom label against up to 100 recent canonical stored messages |
+| `POST` | `/v1/labels` | Create a custom Invook label and optionally enqueue a 7-, 30-, or 90-day stored-mail scan |
 | `PATCH` | `/v1/labels/:labelId` | Update a custom definition for not-yet-complete and future analysis |
 | `DELETE` | `/v1/labels/:labelId` | Delete a custom Invook label and its decisions |
 | `GET` | `/v1/memories` | Return the connected account's real Memory and status |

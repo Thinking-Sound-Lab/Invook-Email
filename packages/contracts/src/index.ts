@@ -58,15 +58,43 @@ export type InvookLabel = {
   definitionVersion: number;
 };
 
+export type LabelHistoryWindowDays = 7 | 30 | 90;
+
 export type CreateInvookLabelRequest = {
   name: string;
   description: string;
+  applyToPastDays?: LabelHistoryWindowDays | null;
 };
 
-export type UpdateInvookLabelRequest = CreateInvookLabelRequest;
+export type UpdateInvookLabelRequest = Pick<
+  CreateInvookLabelRequest,
+  "name" | "description"
+>;
+
+export type PreviewInvookLabelRequest = UpdateInvookLabelRequest;
+
+export type InvookLabelPreviewMatch = {
+  messageId: string;
+  sender: string;
+  subject: string;
+  sentAt: string;
+  confidence: number;
+};
+
+export type InvookLabelPreviewResponse = {
+  scannedMessageCount: number;
+  matches: InvookLabelPreviewMatch[];
+};
 
 export type InvookLabelResponse = {
   label: InvookLabel;
+};
+
+export type CreateInvookLabelResponse = InvookLabelResponse & {
+  historicalAnalysis: {
+    windowDays: LabelHistoryWindowDays;
+    queuedMessageCount: number;
+  } | null;
 };
 
 export type InvookThreadLabel = {

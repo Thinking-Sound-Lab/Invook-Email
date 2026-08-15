@@ -29,7 +29,7 @@ Embedding backfill and initial Memory wait for the watch-first sequence to compl
 7. Synchronize Gmail Draft resources.
 8. Under the account advisory lock, replay history from H0 and continue while a newer pending notification cursor exists.
 9. Atomically mark the replica ready at the final applied cursor.
-10. Only then publish embedding and initial Memory derivation work. There is no final label backfill.
+10. Only then publish embedding and initial Memory derivation work. Initial sync never triggers a final label backfill; the separate user-confirmed recent-mail scan is the only historical label application path.
 
 A connected account's stored messages become usable while this sequence is in progress after their required label analysis reaches `complete` or terminal `failed`. `pending` and `running` messages are excluded from normal mailbox, search, agent, attachment, and reply-draft results. A terminal failure is visible with its real Gmail-owned state and an explicit failure indicator, but no fabricated AI match. Missing rows stay unavailable, semantic indexing is not a prerequisite, and Gmail fetching continues independently with separately bounded `GMAIL_MESSAGE_CONCURRENCY` and `MAIL_LABEL_CONCURRENCY`. The final H0 replay remains the only path that marks the replica ready.
 
@@ -72,7 +72,7 @@ Explicit user actions for read/unread, star, archive, Trash, and Gmail Draft edi
 
 The `mail-label-submit` worker rereads the owned canonical stored message and the current Newsletter plus custom Invook definitions. One structured classifier call may return zero or more independent matches. It never receives raw MIME, HTML, attachments, provider payloads, Important, or Others. Before commit, PostgreSQL locks the message and verifies the content hash, analysis version, definition hash, and every definition version. Superseded work no-ops or creates a newer durable step; retries reuse the stable message/content/definition identity and cannot duplicate decisions or visible memberships.
 
-Creating or editing a custom label stores only the definition. It does not scan historical mail, and already-complete messages remain unchanged. A definition created before an in-flight message commits is included by safely superseding the stale work. Decisions, visible AI memberships, completion state, and the mailbox-change event commit atomically. Explicit user applications and suppressions win over AI output.
+Creating a custom label previews against canonical stored mail and, only after explicit confirmation, may enqueue per-message application work for the last 7, 30, or 90 days. The queue payload contains identifiers and content/definition checkpoints; the worker rereads the stored message and applies only the new label without hiding already-visible mail. Without that choice, and when editing a definition, already-complete messages remain unchanged. A definition created before an in-flight message commits is included by safely superseding the stale work. Decisions, visible AI memberships, completion state, and the mailbox-change event commit atomically. Explicit user applications and suppressions win over AI output.
 
 Creating a local Invook draft does not create a Gmail draft. Explicit promotion, Gmail Draft editing, and sending retain provider-write idempotency and ambiguous-result evidence in `gmail_draft_write_operations`. AI evidence remains separate after promotion.
 

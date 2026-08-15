@@ -8,10 +8,14 @@ import { v4 as uuidv4 } from "uuid";
 
 import type { Database } from "./client";
 import {
+  beginHistoricalMessageLabelAnalysis,
   beginMessageLabelAnalysis,
+  completeHistoricalMessageLabelAnalysis,
   completeMessageLabelAnalysis,
   ensureBuiltInInvookLabels,
   failMessageLabelAnalysis,
+  listInvookLabelPreviewCandidates,
+  type HistoricalMessageLabelCheckpoint,
   type MessageLabelAnalysisCheckpoint,
 } from "./message-label-analysis";
 import {
@@ -50,8 +54,13 @@ function indexedMessage(input: {
   subject: string;
   ingestionMode: "initial" | "incremental";
   historyId: string;
+  sentAt?: Date;
 }): IndexedMessage {
-  const sentAt = new Date(`2026-08-15T08:00:${input.historyId.padStart(2, "0").slice(-2)}.000Z`);
+  const sentAt =
+    input.sentAt ??
+    new Date(
+      `2026-08-15T08:00:${input.historyId.padStart(2, "0").slice(-2)}.000Z`,
+    );
   return {
     userId: input.userId,
     accountId: input.accountId,
@@ -83,6 +92,30 @@ function indexedMessage(input: {
     memoryContactEmails: [],
     attachments: [],
   };
+}
+
+async function queuedHistoricalCheckpoint(
+  database: Database,
+  labelId: string,
+): Promise<HistoricalMessageLabelCheckpoint> {
+  const matching = await database
+    .select({ input: workflowSteps.input })
+    .from(workflowSteps)
+    .where(eq(workflowSteps.stepType, "label.message.apply"))
+    .orderBy(desc(workflowSteps.createdAt));
+  const payload = matching
+    .map((row) => row.input)
+    .find((input) => input.labelId === labelId);
+  assert.ok(payload);
+  const { messageId, contentHash, definitionVersion } = payload;
+  if (
+    typeof messageId !== "string" ||
+    typeof contentHash !== "string" ||
+    typeof definitionVersion !== "number"
+  ) {
+    throw new Error("The queued historical-label checkpoint is invalid.");
+  }
+  return { messageId, contentHash, labelId, definitionVersion };
 }
 
 async function queuedAnalysisCheckpoint(
@@ -160,6 +193,7 @@ test(
           subject: "Weekly travel receipt newsletter",
           ingestionMode: "initial",
           historyId: "100",
+          sentAt: new Date(),
         }),
         database,
       );
@@ -325,6 +359,18 @@ test(
         await getGmailDraftResourceForUser({ userId, gmailDraftId }, database),
         null,
       );
+      const previewCandidates = await listInvookLabelPreviewCandidates(
+        { userId, limit: 100 },
+        database,
+      );
+      assert.deepEqual(
+        previewCandidates.map((candidate) => candidate.messageId),
+        [initial.messageId],
+      );
+      assert.equal(
+        previewCandidates[0]?.bodyText,
+        "Stored body for Weekly travel receipt newsletter",
+      );
 
       const stepCountBeforeDefinitionChange = await database
         .select({ value: count(workflowSteps.id) })
@@ -335,6 +381,7 @@ test(
         database,
       );
       assert.ok(lateLabel);
+      assert.equal(lateLabel.historicalAnalysis, null);
       const updatedLateLabel = await updateInvookLabel(
         {
           userId,
@@ -350,11 +397,89 @@ test(
         .from(workflowSteps)
         .where(eq(workflowSteps.stepType, "label.message.analyze"));
       assert.deepEqual(stepCountAfterDefinitionChange, stepCountBeforeDefinitionChange);
+      const historicalStepsBeforeOptIn = await database
+        .select({ value: count(workflowSteps.id) })
+        .from(workflowSteps)
+        .where(eq(workflowSteps.stepType, "label.message.apply"));
+      assert.equal(historicalStepsBeforeOptIn[0]?.value, 0);
       const [stillComplete] = await database
         .select({ state: messages.labelAnalysisState })
         .from(messages)
         .where(eq(messages.id, initial.messageId));
       assert.equal(stillComplete?.state, "complete");
+
+      const security = await createInvookLabel(
+        {
+          userId,
+          name: "Security",
+          description: "Account security and authentication notices",
+          applyToPastDays: 7,
+        },
+        database,
+      );
+      assert.ok(security);
+      assert.deepEqual(security.historicalAnalysis, {
+        windowDays: 7,
+        queuedMessageCount: 1,
+      });
+      const historicalCheckpoint = await queuedHistoricalCheckpoint(
+        database,
+        security.id,
+      );
+      assert.equal(historicalCheckpoint.messageId, initial.messageId);
+      const historicalReady = await beginHistoricalMessageLabelAnalysis(
+        { userId, accountId, checkpoint: historicalCheckpoint },
+        database,
+      );
+      assert.equal(historicalReady.status, "ready");
+      if (historicalReady.status !== "ready") return;
+      assert.equal(historicalReady.message.bodyText, "Stored body for Weekly travel receipt newsletter");
+      const historicalCompleted = await completeHistoricalMessageLabelAnalysis(
+        {
+          userId,
+          accountId,
+          checkpoint: historicalCheckpoint,
+          modelId: "test-classifier",
+          decision: {
+            labelId: security.id,
+            definitionVersion: security.definitionVersion,
+            matched: true,
+            confidence: 96,
+          },
+        },
+        database,
+      );
+      assert.equal(historicalCompleted.status, "complete");
+      const [securityMembership] = await database
+        .select({ source: messageLabels.source })
+        .from(messageLabels)
+        .where(
+          and(
+            eq(messageLabels.messageId, initial.messageId),
+            eq(messageLabels.labelId, security.id),
+          ),
+        );
+      assert.equal(securityMembership?.source, "ai");
+      assert.equal(
+        (
+          await completeHistoricalMessageLabelAnalysis(
+            {
+              userId,
+              accountId,
+              checkpoint: historicalCheckpoint,
+              modelId: "test-classifier",
+              decision: {
+                labelId: security.id,
+                definitionVersion: security.definitionVersion,
+                matched: true,
+                confidence: 96,
+              },
+            },
+            database,
+          )
+        ).status,
+        "current",
+      );
 
       const historyResult = await applyGmailHistoryBatch(
         {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
 
 import {
   getDatabase,
@@ -8,6 +8,7 @@ import {
   type DatabaseExecutor,
 } from "./client";
 import {
+  connectedAccounts,
   labels,
   mailboxChangeEvents,
   messageLabelDecisions,
@@ -15,7 +16,10 @@ import {
   messages,
   threads,
 } from "./schema";
-import { enqueueWorkflowStepWithExecutor } from "./workflows";
+import {
+  enqueueWorkflowStepsWithExecutor,
+  enqueueWorkflowStepWithExecutor,
+} from "./workflows";
 
 export type MessageLabelDefinition = {
   id: string;
@@ -36,6 +40,13 @@ export type MessageLabelDecisionInput = {
   definitionVersion: number;
   matched: boolean;
   confidence: number;
+};
+
+export type HistoricalMessageLabelCheckpoint = {
+  messageId: string;
+  contentHash: string;
+  labelId: string;
+  definitionVersion: number;
 };
 
 export const BUILT_IN_NEWSLETTER_LABEL = {
@@ -605,6 +616,339 @@ export async function failMessageLabelAnalysis(
       state: "failed",
     });
     return true;
+  });
+}
+
+export async function listInvookLabelPreviewCandidates(
+  input: { userId: string; limit?: number },
+  database: Database = getDatabase(),
+): Promise<Array<{
+  messageId: string;
+  subject: string;
+  sender: { raw: string; email: string };
+  recipients: string[];
+  bodyText: string;
+  sentAt: Date;
+}>> {
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 100);
+  const [account] = await database
+    .select({ id: connectedAccounts.id })
+    .from(connectedAccounts)
+    .where(
+      and(
+        eq(connectedAccounts.userId, input.userId),
+        eq(connectedAccounts.status, "connected"),
+      ),
+    )
+    .orderBy(desc(connectedAccounts.createdAt))
+    .limit(1);
+  if (!account) return [];
+  return database
+    .select({
+      messageId: messages.id,
+      subject: messages.subject,
+      sender: messages.sender,
+      recipients: messages.recipients,
+      bodyText: messages.bodyText,
+      sentAt: messages.sentAt,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.userId, input.userId),
+        eq(messages.accountId, account.id),
+        inArray(messages.labelAnalysisState, visibleMessageLabelAnalysisStates),
+      ),
+    )
+    .orderBy(desc(messages.sentAt), desc(messages.createdAt))
+    .limit(limit);
+}
+
+export async function enqueueHistoricalMessageLabelAnalysis(
+  input: {
+    userId: string;
+    accountId: string;
+    labelId: string;
+    definitionVersion: number;
+    after: Date;
+  },
+  database: DatabaseExecutor,
+): Promise<number> {
+  const candidates = await database
+    .select({
+      messageId: messages.id,
+      contentHash: messages.embeddingContentHash,
+    })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.userId, input.userId),
+        eq(messages.accountId, input.accountId),
+        gte(messages.sentAt, input.after),
+        inArray(messages.labelAnalysisState, visibleMessageLabelAnalysisStates),
+      ),
+    );
+
+  let queuedMessageCount = 0;
+  for (let index = 0; index < candidates.length; index += 500) {
+    const inserted = await enqueueWorkflowStepsWithExecutor(
+      candidates.slice(index, index + 500).map((candidate) => ({
+        userId: input.userId,
+        accountId: input.accountId,
+        stepType: "label.message.apply",
+        payload: {
+          messageId: candidate.messageId,
+          contentHash: candidate.contentHash,
+          labelId: input.labelId,
+          definitionVersion: input.definitionVersion,
+        },
+        idempotencyKey: `label.message.apply:${candidate.messageId}:${candidate.contentHash}:${input.labelId}:${input.definitionVersion}`,
+      })),
+      database,
+    );
+    queuedMessageCount += inserted.length;
+  }
+  return queuedMessageCount;
+}
+
+function historicalCheckpointMatches(
+  input: {
+    messageId: string;
+    contentHash: string;
+    labelId: string;
+    definitionVersion: number;
+  },
+  checkpoint: HistoricalMessageLabelCheckpoint,
+): boolean {
+  return (
+    input.messageId === checkpoint.messageId &&
+    input.contentHash === checkpoint.contentHash &&
+    input.labelId === checkpoint.labelId &&
+    input.definitionVersion === checkpoint.definitionVersion
+  );
+}
+
+export async function beginHistoricalMessageLabelAnalysis(
+  input: {
+    userId: string;
+    accountId: string;
+    checkpoint: HistoricalMessageLabelCheckpoint;
+  },
+  database: Database = getDatabase(),
+): Promise<
+  | { status: "missing" | "superseded" | "current" }
+  | {
+      status: "ready";
+      message: {
+        id: string;
+        subject: string;
+        sender: { raw: string; email: string };
+        recipients: string[];
+        bodyText: string;
+      };
+      definition: MessageLabelDefinition;
+    }
+> {
+  const [target] = await database
+    .select({
+      messageId: messages.id,
+      contentHash: messages.embeddingContentHash,
+      subject: messages.subject,
+      sender: messages.sender,
+      recipients: messages.recipients,
+      bodyText: messages.bodyText,
+      labelId: labels.id,
+      labelName: labels.name,
+      labelDescription: labels.description,
+      definitionVersion: labels.definitionVersion,
+      existingDefinitionVersion: messageLabelDecisions.definitionVersion,
+    })
+    .from(messages)
+    .innerJoin(
+      labels,
+      and(
+        eq(labels.id, input.checkpoint.labelId),
+        eq(labels.userId, input.userId),
+        eq(labels.accountId, input.accountId),
+        eq(labels.kind, "invook"),
+      ),
+    )
+    .leftJoin(
+      messageLabelDecisions,
+      and(
+        eq(messageLabelDecisions.messageId, messages.id),
+        eq(messageLabelDecisions.labelId, labels.id),
+      ),
+    )
+    .where(
+      and(
+        eq(messages.id, input.checkpoint.messageId),
+        eq(messages.userId, input.userId),
+        eq(messages.accountId, input.accountId),
+      ),
+    )
+    .limit(1);
+  if (!target) return { status: "missing" };
+  if (!historicalCheckpointMatches(target, input.checkpoint)) {
+    return { status: "superseded" };
+  }
+  if (target.existingDefinitionVersion === target.definitionVersion) {
+    return { status: "current" };
+  }
+  return {
+    status: "ready",
+    message: {
+      id: target.messageId,
+      subject: target.subject,
+      sender: target.sender,
+      recipients: target.recipients,
+      bodyText: target.bodyText,
+    },
+    definition: {
+      id: target.labelId,
+      name: target.labelName,
+      description: target.labelDescription,
+      definitionVersion: target.definitionVersion,
+    },
+  };
+}
+
+export async function completeHistoricalMessageLabelAnalysis(
+  input: {
+    userId: string;
+    accountId: string;
+    checkpoint: HistoricalMessageLabelCheckpoint;
+    modelId: string;
+    decision: MessageLabelDecisionInput;
+  },
+  database: Database = getDatabase(),
+): Promise<{ status: "missing" | "superseded" | "current" | "complete" }> {
+  return database.transaction(async (transaction) => {
+    const [target] = await transaction
+      .select({
+        messageId: messages.id,
+        threadId: messages.threadId,
+        contentHash: messages.embeddingContentHash,
+        labelAnalysisState: messages.labelAnalysisState,
+        labelId: labels.id,
+        definitionVersion: labels.definitionVersion,
+      })
+      .from(messages)
+      .innerJoin(
+        labels,
+        and(
+          eq(labels.id, input.checkpoint.labelId),
+          eq(labels.userId, input.userId),
+          eq(labels.accountId, input.accountId),
+          eq(labels.kind, "invook"),
+        ),
+      )
+      .where(
+        and(
+          eq(messages.id, input.checkpoint.messageId),
+          eq(messages.userId, input.userId),
+          eq(messages.accountId, input.accountId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!target) return { status: "missing" };
+    if (
+      !historicalCheckpointMatches(target, input.checkpoint) ||
+      input.decision.labelId !== target.labelId ||
+      input.decision.definitionVersion !== target.definitionVersion ||
+      !Number.isFinite(input.decision.confidence) ||
+      input.decision.confidence < 0 ||
+      input.decision.confidence > 100
+    ) {
+      return { status: "superseded" };
+    }
+
+    const [existingDecision] = await transaction
+      .select({
+        definitionVersion: messageLabelDecisions.definitionVersion,
+        userOverride: messageLabelDecisions.userOverride,
+      })
+      .from(messageLabelDecisions)
+      .where(
+        and(
+          eq(messageLabelDecisions.messageId, target.messageId),
+          eq(messageLabelDecisions.labelId, target.labelId),
+        ),
+      )
+      .limit(1);
+    if (existingDecision?.definitionVersion === target.definitionVersion) {
+      return { status: "current" };
+    }
+
+    await transaction
+      .insert(messageLabelDecisions)
+      .values({
+        userId: input.userId,
+        accountId: input.accountId,
+        messageId: target.messageId,
+        labelId: target.labelId,
+        aiDecision: input.decision.matched ? "applied" : "not_applied",
+        confidence: input.decision.confidence.toFixed(2),
+        modelId: input.modelId,
+        definitionVersion: target.definitionVersion,
+        analyzedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [messageLabelDecisions.messageId, messageLabelDecisions.labelId],
+        set: {
+          aiDecision: input.decision.matched ? "applied" : "not_applied",
+          confidence: input.decision.confidence.toFixed(2),
+          modelId: input.modelId,
+          definitionVersion: target.definitionVersion,
+          analyzedAt: new Date(),
+        },
+      });
+
+    const userOverride = existingDecision?.userOverride ?? null;
+    const shouldApply =
+      userOverride === "applied" ||
+      (userOverride === null && input.decision.matched);
+    if (shouldApply) {
+      const source = userOverride === "applied" ? "user" : "ai";
+      await transaction
+        .insert(messageLabels)
+        .values({
+          userId: input.userId,
+          accountId: input.accountId,
+          messageId: target.messageId,
+          labelId: target.labelId,
+          source,
+        })
+        .onConflictDoUpdate({
+          target: [messageLabels.messageId, messageLabels.labelId],
+          set: { source, updatedAt: new Date() },
+        });
+    } else {
+      await transaction
+        .delete(messageLabels)
+        .where(
+          and(
+            eq(messageLabels.messageId, target.messageId),
+            eq(messageLabels.labelId, target.labelId),
+          ),
+        );
+    }
+
+    if (isMessageLabelAnalysisVisible(target.labelAnalysisState)) {
+      await refreshVisibleThread(transaction, target.threadId);
+      await transaction.insert(mailboxChangeEvents).values({
+        userId: input.userId,
+        accountId: input.accountId,
+        changeType: "labels_changed",
+        payload: {
+          messageId: target.messageId,
+          changedThreadIds: [target.threadId],
+          labelId: target.labelId,
+        },
+      });
+    }
+    return { status: "complete" };
   });
 }
 

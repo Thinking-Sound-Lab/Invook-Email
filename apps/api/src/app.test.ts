@@ -198,6 +198,33 @@ test("custom label edits require authentication", async () => {
   assert.equal(response.json().title, "Authentication required");
 });
 
+test("custom label previews require authentication", async () => {
+  const response = await api.inject({
+    method: "POST",
+    url: "/v1/labels/preview",
+    payload: { name: "Security", description: "Account security notices" },
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().title, "Authentication required");
+});
+
+test("custom label creation accepts only supported historical windows", async () => {
+  const response = await api.inject({
+    method: "POST",
+    url: "/v1/labels",
+    headers: { cookie: await sessionCookie(attachmentOwnerId) },
+    payload: {
+      name: "Security",
+      description: "Account security notices",
+      applyToPastDays: 14,
+    },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(response.json().title, "Past-email window must be 7, 30, or 90 days");
+});
+
 test("mailbox refresh requires an authenticated session", async () => {
   const response = await api.inject({
     method: "POST",
