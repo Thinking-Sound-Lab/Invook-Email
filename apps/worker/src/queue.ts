@@ -19,6 +19,24 @@ export const queueNames: QueueName[] = [
 export type WorkflowJob = Job<WorkflowStepJob, Record<string, unknown>, string>;
 
 export const gmailControlConcurrency = 5;
+export const gmailMessageConcurrency = parsePositiveInteger(
+  process.env.GMAIL_MESSAGE_CONCURRENCY,
+  5,
+  "GMAIL_MESSAGE_CONCURRENCY",
+);
+
+function parsePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+  return parsed;
+}
 
 const completedJobRetention = { age: 7 * 24 * 60 * 60, count: 1_000 };
 const failedJobRetention = { age: 30 * 24 * 60 * 60, count: 5_000 };
@@ -84,7 +102,7 @@ export class BullQueueRuntime {
   async configureGlobalConcurrency() {
     const gmailMessages = this.queues.get("gmail-messages");
     if (!gmailMessages) throw new Error("The Gmail message queue is unavailable.");
-    await gmailMessages.setGlobalConcurrency(5);
+    await gmailMessages.setGlobalConcurrency(gmailMessageConcurrency);
     const gmailControl = this.queues.get("gmail-control");
     if (!gmailControl) throw new Error("The Gmail control queue is unavailable.");
     await gmailControl.setGlobalConcurrency(gmailControlConcurrency);

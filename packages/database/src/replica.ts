@@ -2,18 +2,17 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, not, or } from "drizzle-orm
 import { v4 as uuidv4 } from "uuid";
 
 import { getDatabase, type Database } from "./client";
-import { deleteIndexedMessage, upsertIndexedMessage } from "./repositories";
+import {
+  deleteIndexedMessage,
+  replaceGmailMessageLabels,
+  upsertIndexedMessage,
+} from "./repositories";
 import {
   connectedAccounts,
   accountSecrets,
   drafts,
   gmailAccountCleanups,
-  gmailDrafts,
-  gmailLabels,
-  gmailMessageLabels,
-  gmailMessageTombstones,
-  gmailPushEvents,
-  gmailReplicaAudits,
+  labels,
   gmailReplicaStates,
   gmailWatchStates,
   mailboxChangeEvents,
@@ -21,8 +20,11 @@ import {
   messages,
   threads,
 } from "./schema";
-import type { IndexedMessage } from "./types";
-import { enqueueWorkflowStep } from "./workflows";
+import type { IndexedMessage, WorkflowStepInput } from "./types";
+import {
+  enqueueWorkflowStep,
+  enqueueWorkflowStepWithExecutor,
+} from "./workflows";
 
 type DatabaseTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
@@ -84,22 +86,29 @@ export async function getGmailProviderLabelForUser(
 ) {
   const [label] = await database
     .select({
-      id: gmailLabels.id,
-      providerLabelId: gmailLabels.providerLabelId,
-      type: gmailLabels.type,
-      accountId: gmailLabels.accountId,
+      id: labels.id,
+      providerLabelId: labels.providerLabelId,
+      type: labels.providerType,
+      accountId: labels.accountId,
     })
-    .from(gmailLabels)
-    .innerJoin(connectedAccounts, eq(connectedAccounts.id, gmailLabels.accountId))
+    .from(labels)
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, labels.accountId))
     .where(
       and(
-        eq(gmailLabels.id, input.gmailLabelId),
+        eq(labels.id, input.gmailLabelId),
+        eq(labels.kind, "gmail"),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
       ),
     )
     .limit(1);
-  return label ?? null;
+  if (!label?.providerLabelId || !label.type) return null;
+  return {
+    id: label.id,
+    providerLabelId: label.providerLabelId,
+    type: label.type,
+    accountId: label.accountId,
+  };
 }
 
 export async function getGmailMessageLabelMutationContext(
@@ -122,23 +131,82 @@ export async function getGmailMessageLabelMutationContext(
     )
     .limit(1);
   if (!message) return null;
-  const labels =
+  const providerLabels =
     input.gmailLabelIds.length > 0
       ? await database
           .select({
-            id: gmailLabels.id,
-            providerLabelId: gmailLabels.providerLabelId,
+            id: labels.id,
+            providerLabelId: labels.providerLabelId,
           })
-          .from(gmailLabels)
+          .from(labels)
           .where(
             and(
-              eq(gmailLabels.accountId, message.accountId),
-              inArray(gmailLabels.id, input.gmailLabelIds),
+              eq(labels.accountId, message.accountId),
+              eq(labels.kind, "gmail"),
+              inArray(labels.id, input.gmailLabelIds),
             ),
           )
       : [];
-  if (labels.length !== new Set(input.gmailLabelIds).size) return null;
-  return { ...message, labels };
+  if (
+    providerLabels.length !== new Set(input.gmailLabelIds).size ||
+    providerLabels.some((label) => !label.providerLabelId)
+  ) return null;
+  const resolvedLabels = providerLabels.flatMap((label) =>
+    label.providerLabelId
+      ? [{ id: label.id, providerLabelId: label.providerLabelId }]
+      : [],
+  );
+  return {
+    ...message,
+    labels: resolvedLabels,
+  };
+}
+
+export async function getGmailThreadLabelMutationContext(
+  input: { userId: string; threadId: string; gmailLabelIds: string[] },
+  database: Database = getDatabase(),
+) {
+  const [thread] = await database
+    .select({
+      accountId: threads.accountId,
+      providerThreadId: threads.providerThreadId,
+    })
+    .from(threads)
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
+    .where(
+      and(
+        eq(threads.id, input.threadId),
+        eq(connectedAccounts.userId, input.userId),
+        eq(connectedAccounts.status, "connected"),
+      ),
+    )
+    .limit(1);
+  if (!thread) return null;
+  const providerLabels =
+    input.gmailLabelIds.length > 0
+      ? await database
+          .select({ id: labels.id, providerLabelId: labels.providerLabelId })
+          .from(labels)
+          .where(
+            and(
+              eq(labels.accountId, thread.accountId),
+              eq(labels.kind, "gmail"),
+              inArray(labels.id, input.gmailLabelIds),
+            ),
+          )
+      : [];
+  if (
+    providerLabels.length !== new Set(input.gmailLabelIds).size ||
+    providerLabels.some((label) => !label.providerLabelId)
+  ) return null;
+  return {
+    ...thread,
+    labels: providerLabels.flatMap((label) =>
+      label.providerLabelId
+        ? [{ id: label.id, providerLabelId: label.providerLabelId }]
+        : [],
+    ),
+  };
 }
 
 export async function getGmailDraftResourceForUser(
@@ -147,22 +215,29 @@ export async function getGmailDraftResourceForUser(
 ) {
   const [draft] = await database
     .select({
-      id: gmailDrafts.id,
-      accountId: gmailDrafts.accountId,
-      providerDraftId: gmailDrafts.providerDraftId,
-      providerThreadId: gmailDrafts.providerThreadId,
+      id: drafts.id,
+      accountId: drafts.accountId,
+      providerDraftId: drafts.providerDraftId,
+      providerThreadId: drafts.providerThreadId,
     })
-    .from(gmailDrafts)
-    .innerJoin(connectedAccounts, eq(connectedAccounts.id, gmailDrafts.accountId))
+    .from(drafts)
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, drafts.accountId))
     .where(
       and(
-        eq(gmailDrafts.id, input.gmailDraftId),
+        eq(drafts.id, input.gmailDraftId),
+        eq(drafts.kind, "gmail"),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
       ),
     )
     .limit(1);
-  return draft ?? null;
+  if (!draft?.providerDraftId || !draft.providerThreadId) return null;
+  return {
+    id: draft.id,
+    accountId: draft.accountId,
+    providerDraftId: draft.providerDraftId,
+    providerThreadId: draft.providerThreadId,
+  };
 }
 
 export async function getAiReplyDraftForGmailSave(
@@ -190,6 +265,7 @@ export async function getAiReplyDraftForGmailSave(
     .where(
       and(
         eq(drafts.id, input.draftId),
+        eq(drafts.kind, "invook"),
         eq(drafts.userId, input.userId),
         eq(drafts.status, "editing"),
         eq(connectedAccounts.status, "connected"),
@@ -250,7 +326,7 @@ export async function replaceGmailLabelCatalog(
   },
   database: Database = getDatabase(),
 ) {
-  await database.transaction(async (transaction) => {
+  return database.transaction(async (transaction) => {
     const [account] = await transaction
       .select({ id: connectedAccounts.id })
       .from(connectedAccounts)
@@ -266,31 +342,45 @@ export async function replaceGmailLabelCatalog(
     const providerLabelIds = input.labels.map((label) => label.providerLabelId);
     if (providerLabelIds.length === 0) {
       await transaction
-        .delete(gmailLabels)
-        .where(eq(gmailLabels.accountId, input.accountId));
+        .delete(labels)
+        .where(
+          and(eq(labels.accountId, input.accountId), eq(labels.kind, "gmail")),
+        );
     } else {
       await transaction
-        .delete(gmailLabels)
+        .delete(labels)
         .where(
           and(
-            eq(gmailLabels.accountId, input.accountId),
-            not(inArray(gmailLabels.providerLabelId, providerLabelIds)),
+            eq(labels.accountId, input.accountId),
+            eq(labels.kind, "gmail"),
+            not(inArray(labels.providerLabelId, providerLabelIds)),
           ),
         );
     }
     for (const label of input.labels) {
       await transaction
-        .insert(gmailLabels)
+        .insert(labels)
         .values({
           userId: input.userId,
           accountId: input.accountId,
-          ...label,
+          kind: "gmail",
+          providerLabelId: label.providerLabelId,
+          name: label.name,
+          normalizedName: label.name.trim().replace(/\s+/g, " ").toLowerCase(),
+          description: "",
+          providerType: label.type,
+          messageListVisibility: label.messageListVisibility,
+          labelListVisibility: label.labelListVisibility,
+          color: label.color,
+          providerMetadata: label.providerMetadata,
         })
         .onConflictDoUpdate({
-          target: [gmailLabels.accountId, gmailLabels.providerLabelId],
+          target: [labels.accountId, labels.providerLabelId],
+          targetWhere: isNotNull(labels.providerLabelId),
           set: {
             name: label.name,
-            type: label.type,
+            normalizedName: label.name.trim().replace(/\s+/g, " ").toLowerCase(),
+            providerType: label.type,
             messageListVisibility: label.messageListVisibility,
             labelListVisibility: label.labelListVisibility,
             color: label.color,
@@ -308,6 +398,50 @@ export async function replaceGmailLabelCatalog(
       });
     }
   });
+}
+
+export async function saveGmailProviderLabel(
+  input: {
+    userId: string;
+    accountId: string;
+    label: GmailProviderLabelInput;
+  },
+  database: Database = getDatabase(),
+) {
+  const normalizedName = input.label.name
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+  await database
+    .insert(labels)
+    .values({
+      userId: input.userId,
+      accountId: input.accountId,
+      kind: "gmail",
+      providerLabelId: input.label.providerLabelId,
+      name: input.label.name,
+      normalizedName,
+      description: "",
+      providerType: input.label.type,
+      messageListVisibility: input.label.messageListVisibility,
+      labelListVisibility: input.label.labelListVisibility,
+      color: input.label.color,
+      providerMetadata: input.label.providerMetadata,
+    })
+    .onConflictDoUpdate({
+      target: [labels.accountId, labels.providerLabelId],
+      targetWhere: isNotNull(labels.providerLabelId),
+      set: {
+        name: input.label.name,
+        normalizedName,
+        providerType: input.label.type,
+        messageListVisibility: input.label.messageListVisibility,
+        labelListVisibility: input.label.labelListVisibility,
+        color: input.label.color,
+        providerMetadata: input.label.providerMetadata,
+        updatedAt: new Date(),
+      },
+    });
 }
 
 export async function replaceGmailDraftResources(
@@ -335,15 +469,18 @@ export async function replaceGmailDraftResources(
     const providerDraftIds = input.drafts.map((draft) => draft.providerDraftId);
     if (providerDraftIds.length === 0) {
       await transaction
-        .delete(gmailDrafts)
-        .where(eq(gmailDrafts.accountId, input.accountId));
+        .delete(drafts)
+        .where(
+          and(eq(drafts.accountId, input.accountId), eq(drafts.kind, "gmail")),
+        );
     } else {
       await transaction
-        .delete(gmailDrafts)
+        .delete(drafts)
         .where(
           and(
-            eq(gmailDrafts.accountId, input.accountId),
-            not(inArray(gmailDrafts.providerDraftId, providerDraftIds)),
+            eq(drafts.accountId, input.accountId),
+            eq(drafts.kind, "gmail"),
+            not(inArray(drafts.providerDraftId, providerDraftIds)),
           ),
         );
     }
@@ -359,15 +496,17 @@ export async function replaceGmailDraftResources(
         )
         .limit(1);
       await transaction
-        .insert(gmailDrafts)
+        .insert(drafts)
         .values({
           userId: input.userId,
           accountId: input.accountId,
+          kind: "gmail",
           ...draft,
           messageId: message?.id ?? null,
         })
         .onConflictDoUpdate({
-          target: [gmailDrafts.accountId, gmailDrafts.providerDraftId],
+          target: [drafts.accountId, drafts.providerDraftId],
+          targetWhere: isNotNull(drafts.providerDraftId),
           set: {
             providerMessageId: draft.providerMessageId,
             providerThreadId: draft.providerThreadId,
@@ -389,6 +528,84 @@ export async function replaceGmailDraftResources(
   });
 }
 
+export async function saveGmailDraftResource(
+  input: {
+    userId: string;
+    accountId: string;
+    draft: GmailDraftResourceInput;
+    notify?: boolean;
+  },
+  database: Database = getDatabase(),
+) {
+  await database.transaction(async (transaction) => {
+    const [message] = await transaction
+      .select({ id: messages.id })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.accountId, input.accountId),
+          eq(messages.providerMessageId, input.draft.providerMessageId),
+        ),
+      )
+      .limit(1);
+    await transaction
+      .insert(drafts)
+      .values({
+        userId: input.userId,
+        accountId: input.accountId,
+        kind: "gmail",
+        ...input.draft,
+        messageId: message?.id ?? null,
+      })
+      .onConflictDoUpdate({
+        target: [drafts.accountId, drafts.providerDraftId],
+        targetWhere: isNotNull(drafts.providerDraftId),
+        set: {
+          providerMessageId: input.draft.providerMessageId,
+          providerThreadId: input.draft.providerThreadId,
+          providerHistoryId: input.draft.providerHistoryId,
+          providerMetadata: input.draft.providerMetadata,
+          messageId: message?.id ?? null,
+          updatedAt: new Date(),
+        },
+      });
+    if (input.notify) {
+      await insertMailboxChange(transaction, {
+        userId: input.userId,
+        accountId: input.accountId,
+        changeType: "drafts_changed",
+        payload: { providerMessageId: input.draft.providerMessageId },
+      });
+    }
+  });
+}
+
+export async function deleteGmailDraftResourceByMessageId(
+  input: { userId: string; accountId: string; providerMessageId: string },
+  database: Database = getDatabase(),
+) {
+  await database.transaction(async (transaction) => {
+    const deleted = await transaction
+      .delete(drafts)
+      .where(
+        and(
+          eq(drafts.accountId, input.accountId),
+          eq(drafts.kind, "gmail"),
+          eq(drafts.providerMessageId, input.providerMessageId),
+        ),
+      )
+      .returning({ id: drafts.id });
+    if (deleted.length > 0) {
+      await insertMailboxChange(transaction, {
+        userId: input.userId,
+        accountId: input.accountId,
+        changeType: "drafts_changed",
+        payload: { providerMessageId: input.providerMessageId },
+      });
+    }
+  });
+}
+
 export async function getGmailReplicaContext(
   accountId: string,
   database: Database = getDatabase(),
@@ -398,6 +615,7 @@ export async function getGmailReplicaContext(
       accountId: gmailReplicaStates.accountId,
       initialHistoryId: gmailReplicaStates.initialHistoryId,
       historyCursor: gmailReplicaStates.historyCursor,
+      pendingHistoryCursor: gmailReplicaStates.pendingHistoryCursor,
       state: gmailReplicaStates.state,
       userId: connectedAccounts.userId,
       email: connectedAccounts.email,
@@ -430,7 +648,7 @@ export async function getGmailWatchContext(
 export async function setGmailReplicaState(
   input: {
     accountId: string;
-    state: "pending" | "snapshotting" | "replaying" | "auditing" | "ready" | "repairing" | "failed" | "deleting";
+    state: "pending" | "snapshotting" | "replaying" | "ready" | "repairing" | "failed" | "deleting";
     lastError?: string | null;
   },
   database: Database = getDatabase(),
@@ -496,21 +714,21 @@ export async function saveGmailWatchState(
   });
 }
 
-export async function ingestGmailPushEvent(
+export async function recordGmailPushNotification(
   input: {
-    providerEventId: string;
     emailAddress: string;
     notificationHistoryId: string;
-    subscription: string;
-    publishedAt: Date | null;
-    payload: Record<string, unknown>;
   },
-  database: Database = getDatabase(),
+  database?: Database,
 ): Promise<
   | { status: "ignored"; accountId: null }
-  | { status: "duplicate" | "stored"; accountId: string }
+  | { status: "coalesced" | "queued"; accountId: string; stepId: string }
 > {
-  return database.transaction(async (transaction) => {
+  if (!/^\d+$/.test(input.notificationHistoryId)) {
+    throw new Error("The Gmail notification history cursor is invalid.");
+  }
+  const executor = database ?? getDatabase();
+  return executor.transaction(async (transaction) => {
     const [account] = await transaction
       .select({ id: connectedAccounts.id, userId: connectedAccounts.userId })
       .from(connectedAccounts)
@@ -524,28 +742,51 @@ export async function ingestGmailPushEvent(
       .limit(1);
     if (!account) return { status: "ignored", accountId: null };
 
-    const [event] = await transaction
-      .insert(gmailPushEvents)
-      .values({
-        ...input,
-        accountId: account.id,
-      })
-      .onConflictDoNothing({ target: gmailPushEvents.providerEventId })
-      .returning({ id: gmailPushEvents.id });
-    if (!event) return { status: "duplicate", accountId: account.id };
+    const [replica] = await transaction
+      .select({ pendingHistoryCursor: gmailReplicaStates.pendingHistoryCursor })
+      .from(gmailReplicaStates)
+      .where(eq(gmailReplicaStates.accountId, account.id))
+      .for("update")
+      .limit(1);
+    if (!replica) return { status: "ignored", accountId: null };
+    const currentPending = replica.pendingHistoryCursor;
+    const nextPending = highestGmailHistoryCursor(
+      currentPending,
+      input.notificationHistoryId,
+    );
+    const isAdvanced = currentPending !== nextPending;
+    if (isAdvanced) {
+      await transaction
+        .update(gmailReplicaStates)
+        .set({ pendingHistoryCursor: nextPending, updatedAt: new Date() })
+        .where(eq(gmailReplicaStates.accountId, account.id));
+    }
 
-    await enqueueWorkflowStep(
+    const stepId = await enqueueWorkflowStep(
       {
         userId: account.userId,
         accountId: account.id,
         stepType: "gmail.history.catchup",
-        payload: { pushEventId: event.id },
-        idempotencyKey: `gmail-history-push:${event.id}`,
+        payload: { reason: "notification" },
+        idempotencyKey: `gmail-history-notification:${account.id}:${nextPending}`,
       },
       transaction as unknown as Database,
     );
-    return { status: "stored", accountId: account.id };
+    return {
+      status: isAdvanced ? "queued" : "coalesced",
+      accountId: account.id,
+      stepId,
+    };
   });
+}
+
+export function highestGmailHistoryCursor(
+  currentCursor: string | null,
+  candidateCursor: string,
+): string {
+  return currentCursor && BigInt(currentCursor) >= BigInt(candidateCursor)
+    ? currentCursor
+    : candidateCursor;
 }
 
 export async function enqueueGmailHistoryCatchup(
@@ -567,6 +808,24 @@ export async function enqueueGmailHistoryCatchup(
     },
     database,
   );
+}
+
+export function createGmailHistoryContinuationStep(input: {
+  userId: string;
+  accountId: string;
+  sourceStepId: string;
+  pendingHistoryCursor: string;
+}): WorkflowStepInput {
+  return {
+    userId: input.userId,
+    accountId: input.accountId,
+    stepType: "gmail.history.catchup",
+    payload: {
+      reason: "continuation",
+      pendingHistoryCursor: input.pendingHistoryCursor,
+    },
+    idempotencyKey: `gmail-history-continuation:${input.accountId}:${input.sourceStepId}`,
+  };
 }
 
 export async function enqueueGmailHistoryCatchupForUser(
@@ -606,43 +865,6 @@ export async function enqueueGmailHistoryCatchupForUser(
   });
 }
 
-export async function enqueueGmailReplicaAuditForUser(
-  userId: string,
-  database: Database = getDatabase(),
-): Promise<
-  | { stepId: string; reason: null }
-  | { stepId: null; reason: "not_found" }
-> {
-  return database.transaction(async (transaction) => {
-    const [account] = await transaction
-      .select({ id: connectedAccounts.id, state: gmailReplicaStates.state })
-      .from(connectedAccounts)
-      .innerJoin(
-        gmailReplicaStates,
-        eq(gmailReplicaStates.accountId, connectedAccounts.id),
-      )
-      .where(
-        and(
-          eq(connectedAccounts.userId, userId),
-          eq(connectedAccounts.status, "connected"),
-        ),
-      )
-      .limit(1);
-    if (!account) return { stepId: null, reason: "not_found" };
-    const stepId = await enqueueWorkflowStep(
-      {
-        userId,
-        accountId: account.id,
-        stepType: "gmail.replica.audit",
-        payload: { trigger: "manual" },
-        idempotencyKey: `gmail-replica-audit:${account.id}:${uuidv4()}`,
-      },
-      transaction as unknown as Database,
-    );
-    return { stepId, reason: null };
-  });
-}
-
 export async function applyGmailHistoryBatch(
   input: {
     userId: string;
@@ -650,13 +872,23 @@ export async function applyGmailHistoryBatch(
     expectedCursor: string;
     nextCursor: string;
     messages: IndexedMessage[];
+    labelChanges: Array<{
+      providerMessageId: string;
+      providerHistoryId: string | null;
+      providerLabelIds: string[];
+    }>;
     deletedMessageIds: Array<{ providerMessageId: string; providerHistoryId: string | null }>;
-    pushEventId?: string | null;
     stateAfterApply?: "ready" | "replaying" | "repairing";
-    markStoredPushEventsProcessed?: boolean;
+    continuationSourceStepId?: string;
   },
   database: Database = getDatabase(),
-): Promise<{ applied: boolean; changedThreadIds: string[]; eventId: string | null }> {
+): Promise<{
+  applied: boolean;
+  changedThreadIds: string[];
+  eventId: string | null;
+  pendingHistoryCursor: string | null;
+  continuationStepId: string | null;
+}> {
   return database.transaction(async (transaction) => {
     const [account] = await transaction
       .select({ id: connectedAccounts.id })
@@ -670,12 +902,19 @@ export async function applyGmailHistoryBatch(
       .for("update")
       .limit(1);
     if (!account) {
-      return { applied: false, changedThreadIds: [], eventId: null };
+      return {
+        applied: false,
+        changedThreadIds: [],
+        eventId: null,
+        pendingHistoryCursor: null,
+        continuationStepId: null,
+      };
     }
     const [replica] = await transaction
       .select({
         initialHistoryId: gmailReplicaStates.initialHistoryId,
         historyCursor: gmailReplicaStates.historyCursor,
+        pendingHistoryCursor: gmailReplicaStates.pendingHistoryCursor,
       })
       .from(gmailReplicaStates)
       .where(eq(gmailReplicaStates.accountId, input.accountId))
@@ -684,7 +923,13 @@ export async function applyGmailHistoryBatch(
     if (!replica) throw new Error("The Gmail replica state was not found.");
     const currentCursor = replica.historyCursor ?? replica.initialHistoryId;
     if (currentCursor !== input.expectedCursor) {
-      return { applied: false, changedThreadIds: [], eventId: null };
+      return {
+        applied: false,
+        changedThreadIds: [],
+        eventId: null,
+        pendingHistoryCursor: replica.pendingHistoryCursor,
+        continuationStepId: null,
+      };
     }
 
     const changedThreadIds = new Set<string>();
@@ -692,6 +937,21 @@ export async function applyGmailHistoryBatch(
     for (const message of input.messages) {
       const result = await upsertIndexedMessage(message, executor);
       if (result.changed) changedThreadIds.add(result.threadId);
+    }
+    for (const labelChange of input.labelChanges) {
+      const result = await replaceGmailMessageLabels(
+        {
+          userId: input.userId,
+          accountId: input.accountId,
+          providerMessageId: labelChange.providerMessageId,
+          providerHistoryId: labelChange.providerHistoryId,
+          providerLabelIds: labelChange.providerLabelIds,
+        },
+        executor,
+      );
+      if (result.changed && result.threadId) {
+        changedThreadIds.add(result.threadId);
+      }
     }
     for (const deletion of input.deletedMessageIds) {
       const result = await deleteIndexedMessage(
@@ -704,10 +964,16 @@ export async function applyGmailHistoryBatch(
       );
       if (result.changed && result.threadId) changedThreadIds.add(result.threadId);
     }
+    const pendingHistoryCursor =
+      replica.pendingHistoryCursor &&
+      BigInt(replica.pendingHistoryCursor) > BigInt(input.nextCursor)
+        ? replica.pendingHistoryCursor
+        : null;
     await transaction
       .update(gmailReplicaStates)
       .set({
         historyCursor: input.nextCursor,
+        pendingHistoryCursor,
         state: input.stateAfterApply ?? "ready",
         lastHistoryAt: new Date(),
         lastError: null,
@@ -718,28 +984,6 @@ export async function applyGmailHistoryBatch(
       .update(connectedAccounts)
       .set({ lastSyncedAt: new Date(), updatedAt: new Date() })
       .where(eq(connectedAccounts.id, input.accountId));
-    if (input.pushEventId) {
-      await transaction
-        .update(gmailPushEvents)
-        .set({ status: "processed", processedAt: new Date(), updatedAt: new Date() })
-        .where(eq(gmailPushEvents.id, input.pushEventId));
-    }
-    if (input.markStoredPushEventsProcessed) {
-      await transaction
-        .update(gmailPushEvents)
-        .set({
-          status: "processed",
-          processedAt: new Date(),
-          lastError: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(gmailPushEvents.accountId, input.accountId),
-            eq(gmailPushEvents.status, "stored"),
-          ),
-        );
-    }
     const eventId = await insertMailboxChange(transaction, {
       userId: input.userId,
       accountId: input.accountId,
@@ -749,196 +993,33 @@ export async function applyGmailHistoryBatch(
         changedThreadIds: Array.from(changedThreadIds),
       },
     });
+    const continuationStepId =
+      pendingHistoryCursor && input.continuationSourceStepId
+        ? await enqueueWorkflowStepWithExecutor(
+            createGmailHistoryContinuationStep({
+              userId: input.userId,
+              accountId: input.accountId,
+              sourceStepId: input.continuationSourceStepId,
+              pendingHistoryCursor,
+            }),
+            transaction,
+          )
+        : null;
     return {
       applied: true,
       changedThreadIds: Array.from(changedThreadIds),
       eventId,
+      pendingHistoryCursor,
+      continuationStepId,
     };
   });
 }
 
-export async function beginGmailReplicaAudit(
-  input: {
-    userId: string;
-    accountId: string;
-    trigger: "initial" | "history_expired" | "watch_renewal" | "manual";
-  },
-  database: Database = getDatabase(),
-) {
-  const [audit] = await database
-    .insert(gmailReplicaAudits)
-    .values(input)
-    .returning({ id: gmailReplicaAudits.id });
-  if (!audit) throw new Error("The Gmail replica audit could not be started.");
-  return audit.id;
-}
-
-export async function completeGmailReplicaAudit(
-  input: {
-    auditId: string;
-    providerMessageIds: string[];
-    storedMessageIds: string[];
-    additionalFailureCount?: number;
-    details?: Record<string, unknown>;
-  },
-  database: Database = getDatabase(),
-) {
-  const providerIds = new Set(input.providerMessageIds);
-  const storedIds = new Set(input.storedMessageIds);
-  const missing = input.providerMessageIds.filter((id) => !storedIds.has(id));
-  const extra = input.storedMessageIds.filter((id) => !providerIds.has(id));
-  const complete =
-    missing.length === 0 &&
-    extra.length === 0 &&
-    (input.additionalFailureCount ?? 0) === 0;
-  const [audit] = await database
-    .update(gmailReplicaAudits)
-    .set({
-      status: complete ? "complete" : "repairing",
-      providerMessageCount: input.providerMessageIds.length,
-      storedMessageCount: input.storedMessageIds.length,
-      missingMessageIds: missing,
-      extraMessageIds: extra,
-      details: input.details ?? {},
-      completedAt: complete ? new Date() : null,
-      updatedAt: new Date(),
-    })
-    .where(eq(gmailReplicaAudits.id, input.auditId))
-    .returning({ accountId: gmailReplicaAudits.accountId });
-  return { accountId: audit?.accountId ?? null, missing, extra };
-}
-
-export async function getGmailReplicaInventory(
-  accountId: string,
-  database: Database = getDatabase(),
-) {
-  const [
-    messageRows,
-    attachmentRows,
-    labelRows,
-    messageLabelRows,
-    draftRows,
-    tombstoneRows,
-  ] = await Promise.all([
-      database
-        .select({
-          id: messages.id,
-          providerMessageId: messages.providerMessageId,
-          rawObjectKey: messages.rawObjectKey,
-          checksumSha256: messages.rawChecksumSha256,
-          contentLength: messages.rawContentLength,
-        })
-        .from(messages)
-        .where(eq(messages.accountId, accountId)),
-      database
-        .select({
-          providerMessageId: messages.providerMessageId,
-          objectKey: messageAttachments.objectKey,
-          checksumSha256: messageAttachments.checksumSha256,
-          contentLength: messageAttachments.contentLength,
-        })
-        .from(messageAttachments)
-        .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
-        .where(eq(messageAttachments.accountId, accountId)),
-      database
-        .select({ providerLabelId: gmailLabels.providerLabelId })
-        .from(gmailLabels)
-        .where(eq(gmailLabels.accountId, accountId)),
-      database
-        .select({
-          messageId: gmailMessageLabels.messageId,
-          providerLabelId: gmailLabels.providerLabelId,
-        })
-        .from(gmailMessageLabels)
-        .innerJoin(messages, eq(messages.id, gmailMessageLabels.messageId))
-        .innerJoin(gmailLabels, eq(gmailLabels.id, gmailMessageLabels.gmailLabelId))
-        .where(eq(gmailMessageLabels.accountId, accountId)),
-      database
-        .select({ providerDraftId: gmailDrafts.providerDraftId })
-        .from(gmailDrafts)
-        .where(eq(gmailDrafts.accountId, accountId)),
-      database
-        .select({
-          providerMessageId: gmailMessageTombstones.providerMessageId,
-          objectKeys: gmailMessageTombstones.objectKeys,
-        })
-        .from(gmailMessageTombstones)
-        .where(eq(gmailMessageTombstones.accountId, accountId)),
-    ]);
-
-  const messageLabelMemberships = new Map(
-    messageRows.map((message) => [
-      message.id,
-      {
-        providerMessageId: message.providerMessageId,
-        providerLabelIds: [] as string[],
-      },
-    ]),
-  );
-  for (const membership of messageLabelRows) {
-    messageLabelMemberships
-      .get(membership.messageId)
-      ?.providerLabelIds.push(membership.providerLabelId);
-  }
-
-  return {
-    providerMessageIds: messageRows.map((message) => message.providerMessageId),
-    providerLabelIds: labelRows.map((label) => label.providerLabelId),
-    messageLabelMemberships: Array.from(messageLabelMemberships.values()),
-    providerDraftIds: draftRows.map((draft) => draft.providerDraftId),
-    objects: [
-      ...messageRows.map((message) => ({
-        providerMessageId: message.providerMessageId,
-        key: message.rawObjectKey,
-        checksumSha256: message.checksumSha256,
-        contentLength: message.contentLength,
-      })),
-      ...attachmentRows.map((attachment) => ({
-        providerMessageId: attachment.providerMessageId,
-        key: attachment.objectKey,
-        checksumSha256: attachment.checksumSha256,
-        contentLength: attachment.contentLength,
-      })),
-      ...tombstoneRows.flatMap((tombstone) =>
-        tombstone.objectKeys.map((key) => ({
-          providerMessageId: tombstone.providerMessageId,
-          key,
-          checksumSha256: null,
-          contentLength: null,
-        })),
-      ),
-    ],
-  };
-}
-
-export async function failGmailReplicaAudit(
-  input: { auditId: string; message: string },
-  database: Database = getDatabase(),
-) {
-  await database.transaction(async (transaction) => {
-    const [audit] = await transaction
-      .update(gmailReplicaAudits)
-      .set({
-        status: "failed",
-        details: { error: input.message },
-        completedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(gmailReplicaAudits.id, input.auditId))
-      .returning({ accountId: gmailReplicaAudits.accountId });
-    if (!audit) return;
-    await transaction
-      .update(gmailReplicaStates)
-      .set({ state: "failed", lastError: input.message, updatedAt: new Date() })
-      .where(eq(gmailReplicaStates.accountId, audit.accountId));
-  });
-}
-
 export async function markGmailReplicaReady(
-  input: { accountId: string; historyCursor: string; auditId: string },
+  input: { userId: string; accountId: string; historyCursor: string },
   database: Database = getDatabase(),
 ) {
-  await database.transaction(async (transaction) => {
+  return database.transaction(async (transaction) => {
     const [account] = await transaction
       .select({ id: connectedAccounts.id })
       .from(connectedAccounts)
@@ -951,58 +1032,44 @@ export async function markGmailReplicaReady(
       .for("update")
       .limit(1);
     if (!account) return false;
-    const [audit] = await transaction
-      .select({
-        status: gmailReplicaAudits.status,
-        userId: gmailReplicaAudits.userId,
-      })
-      .from(gmailReplicaAudits)
-      .where(
-        and(
-          eq(gmailReplicaAudits.id, input.auditId),
-          eq(gmailReplicaAudits.accountId, input.accountId),
-        ),
-      )
+    const [replica] = await transaction
+      .select({ pendingHistoryCursor: gmailReplicaStates.pendingHistoryCursor })
+      .from(gmailReplicaStates)
+      .where(eq(gmailReplicaStates.accountId, input.accountId))
+      .for("update")
       .limit(1);
-    if (!audit || audit.status !== "complete") {
-      throw new Error("The Gmail replica cannot become ready before audit completion.");
-    }
+    if (!replica) return false;
+    const pendingHistoryCursor =
+      replica.pendingHistoryCursor &&
+      BigInt(replica.pendingHistoryCursor) > BigInt(input.historyCursor)
+        ? replica.pendingHistoryCursor
+        : null;
     await transaction
       .update(gmailReplicaStates)
       .set({
         historyCursor: input.historyCursor,
+        pendingHistoryCursor,
         state: "ready",
         readyAt: new Date(),
         lastHistoryAt: new Date(),
-        lastAuditAt: new Date(),
         lastError: null,
         updatedAt: new Date(),
       })
       .where(eq(gmailReplicaStates.accountId, input.accountId));
     await insertMailboxChange(transaction, {
-      userId: audit.userId,
+      userId: input.userId,
       accountId: input.accountId,
       changeType: "replica_ready",
-      payload: { historyCursor: input.historyCursor, auditId: input.auditId },
+      payload: { historyCursor: input.historyCursor },
     });
-    const [pendingPush] = await transaction
-      .select({ id: gmailPushEvents.id })
-      .from(gmailPushEvents)
-      .where(
-        and(
-          eq(gmailPushEvents.accountId, input.accountId),
-          eq(gmailPushEvents.status, "stored"),
-        ),
-      )
-      .limit(1);
-    if (pendingPush) {
+    if (pendingHistoryCursor) {
       await enqueueWorkflowStep(
         {
-          userId: audit.userId,
+          userId: input.userId,
           accountId: input.accountId,
           stepType: "gmail.history.catchup",
           payload: { reason: "post_initial_reconciliation" },
-          idempotencyKey: `gmail-history-post-ready:${input.accountId}:${input.auditId}`,
+          idempotencyKey: `gmail-history-post-ready:${input.accountId}:${pendingHistoryCursor}`,
         },
         transaction as unknown as Database,
       );
@@ -1084,7 +1151,7 @@ export async function listGmailObjectKeysForAccount(
   accountId: string,
   database: Database = getDatabase(),
 ) {
-  const [rawObjects, attachmentObjects, tombstones] = await Promise.all([
+  const [rawObjects, attachmentObjects] = await Promise.all([
     database
       .select({ key: messages.rawObjectKey })
       .from(messages)
@@ -1098,16 +1165,11 @@ export async function listGmailObjectKeysForAccount(
           isNotNull(messageAttachments.objectKey),
         ),
       ),
-    database
-      .select({ keys: gmailMessageTombstones.objectKeys })
-      .from(gmailMessageTombstones)
-      .where(eq(gmailMessageTombstones.accountId, accountId)),
   ]);
   return Array.from(
     new Set([
       ...rawObjects.map((entry) => entry.key),
       ...attachmentObjects.map((entry) => entry.key),
-      ...tombstones.flatMap((entry) => entry.keys ?? []),
     ].filter((key): key is string => Boolean(key))),
   );
 }
@@ -1157,7 +1219,7 @@ export async function markGmailReplicaDeleting(
         },
       })
       .returning({ id: gmailAccountCleanups.id });
-    if (!cleanup) throw new Error("The Gmail cleanup audit could not be created.");
+    if (!cleanup) throw new Error("The Gmail cleanup record could not be created.");
     await enqueueWorkflowStep(
       {
         userId: input.userId,

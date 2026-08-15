@@ -10,8 +10,20 @@ test("Gmail history exposes additions, label changes, and deletions", () => {
       messagesAdded: [{ message: { id: "added", threadId: "thread-1" } }],
       labelsAdded: [
         {
-          message: { id: "starred", threadId: "thread-2" },
+          message: {
+            id: "starred",
+            threadId: "thread-2",
+            labelIds: ["STARRED"],
+          },
           labelIds: ["STARRED"],
+        },
+        {
+          message: {
+            id: "draft-message",
+            threadId: "thread-draft",
+            labelIds: ["DRAFT"],
+          },
+          labelIds: ["DRAFT"],
         },
       ],
       labelsRemoved: [
@@ -25,10 +37,36 @@ test("Gmail history exposes additions, label changes, and deletions", () => {
       ],
     }),
     [
-      { messageId: "added", action: "upsert" },
-      { messageId: "starred", action: "upsert" },
-      { messageId: "archived", action: "upsert" },
-      { messageId: "deleted", action: "delete" },
+      {
+        messageId: "added",
+        action: "upsert",
+        providerLabelIds: null,
+        isDraftRelated: false,
+      },
+      {
+        messageId: "starred",
+        action: "labels",
+        providerLabelIds: ["STARRED"],
+        isDraftRelated: false,
+      },
+      {
+        messageId: "draft-message",
+        action: "labels",
+        providerLabelIds: ["DRAFT"],
+        isDraftRelated: true,
+      },
+      {
+        messageId: "archived",
+        action: "labels",
+        providerLabelIds: null,
+        isDraftRelated: false,
+      },
+      {
+        messageId: "deleted",
+        action: "delete",
+        providerLabelIds: null,
+        isDraftRelated: false,
+      },
     ],
   );
 });

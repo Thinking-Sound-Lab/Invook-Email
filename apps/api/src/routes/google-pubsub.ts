@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 
-import { ingestGmailPushEvent } from "@invook/database";
+import { recordGmailPushNotification } from "@invook/database";
 import { GmailApiError, verifyGoogleIdToken } from "@invook/gmail";
 
 import { getGooglePubSubPushConfiguration } from "../config";
@@ -191,13 +191,9 @@ export const registerGooglePubSubRoutes: FastifyPluginAsync = async (api) => {
         return;
       }
 
-      await ingestGmailPushEvent({
-        providerEventId: providerEventId.trim(),
+      await recordGmailPushNotification({
         emailAddress: notification.emailAddress,
         notificationHistoryId: notification.historyId,
-        subscription: configuration.subscription,
-        publishedAt,
-        payload: body,
       });
       await reply.code(204).send();
     },

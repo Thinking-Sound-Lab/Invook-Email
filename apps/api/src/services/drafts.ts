@@ -66,7 +66,7 @@ export async function generateDraftForUser(input: {
   if (result.usedMemoryIds.some((id) => !applicableIds.has(id))) {
     throw new Error("The draft model cited a memory outside its supplied context.");
   }
-  return saveGeneratedDraft({
+  const draft = await saveGeneratedDraft({
     userId: input.userId,
     accountId: context.accountId,
     threadId: context.id,
@@ -75,4 +75,9 @@ export async function generateDraftForUser(input: {
     modelId: result.modelId,
     schedulingRelevant: result.schedulingRelevant,
   });
+  if (!draft) return null;
+  if (!draft.threadId) {
+    throw new Error("The saved Invook draft is missing its thread.");
+  }
+  return { ...draft, threadId: draft.threadId };
 }

@@ -2,77 +2,86 @@
 
 **Status:** Implemented contract
 **Canonical provider:** Gmail
-**Updated:** August 13, 2026
+**Updated:** August 14, 2026
 
-## Scope
+## Scope and ownership
 
-For each connected Gmail account, Invook maintains a continuously convergent local replica of:
+For each connected Gmail account, Invook continuously replicates every message returned with Spam and Trash included, the Gmail label catalog and message-level memberships, Gmail Draft resources, complete parsed message metadata, exact raw MIME, and decoded attachment bytes.
 
-- every Gmail message returned with Spam and Trash included, including Inbox, Sent, Spam, Trash, and Draft state;
-- Gmail system and custom label catalog entries and normalized message-label membership;
-- the complete ordered message headers, decoded text body, decoded HTML body, Gmail history ID, internal date, size estimate, and snippet;
-- the exact RFC 2822/MIME source and every decoded attachment byte stream, with SHA-256 checksums and object metadata;
-- Gmail Draft resources, kept separate from Invook AI reply-draft evidence;
-- Gmail message deletions as tombstones, including the last provider identifiers and retained object keys;
-- the authoritative applied Gmail history cursor, watch topic/expiration/lifecycle state, deduplicated Pub/Sub deliveries, and replica audit results.
+Gmail is canonical for Gmail-backed labels, read/unread, star, Inbox/archive, Trash, messages, and Gmail Draft resources. Invook writes provider-owned state to Gmail first and lets Gmail history converge PostgreSQL. It never creates an optimistic competing provider state.
 
-Gmail settings, contacts, and calendar are not part of this phase.
+The shared `labels` table distinguishes Gmail-backed and Invook-only labels with a checked discriminator. The shared `message_labels` table is the only visible applied-label relationship. Thread labels are calculated from current message memberships; applying a Gmail label from a thread operation affects the thread's current messages and does not establish inheritance for future mail. `message_label_decisions` stores AI decision metadata and explicit user override or suppression, never a second visible relationship.
 
-## Ownership boundaries
+The shared `drafts` table distinguishes Gmail resources from local Invook drafts. A Gmail draft retains provider identifiers and metadata. A local draft retains editable text, model provenance, feedback, and Memory evidence without becoming a Gmail resource until the user explicitly promotes it. `gmail_draft_write_operations` is the idempotency and ambiguous-result ledger for Gmail draft create, update, and send operations.
 
-Gmail is canonical. Provider writes go to Gmail first and local state changes only after Gmail history is applied. Notification history IDs are stored as delivery metadata and never advance the replica cursor.
-
-`gmail_labels`, `gmail_message_labels`, and `gmail_drafts` are provider-owned data. Invook's `labels` and `thread_labels` remain AI/user classification data. Invook's `drafts` table remains AI reply text, provenance, and feedback evidence. Saving an AI reply to Gmail creates a distinct Gmail Draft resource and does not convert or erase the AI evidence.
-
-PostgreSQL stores normalized metadata, lifecycle state, tombstones, workflow checkpoints, audit results, and the transactional queue outbox. Raw MIME and attachment bytes live in the configured S3-compatible object store. The local Docker stack uses MinIO, while the application accesses it through the same Axios and SigV4 package used for any compatible hosted service.
+PostgreSQL stores normalized replica state, durable runs, workflow steps, and the transactional queue outbox. S3-compatible object storage owns raw MIME and attachment bytes. BullMQ and Redis execute and retry work but are not the durable source of work.
 
 ## Initial synchronization
 
-An account is not readable by indexing or Memory workflows until all of these steps succeed:
+An account is unavailable to indexing, Memory, and AI-label workflows until this watch-first sequence completes:
 
-1. Capture Gmail history cursor H0.
-2. Register the Gmail watch and persist its expiration.
-3. Snapshot the current Gmail label catalog and all message IDs with Spam and Trash included.
-4. Fetch each message as raw MIME, parse it without stripping content, upload raw/attachment objects, and persist it idempotently.
-5. Replay Gmail history from H0 through the provider's current cursor. Message changes and cursor advancement commit together.
-6. Refresh Gmail labels and Gmail Draft resources.
-7. Audit provider/local message IDs, provider label and draft catalogs, and every current raw/attachment object checksum; repair recoverable differences.
-8. Mark the replica ready, then independently enqueue search indexing, initial Memory extraction, and each pending Invook-label analysis so those derivations can run concurrently.
+1. Complete Gmail OAuth and capture history cursor H0.
+2. Register and persist the Gmail watch immediately.
+3. Create one durable initial `mail_sync_run`.
+4. Snapshot the Gmail label catalog and discover all message IDs, including Spam and Trash.
+5. Process each message in its own idempotent workflow job. Message concurrency is configured by `GMAIL_MESSAGE_CONCURRENCY` and defaults to five.
+6. Upload raw MIME and attachment bytes and persist relational message state.
+7. Synchronize Gmail Draft resources.
+8. Under the account advisory lock, replay history from H0 and continue while a newer pending notification cursor exists.
+9. Atomically mark the replica ready at the final applied cursor.
+10. Only then publish embedding, Memory, and Invook-label derivation work.
 
-There is no finalization path that jumps directly to the latest profile cursor.
+A successful normal synchronization does not run a separate full-replica audit.
 
-## Authentication lifecycle
+## Pub/Sub admission
 
-Browser authentication and Gmail replication are separate lifecycles. Signing out clears only the browser session. A later OAuth callback for the same Google identity refreshes profile and encrypted credential data while preserving the account ID, active initial run, replica state, applied history cursor, audit state, watch state, sync stages, and stored mailbox.
+Google Pub/Sub sends OIDC-authenticated pushes to `/v1/webhooks/google-pubsub`. The API validates the audience, service-account identity, exact subscription, envelope, email address, and decimal history ID.
 
-Returning authentication never creates another initial run or registers a replacement watch. If the replica is ready and Gmail reports a different current history ID, it durably queues catch-up; the worker rereads the stored cursor, and a provider `404` enters the existing expired-history repair workflow. Account-scoped authentication transactions serialize concurrent callbacks, while PostgreSQL permits only one queued or running initial sync per account. Migration cutover takes exclusive workflow-table locks before ranking duplicates. It aborts without superseding anything if a losing run still has executing work, so operators can drain or stop Gmail workers and retry safely. Otherwise it marks duplicate active runs and their pending work as superseded without changing the surviving replica state.
+For a matching connected account, one PostgreSQL transaction locks replica state, retains only the highest pending history cursor, and creates an idempotent `gmail.history.catchup` workflow step plus queue-outbox record. Duplicate and reordered notifications coalesce through the pending cursor and workflow idempotency key. The raw Pub/Sub payload, message ID, email address, and delivery event are not persisted. The route returns `204` without calling Gmail inline. Notifications received during initial synchronization remain pending and are replayed before or immediately after readiness.
 
-A permanent Google credential rejection immediately marks the account `reconnect_required`, the replica and mail synchronization failed, and every queued or running Gmail step for that account terminal in the same PostgreSQL transaction. Active initial-run items and the run become failed together, so already-published BullMQ jobs no-op against durable terminal state. Provider or transport failures that do not prove invalid credentials retain bounded retries. A successful returning OAuth callback preserves stored mail and the failed run, replaces the encrypted credential, and queues a full completeness repair. The account returns to complete mail synchronization only after that repair reaches audited replica readiness.
+## Incremental catch-up
 
-## Continuous synchronization
+Gmail control work is serialized per account with a PostgreSQL advisory lock. A catch-up rereads the committed history cursor, applies one provider-history range, advances the cursor in the same transaction as replica changes, and clears pending state only when the applied cursor reaches it. If a higher notification cursor remains, the worker creates a distinct durable continuation step and yields the account lock; the next control job continues from the new committed cursor.
 
-Google Pub/Sub sends authenticated OIDC push requests to `/v1/webhooks/google-pubsub`. The API validates the token audience, verified service-account email, and exact subscription. A notification for an active connected account commits the unique Pub/Sub message ID and a catch-up workflow step before returning `204`. A notification without a matching connected account is acknowledged without retaining its email address or raw payload.
+History work is operation-specific:
 
-The worker serializes Gmail control work per account with a PostgreSQL advisory lock while allowing different accounts to progress concurrently, and always rereads the stored replica cursor. Duplicate and out-of-order deliveries are safe because history application uses an expected-cursor comparison and idempotent provider identifiers. Message/tombstone/label membership changes, cursor advancement, push-event completion, and the durable mailbox-change event commit in one PostgreSQL transaction. The web client listens to authenticated `/v1/mailbox/events` SSE and refreshes on committed mailbox changes.
+- A new or content-changed message downloads raw MIME once, parses it, stores objects, and upserts relational state.
+- A label-only change updates `message_labels` from minimal Gmail message state without downloading MIME.
+- An unknown provider label fetches only that label and retries the membership update.
+- A deletion creates a durable `gmail.objects.delete` workflow step containing an immutable provider/object-key manifest before deleting relational state.
+- A draft-related change lists draft references and refreshes or removes only the affected Gmail Draft resource.
+- A mailbox change event is emitted only after the corresponding transaction commits.
 
-BullMQ stalled-limit failures are terminal even when `attemptsMade` is below the configured application retry count. For initial synchronization, terminal failure atomically fails the run, every remaining item and run-owned workflow step, and the replica mail stage. In-flight and later queue deliveries cannot complete or reactivate a terminal run.
+Duplicate execution is safe through provider identifiers, expected-cursor checks, unique constraints, workflow idempotency keys, and transactional outbox publication. A crashed worker retries from durable state.
 
-Watch renewal is a durable daily one-shot BullMQ action. A successful registration durably schedules its next daily action before catching up from the stored replica cursor, so a terminal catch-up failure cannot break the renewal chain. Terminal failure state and its bounded recovery successor commit in one PostgreSQL transaction. Worker startup takes the same per-account advisory lock as live Gmail control work before recovering any exhausted attempt, and a reconciliation failure stops the worker instead of silently abandoning the chain. Routine renewal never performs a full-mailbox or object audit and does not poll. Duplicate and superseded actions remain safe through workflow idempotency and per-account serialization.
+## Watch renewal and repair
 
-## Repair and deletion
+Watch renewal is a durable daily one-shot action. It persists the renewed watch, schedules its successor, and performs stored-cursor catch-up as a safety net. It does not poll or run a routine full-mailbox audit.
 
-Initial completion, expired-history recovery, and explicit manual audit use the same completeness and repair rules. Audits compare Gmail's current label membership for every message with normalized local membership and refetch mismatches before readiness. If Gmail rejects an expired history cursor during push catch-up or daily renewal, Invook captures a fresh baseline, renews the watch, reconciles a full snapshot, replays from that baseline, refreshes labels/drafts, and audits before returning to ready.
+If Gmail rejects an expired history cursor, Invook captures a fresh provider baseline, renews the watch, and creates an exceptional repair-type `mail_sync_run`. Repair uses the same paged discovery and per-message jobs as initial synchronization, then replays from the fresh baseline under the account lock before returning to ready. A reconnect-required account follows the same durable repair-run path after successful OAuth.
 
-Account deletion first enters a durable deleting state. The cleanup action stops the Gmail watch when the credential remains valid, removes every recorded raw MIME and attachment object, and only then deletes the relational account. Transient provider or object-storage failures retry without losing the cleanup record.
+Permanent credential rejection atomically marks the account `reconnect_required`, fails active Gmail work, and prevents already-published jobs from reactivating terminal state. Transient provider and transport failures retain bounded workflow retries.
+
+## Provider writes
+
+Explicit user actions for read/unread, star, archive, Trash, Gmail-backed labels, and Gmail Draft edits call Gmail first. After a confirmed provider response they enqueue stored-cursor catch-up. Local Gmail-backed state changes only when history is applied.
+
+Creating a local Invook draft does not create a Gmail draft. Explicit promotion, Gmail Draft editing, and sending retain provider-write idempotency and ambiguous-result evidence in `gmail_draft_write_operations`. AI evidence remains separate after promotion.
+
+## Deletion
+
+Message deletion durably records object cleanup before relational deletion. The cleanup manifest survives worker crashes and no tombstone table is required.
+
+Account deletion enters a durable deleting state. Its cleanup workflow stops the Gmail watch when possible, deletes every recorded raw-MIME and attachment object, and only then deletes the relational account. Transient provider or object-storage failures retry without losing `gmail_account_cleanups` state.
 
 ## External configuration
 
-The following real Google Cloud resources are required for continuous delivery:
+Continuous delivery requires:
 
-- a Pub/Sub topic named by `GMAIL_PUBSUB_TOPIC`, with Gmail permitted to publish;
+- a Pub/Sub topic named by `GMAIL_PUBSUB_TOPIC`, with Gmail allowed to publish;
 - an authenticated push subscription targeting `/v1/webhooks/google-pubsub`;
-- `GOOGLE_PUBSUB_PUSH_AUDIENCE` matching the subscription's OIDC audience;
-- `GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL` matching its OIDC service account;
+- `GOOGLE_PUBSUB_PUSH_AUDIENCE` matching the OIDC audience;
+- `GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL` matching the subscription service account;
 - `GOOGLE_PUBSUB_SUBSCRIPTION` matching the full subscription resource name.
 
-Without those resources, the application remains available but Gmail connection/continuous-sync setup is honestly unavailable.
+Without these resources, Gmail connection and continuous synchronization remain honestly unavailable.

@@ -1,96 +1,154 @@
 "use client";
 
-import { Add01Icon, TagsIcon } from "@hugeicons/core-free-icons";
+import { Add01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { CreateMailLabelRequest, MailLabel } from "@invook/contracts";
+import type {
+  CreateInvookLabelRequest,
+  GmailUserLabel,
+  InvookLabel,
+} from "@invook/contracts";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { createMailLabel, deleteMailLabel } from "@/lib/api/labels";
+import {
+  createInvookLabel,
+  deleteGmailUserLabel,
+  deleteInvookLabel,
+} from "@/lib/api/labels";
 import { apiErrorMessage } from "@/lib/http-error";
 
 import { CreateLabelDialog } from "./create-label-dialog";
-import { LabelCard } from "./label-card";
+import { listLabelSettingsItems } from "./label-settings-items";
+import { LabelSettingsRow } from "./label-settings-row";
 
 export interface LabelSettingsProps {
-  labels: MailLabel[];
+  gmailUserLabels: GmailUserLabel[];
+  invookLabels: InvookLabel[];
   batchConfigured: boolean;
 }
 
 export function LabelSettings({
-  labels,
+  gmailUserLabels,
+  invookLabels,
   batchConfigured,
 }: LabelSettingsProps) {
   const router = useRouter();
   const [isEditorOpen, setIsEditorOpen] = useState(false);
-  const [deletingLabelId, setDeletingLabelId] = useState<string | null>(null);
+  const [deletingLabelKey, setDeletingLabelKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const labels = listLabelSettingsItems({ gmailUserLabels, invookLabels });
 
   function handleOpenEditor() {
     setError(null);
     setIsEditorOpen(true);
   }
 
-  async function handleCreateLabel(request: CreateMailLabelRequest) {
-    await createMailLabel(request);
+  async function handleCreateLabel(request: CreateInvookLabelRequest) {
+    await createInvookLabel(request);
     router.refresh();
   }
 
-  async function handleDeleteLabel(label: MailLabel) {
-    setDeletingLabelId(label.id);
+  async function handleDeleteGmailLabel(label: GmailUserLabel) {
+    setDeletingLabelKey(`gmail:${label.id}`);
     setError(null);
     try {
-      await deleteMailLabel(label.id);
+      await deleteGmailUserLabel(label.id);
+      router.refresh();
+    } catch (cause) {
+      setError(apiErrorMessage(cause, "Invook could not delete this Gmail label."));
+    } finally {
+      setDeletingLabelKey(null);
+    }
+  }
+
+  async function handleDeleteInvookLabel(label: InvookLabel) {
+    setDeletingLabelKey(`invook:${label.id}`);
+    setError(null);
+    try {
+      await deleteInvookLabel(label.id);
       router.refresh();
     } catch (cause) {
       setError(apiErrorMessage(cause, "Invook could not delete this label."));
     } finally {
-      setDeletingLabelId(null);
+      setDeletingLabelKey(null);
     }
   }
 
   return (
-    <section className="mx-auto w-full max-w-3xl px-6 py-8 sm:px-10">
+    <section className="w-full px-5 py-6 pr-12 sm:px-8 sm:py-7 sm:pr-12">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex min-w-0 items-start gap-3">
-          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground">
-            <HugeiconsIcon icon={TagsIcon} size={17} />
-          </span>
-          <div>
-            <h2 className="text-base font-semibold tracking-[-0.02em]">Labels</h2>
-            <p className="mt-1 max-w-xl text-sm leading-6 text-muted-foreground">
-              Invook checks every indexed Gmail thread against each description. New labels
-              are analyzed through the configured Batch provider.
-            </p>
-          </div>
+        <div className="min-w-0">
+          <h2 className="text-lg font-semibold tracking-[-0.025em]">Labels</h2>
         </div>
-        <Button type="button" size="sm" onClick={handleOpenEditor}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-muted-foreground hover:text-foreground"
+          onClick={handleOpenEditor}
+        >
           <HugeiconsIcon icon={Add01Icon} size={14} />
-          New label
+          New Invook label
         </Button>
       </div>
 
-      <div className="mt-6 space-y-2">
-        {labels.map((label) => (
-          <LabelCard
-            key={label.id}
-            label={label}
-            batchConfigured={batchConfigured}
-            deleting={deletingLabelId === label.id}
-            onDelete={handleDeleteLabel}
-          />
-        ))}
+      <div className="mt-5 space-y-0.5" role="list" aria-label="Gmail and Invook labels">
+        {labels.map((item) => {
+          if (item.kind === "gmail") {
+            return (
+              <div key={`gmail:${item.label.id}`} role="listitem">
+                <LabelSettingsRow
+                  kind="gmail"
+                  name={item.label.name}
+                  description="Managed in Gmail"
+                  status="Synced from Gmail"
+                  deleting={deletingLabelKey === `gmail:${item.label.id}`}
+                  onDelete={() => handleDeleteGmailLabel(item.label)}
+                />
+              </div>
+            );
+          }
+
+          const label = item.label;
+          const status =
+            label.analysisState === "complete"
+              ? `${label.analyzedThreadCount} analyzed`
+              : label.analysisState === "failed"
+                ? "Analysis needs attention"
+                : !batchConfigured
+                  ? "Waiting for Batch setup"
+                  : label.analysisState === "running"
+                    ? `${label.analyzedThreadCount} of ${label.totalThreadCount} analyzed`
+                    : "Analysis queued";
+          return (
+            <div key={`invook:${label.id}`} role="listitem">
+              <LabelSettingsRow
+                kind="invook"
+                name={label.name}
+                description={label.description}
+                status={status}
+                deleting={deletingLabelKey === `invook:${label.id}`}
+                onDelete={() => handleDeleteInvookLabel(label)}
+              />
+            </div>
+          );
+        })}
         {labels.length === 0 ? (
-          <div className="rounded-xl bg-card/45 px-6 py-10 text-center">
+          <div className="rounded-xl bg-muted/25 px-6 py-12 text-center">
             <p className="text-sm font-medium">No labels</p>
             <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
-              Create a label when you want Invook to classify indexed Gmail threads.
+              Gmail user labels and Invook labels will appear here.
             </p>
           </div>
         ) : null}
-        {error ? <p className="text-xs text-destructive">{error}</p> : null}
       </div>
+
+      {error ? (
+        <p role="alert" className="mt-4 text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
 
       {isEditorOpen ? (
         <CreateLabelDialog

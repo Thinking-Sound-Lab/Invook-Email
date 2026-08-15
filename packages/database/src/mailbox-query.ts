@@ -1,0 +1,236 @@
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  lt,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
+import { validate as validateUuid } from "uuid";
+
+import { getDatabase, type Database } from "./client";
+import {
+  connectedAccounts,
+  gmailReplicaStates,
+  labels,
+  messageLabels,
+  messages,
+} from "./schema";
+
+export type QueryInvookMailboxInput = {
+  userId: string;
+  candidateMessageIds?: string[];
+  gmailLabelIds?: string[];
+  invookLabelIds?: string[];
+  inboxState?: "any" | "inbox" | "not_inbox";
+  readState?: "any" | "read" | "unread";
+  sender?: string;
+  sentAfter?: Date;
+  sentBefore?: Date;
+  cursor?: string;
+  limit?: number;
+};
+
+type QueryCursor = { sentAt: Date; messageId: string };
+
+function parseQueryCursor(value: string): QueryCursor | null {
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+      sentAt?: unknown;
+      messageId?: unknown;
+    };
+    if (typeof decoded.sentAt !== "string" || typeof decoded.messageId !== "string") {
+      return null;
+    }
+    const sentAt = new Date(decoded.sentAt);
+    if (!Number.isFinite(sentAt.getTime()) || !validateUuid(decoded.messageId)) {
+      return null;
+    }
+    return { sentAt, messageId: decoded.messageId };
+  } catch {
+    return null;
+  }
+}
+
+function createQueryCursor(message: { id: string; sentAt: Date }): string {
+  return Buffer.from(
+    JSON.stringify({ sentAt: message.sentAt.toISOString(), messageId: message.id }),
+  ).toString("base64url");
+}
+
+function gmailMembership(providerLabelId: string) {
+  return sql<boolean>`exists (
+    select 1
+    from ${messageLabels} membership
+    inner join ${labels} label on label.id = membership.label_id
+    where membership.message_id = ${messages.id}
+      and label.kind = 'gmail'
+      and label.provider_label_id = ${providerLabelId}
+  )`;
+}
+
+export async function queryInvookMailbox(
+  input: QueryInvookMailboxInput,
+  database: Database = getDatabase(),
+) {
+  const [account] = await database
+    .select({ id: connectedAccounts.id, replicaState: gmailReplicaStates.state })
+    .from(connectedAccounts)
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
+    .where(
+      and(
+        eq(connectedAccounts.userId, input.userId),
+        eq(connectedAccounts.status, "connected"),
+      ),
+    )
+    .orderBy(desc(connectedAccounts.createdAt))
+    .limit(1);
+  if (!account) {
+    return { status: "unavailable" as const, reason: "mailbox_not_connected" as const };
+  }
+  if (account.replicaState !== "ready") {
+    return { status: "unavailable" as const, reason: "replica_not_ready" as const };
+  }
+
+  const limit = Math.max(1, Math.min(input.limit ?? 25, 50));
+  const cursor = input.cursor ? parseQueryCursor(input.cursor) : null;
+  if (input.cursor && !cursor) throw new Error("The mailbox query cursor is invalid.");
+
+  const [availableGmailLabels, availableInvookLabels] = await Promise.all([
+    database
+      .select({ id: labels.id, name: labels.name })
+      .from(labels)
+      .where(and(eq(labels.accountId, account.id), eq(labels.kind, "gmail")))
+      .orderBy(asc(labels.name)),
+    database
+      .select({ id: labels.id, name: labels.name })
+      .from(labels)
+      .where(and(eq(labels.accountId, account.id), eq(labels.kind, "invook")))
+      .orderBy(asc(labels.name)),
+  ]);
+  if (input.candidateMessageIds && input.candidateMessageIds.length === 0) {
+    return {
+      status: "available" as const,
+      messages: [],
+      availableGmailLabels,
+      availableInvookLabels,
+      nextCursor: null,
+    };
+  }
+
+  const conditions = [
+    eq(messages.userId, input.userId),
+    eq(messages.accountId, account.id),
+  ];
+  if (input.candidateMessageIds) {
+    conditions.push(inArray(messages.id, input.candidateMessageIds));
+  }
+  for (const labelId of [
+    ...(input.gmailLabelIds ?? []),
+    ...(input.invookLabelIds ?? []),
+  ]) {
+    conditions.push(sql<boolean>`exists (
+      select 1 from ${messageLabels} membership
+      where membership.message_id = ${messages.id}
+        and membership.label_id = ${labelId}
+    )`);
+  }
+  const isInbox = gmailMembership("INBOX");
+  const isUnread = gmailMembership("UNREAD");
+  if (input.inboxState === "inbox") conditions.push(isInbox);
+  if (input.inboxState === "not_inbox") conditions.push(sql<boolean>`not (${isInbox})`);
+  if (input.readState === "unread") conditions.push(isUnread);
+  if (input.readState === "read") conditions.push(sql<boolean>`not (${isUnread})`);
+  if (input.sender?.trim()) {
+    const sender = input.sender.trim().toLowerCase();
+    conditions.push(
+      sql<boolean>`(
+        lower(${messages.sender}->>'email') = ${sender}
+        or lower(${messages.sender}->>'raw') like ${`%${sender}%`}
+      )`,
+    );
+  }
+  if (input.sentAfter) conditions.push(gte(messages.sentAt, input.sentAfter));
+  if (input.sentBefore) conditions.push(lte(messages.sentAt, input.sentBefore));
+  if (cursor) {
+    const cursorCondition = or(
+      lt(messages.sentAt, cursor.sentAt),
+      and(eq(messages.sentAt, cursor.sentAt), lt(messages.id, cursor.messageId)),
+    );
+    if (cursorCondition) conditions.push(cursorCondition);
+  }
+
+  const rows = await database
+    .select({
+      id: messages.id,
+      threadId: messages.threadId,
+      subject: messages.subject,
+      bodyText: messages.bodyText,
+      sender: messages.sender,
+      sentAt: messages.sentAt,
+    })
+    .from(messages)
+    .where(and(...conditions))
+    .orderBy(desc(messages.sentAt), desc(messages.id))
+    .limit(limit + 1);
+  const page = rows.slice(0, limit);
+  const messageIds = page.map((message) => message.id);
+  const memberships =
+    messageIds.length === 0
+      ? []
+      : await database
+          .select({
+            messageId: messageLabels.messageId,
+            id: labels.id,
+            name: labels.name,
+            kind: labels.kind,
+            providerLabelId: labels.providerLabelId,
+          })
+          .from(messageLabels)
+          .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+          .where(inArray(messageLabels.messageId, messageIds))
+          .orderBy(asc(labels.name));
+
+  return {
+    status: "available" as const,
+    messages: page.map((message) => {
+      const messageMemberships = memberships.filter(
+        (membership) => membership.messageId === message.id,
+      );
+      const gmailLabels = messageMemberships.filter(
+        (membership) => membership.kind === "gmail",
+      );
+      return {
+        messageId: message.id,
+        threadId: message.threadId,
+        subject: message.subject,
+        bodyPreview: message.bodyText.slice(0, 800),
+        sender: message.sender,
+        sentAt: message.sentAt,
+        isInbox: gmailLabels.some(
+          (membership) => membership.providerLabelId === "INBOX",
+        ),
+        isUnread: gmailLabels.some(
+          (membership) => membership.providerLabelId === "UNREAD",
+        ),
+        gmailLabels: gmailLabels.map(({ id, name }) => ({ id, name })),
+        invookLabels: messageMemberships
+          .filter((membership) => membership.kind === "invook")
+          .map(({ id, name }) => ({ id, name })),
+      };
+    }),
+    availableGmailLabels,
+    availableInvookLabels,
+    nextCursor:
+      rows.length > limit && page.length > 0
+        ? createQueryCursor(page[page.length - 1]!)
+        : null,
+  };
+}

@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
 import { MailboxRefreshButton } from "./mailbox-refresh-button";
 import { MailNavigationPending } from "./mail-navigation-pending";
+import { listMailRowLabels, type MailRowLabel } from "./mail-row-labels";
 import type {
   MailAccount,
   MailboxView,
@@ -24,22 +25,12 @@ import type {
 
 const viewTitles: Record<StaticMailboxView, string> = {
   all: "All mail",
-  travel: "Travel",
-  important: "Important",
-  pitch: "Pitch",
-  newsletter: "Newsletter",
   starred: "Starred",
   drafts: "Drafts",
   sent: "Sent",
+  spam: "Spam",
   trash: "Trash",
 };
-
-const labelStyles = {
-  important: "bg-violet-400/14 text-violet-200",
-  travel: "bg-sky-400/14 text-sky-200",
-  pitch: "bg-rose-400/14 text-rose-200",
-  newsletter: "bg-emerald-400/14 text-emerald-200",
-} as const;
 
 function mailboxHref(
   currentView: MailboxView,
@@ -57,7 +48,29 @@ interface MailRowProps {
   accountEmail: string;
   currentView: MailboxView;
   mailboxCursor?: string;
-  important: boolean;
+}
+
+interface MailLabelChipProps {
+  label: MailRowLabel;
+}
+
+function MailLabelChip({ label }: MailLabelChipProps) {
+  const sourceName = label.kind === "gmail" ? "Gmail" : "Invook";
+
+  return (
+    <span
+      aria-label={`${label.name}, ${sourceName} label`}
+      title={`${label.name} (${sourceName})`}
+      className={cn(
+        "min-w-0 max-w-28 truncate rounded px-1.5 py-0.5 text-[11px] font-medium",
+        label.kind === "gmail"
+          ? "bg-secondary text-muted-foreground"
+          : "bg-primary/12 text-primary",
+      )}
+    >
+      {label.name}
+    </span>
+  );
 }
 
 function MailRow({
@@ -65,7 +78,6 @@ function MailRow({
   accountEmail,
   currentView,
   mailboxCursor,
-  important,
 }: MailRowProps) {
   const people = threadPeople(thread.participants, accountEmail);
   const unread = thread.gmailLabels.some(
@@ -74,7 +86,7 @@ function MailRow({
   const starred = thread.gmailLabels.some(
     (label) => label.providerLabelId === "STARRED",
   );
-  const primaryLabel = thread.invookLabels[0];
+  const labels = listMailRowLabels(thread);
 
   return (
     <Link
@@ -88,7 +100,6 @@ function MailRow({
     >
       <MailNavigationPending variant="edge" />
       <div className="flex min-w-0 items-center gap-2">
-        {important ? <span className="size-1.5 shrink-0 rounded-full bg-primary" /> : null}
         <p className={cn("truncate text-sm", unread ? "font-semibold" : "font-medium text-foreground/78")}>
           {people}
           {thread.messageCount > 1 ? (
@@ -106,17 +117,15 @@ function MailRow({
         <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {formatMailText(thread.snippet) || "No message preview is available."}
         </p>
-        {primaryLabel ? (
-          <span
-            className={cn(
-              "hidden shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium capitalize 2xl:inline-flex",
-              primaryLabel.systemKey
-                ? labelStyles[primaryLabel.systemKey]
-                : "bg-secondary text-muted-foreground",
-            )}
+        {labels.length > 0 ? (
+          <div
+            className="hidden min-w-0 max-w-[40%] shrink items-center gap-1 overflow-hidden lg:flex"
+            aria-label="User-created labels"
           >
-            {primaryLabel.name}
-          </span>
+            {labels.map((label) => (
+              <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
+            ))}
+          </div>
         ) : null}
         {starred ? (
           <HugeiconsIcon icon={StarIcon} size={13} className="shrink-0 text-warning" fill="currentColor" />
@@ -135,7 +144,6 @@ interface MailRowsProps {
   accountEmail: string;
   currentView: MailboxView;
   mailboxCursor?: string;
-  important?: boolean;
 }
 
 function MailRows({
@@ -143,7 +151,6 @@ function MailRows({
   accountEmail,
   currentView,
   mailboxCursor,
-  important = false,
 }: MailRowsProps) {
   return threads.map((thread) => (
     <MailRow
@@ -152,49 +159,30 @@ function MailRows({
       accountEmail={accountEmail}
       currentView={currentView}
       mailboxCursor={mailboxCursor}
-      important={important}
     />
   ));
-}
-
-interface SectionLabelProps {
-  children: React.ReactNode;
-}
-
-function SectionLabel({ children }: SectionLabelProps) {
-  return (
-    <div className="flex h-9 items-center gap-3 px-5">
-      <span className="h-px flex-1 bg-border/55" />
-      <p className="text-xs font-medium text-muted-foreground">{children}</p>
-      <span className="h-px flex-1 bg-border/55" />
-    </div>
-  );
 }
 
 export interface MailListProps {
   account: MailAccount;
   currentView: MailboxView;
-  importantThreads: MailThreadSummary[];
   mailboxCursor?: string;
   pagination: MailboxPagination;
-  remainingThreads: MailThreadSummary[];
+  threads: MailThreadSummary[];
   query?: string;
   title?: string;
-  importantView?: boolean;
 }
 
 export function MailList({
   account,
   currentView,
-  importantThreads,
   mailboxCursor,
   pagination,
-  remainingThreads,
+  threads,
   query,
   title,
-  importantView = false,
 }: MailListProps) {
-  const noMail = importantThreads.length === 0 && remainingThreads.length === 0;
+  const noMail = threads.length === 0;
   const syncing =
     account.syncState.mailSync === "pending" || account.syncState.mailSync === "running";
 
@@ -253,36 +241,12 @@ export function MailList({
       </header>
 
       <ScrollArea type="always" className="min-h-0 flex-1">
-        {currentView === "all" && !query ? (
-          <>
-            {importantThreads.length > 0 ? (
-              <MailRows
-                threads={importantThreads}
-                accountEmail={account.email}
-                currentView={currentView}
-                mailboxCursor={mailboxCursor}
-                important
-              />
-            ) : null}
-            {importantThreads.length > 0 && remainingThreads.length > 0 ? (
-              <SectionLabel>All mail</SectionLabel>
-            ) : null}
-            <MailRows
-              threads={remainingThreads}
-              accountEmail={account.email}
-              currentView={currentView}
-              mailboxCursor={mailboxCursor}
-            />
-          </>
-        ) : (
-          <MailRows
-            threads={remainingThreads}
-            accountEmail={account.email}
-            currentView={currentView}
-            mailboxCursor={mailboxCursor}
-            important={importantView}
-          />
-        )}
+        <MailRows
+          threads={threads}
+          accountEmail={account.email}
+          currentView={currentView}
+          mailboxCursor={mailboxCursor}
+        />
 
         {noMail ? (
           <div className="mx-auto max-w-sm px-6 py-20 text-center">

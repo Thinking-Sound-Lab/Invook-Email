@@ -148,6 +148,20 @@
       "when": 1786636413869,
       "tag": "0020_milky_magus",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1786701156982,
+      "tag": "0021_nervous_lucky_pierre",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1786769099657,
+      "tag": "0022_burly_magneto",
+      "breakpoints": true
     }
   ]
 }

@@ -15,13 +15,7 @@ import {
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
-import type {
-  LabelAnalysisState,
-  MailboxActionOperation,
-  MailboxActionStatus,
-  MailboxActionTargetStatus,
-  SystemLabelKey,
-} from "@invook/contracts";
+import type { LabelAnalysisState } from "@invook/contracts";
 
 import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 
@@ -111,12 +105,12 @@ export const gmailReplicaStates = pgTable("gmail_replica_states", {
     .references(() => connectedAccounts.id, { onDelete: "cascade" }),
   initialHistoryId: text("initial_history_id").notNull(),
   historyCursor: text("history_cursor"),
+  pendingHistoryCursor: text("pending_history_cursor"),
   state: text("state")
     .$type<
       | "pending"
       | "snapshotting"
       | "replaying"
-      | "auditing"
       | "ready"
       | "repairing"
       | "failed"
@@ -126,7 +120,6 @@ export const gmailReplicaStates = pgTable("gmail_replica_states", {
     .default("pending"),
   readyAt: timestampWithTimezone("ready_at"),
   lastHistoryAt: timestampWithTimezone("last_history_at"),
-  lastAuditAt: timestampWithTimezone("last_audit_at"),
   lastError: text("last_error"),
   createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
   updatedAt: timestampWithTimezone("updated_at")
@@ -137,7 +130,7 @@ export const gmailReplicaStates = pgTable("gmail_replica_states", {
   index("gmail_replica_states_state_idx").on(table.state, table.updatedAt),
   check(
     "gmail_replica_states_state_check",
-    sql`${table.state} in ('pending', 'snapshotting', 'replaying', 'auditing', 'ready', 'repairing', 'failed', 'deleting')`,
+    sql`${table.state} in ('pending', 'snapshotting', 'replaying', 'ready', 'repairing', 'failed', 'deleting')`,
   ),
 ]);
 
@@ -167,8 +160,8 @@ export const gmailWatchStates = pgTable("gmail_watch_states", {
   ),
 ]);
 
-export const gmailLabels = pgTable(
-  "gmail_labels",
+export const labels = pgTable(
+  "labels",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     userId: uuid("user_id")
@@ -177,9 +170,18 @@ export const gmailLabels = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    providerLabelId: text("provider_label_id").notNull(),
+    kind: text("kind").$type<"gmail" | "invook">().notNull(),
+    providerLabelId: text("provider_label_id"),
     name: text("name").notNull(),
-    type: text("type").$type<"system" | "user">().notNull(),
+    normalizedName: text("normalized_name").notNull(),
+    description: text("description").notNull().default(""),
+    definitionVersion: integer("definition_version").notNull().default(1),
+    analysisState: text("analysis_state")
+      .$type<LabelAnalysisState>()
+      .notNull()
+      .default("pending"),
+    lastAnalyzedAt: timestampWithTimezone("last_analyzed_at"),
+    providerType: text("provider_type").$type<"system" | "user">(),
     messageListVisibility: text("message_list_visibility"),
     labelListVisibility: text("label_list_visibility"),
     color: jsonb("color").$type<{ textColor?: string; backgroundColor?: string }>(),
@@ -191,57 +193,26 @@ export const gmailLabels = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
-    uniqueIndex("gmail_labels_account_provider_idx").on(
+    uniqueIndex("labels_account_provider_idx")
+      .on(
       table.accountId,
       table.providerLabelId,
-    ),
-    index("gmail_labels_account_name_idx").on(table.accountId, table.name),
-    check("gmail_labels_type_check", sql`${table.type} in ('system', 'user')`),
-  ],
-);
-
-export const mailLabels = pgTable(
-  "labels",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    name: text("name").notNull(),
-    normalizedName: text("normalized_name").notNull(),
-    description: text("description").notNull(),
-    systemKey: text("system_key").$type<SystemLabelKey>(),
-    definitionVersion: integer("definition_version").notNull().default(1),
-    analysisState: text("analysis_state")
-      .$type<LabelAnalysisState>()
-      .notNull()
-      .default("pending"),
-    lastAnalyzedAt: timestampWithTimezone("last_analyzed_at"),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    uniqueIndex("labels_account_name_idx").on(table.accountId, table.normalizedName),
-    uniqueIndex("labels_account_system_key_idx").on(table.accountId, table.systemKey),
+      )
+      .where(sql`${table.providerLabelId} is not null`),
+    uniqueIndex("labels_account_invook_name_idx")
+      .on(table.accountId, table.normalizedName)
+      .where(sql`${table.kind} = 'invook'`),
     index("labels_account_created_idx").on(table.accountId, table.createdAt),
+    index("labels_account_kind_idx").on(table.accountId, table.kind, table.name),
+    check("labels_kind_check", sql`${table.kind} in ('gmail', 'invook')`),
     check("labels_name_check", sql`char_length(btrim(${table.name})) > 0`),
     check(
       "labels_normalized_name_check",
       sql`char_length(btrim(${table.normalizedName})) > 0`,
     ),
     check(
-      "labels_description_check",
-      sql`char_length(btrim(${table.description})) > 0`,
-    ),
-    check(
-      "labels_system_key_check",
-      sql`${table.systemKey} is null or ${table.systemKey} in ('important', 'travel', 'pitch', 'newsletter')`,
+      "labels_kind_contract_check",
+      sql`(${table.kind} = 'gmail' and ${table.providerLabelId} is not null and ${table.providerType} in ('system', 'user')) or (${table.kind} = 'invook' and ${table.providerLabelId} is null and ${table.providerType} is null and char_length(btrim(${table.description})) > 0)`,
     ),
     check("labels_definition_version_check", sql`${table.definitionVersion} > 0`),
     check(
@@ -282,85 +253,6 @@ export const threads = pgTable(
     index("threads_user_latest_idx").on(table.userId, table.latestMessageAt),
     check("threads_message_count_check", sql`${table.messageCount} >= 0`),
     check("threads_content_version_check", sql`${table.contentVersion} > 0`),
-  ],
-);
-
-export const threadLabels = pgTable(
-  "thread_labels",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    threadId: uuid("thread_id")
-      .notNull()
-      .references(() => threads.id, { onDelete: "cascade" }),
-    labelId: uuid("label_id")
-      .notNull()
-      .references(() => mailLabels.id, { onDelete: "cascade" }),
-    source: text("source").$type<"ai" | "user">().notNull(),
-    state: text("state").$type<"applied" | "dismissed">().notNull(),
-    confidence: numeric("confidence", { precision: 5, scale: 2 }),
-    modelId: text("model_id"),
-    analysisVersion: integer("analysis_version").notNull().default(1),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    uniqueIndex("thread_labels_thread_label_idx").on(table.threadId, table.labelId),
-    index("thread_labels_account_label_state_idx").on(
-      table.accountId,
-      table.labelId,
-      table.state,
-    ),
-    check("thread_labels_source_check", sql`${table.source} in ('ai', 'user')`),
-    check("thread_labels_state_check", sql`${table.state} in ('applied', 'dismissed')`),
-    check(
-      "thread_labels_confidence_check",
-      sql`${table.confidence} is null or ${table.confidence} between 0 and 100`,
-    ),
-  ],
-);
-
-export const threadLabelAnalyses = pgTable(
-  "thread_label_analyses",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    threadId: uuid("thread_id")
-      .notNull()
-      .references(() => threads.id, { onDelete: "cascade" }),
-    labelId: uuid("label_id")
-      .notNull()
-      .references(() => mailLabels.id, { onDelete: "cascade" }),
-    definitionVersion: integer("definition_version").notNull(),
-    modelId: text("model_id"),
-    analyzedAt: timestampWithTimezone("analyzed_at").notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("thread_label_analyses_thread_label_idx").on(
-      table.threadId,
-      table.labelId,
-    ),
-    index("thread_label_analyses_label_version_idx").on(
-      table.labelId,
-      table.definitionVersion,
-    ),
-    check(
-      "thread_label_analyses_definition_version_check",
-      sql`${table.definitionVersion} > 0`,
-    ),
   ],
 );
 
@@ -449,35 +341,8 @@ export const messages = pgTable(
   ],
 );
 
-export const gmailMessageLabels = pgTable(
-  "gmail_message_labels",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    messageId: uuid("message_id")
-      .notNull()
-      .references(() => messages.id, { onDelete: "cascade" }),
-    gmailLabelId: uuid("gmail_label_id")
-      .notNull()
-      .references(() => gmailLabels.id, { onDelete: "cascade" }),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("gmail_message_labels_message_label_idx").on(
-      table.messageId,
-      table.gmailLabelId,
-    ),
-    index("gmail_message_labels_account_label_idx").on(
-      table.accountId,
-      table.gmailLabelId,
-    ),
-  ],
-);
-
-export const gmailMessageTombstones = pgTable(
-  "gmail_message_tombstones",
+export const messageLabels = pgTable(
+  "message_labels",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     userId: uuid("user_id")
@@ -486,11 +351,13 @@ export const gmailMessageTombstones = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    providerMessageId: text("provider_message_id").notNull(),
-    providerThreadId: text("provider_thread_id"),
-    providerHistoryId: text("provider_history_id"),
-    objectKeys: jsonb("object_keys").$type<string[]>().notNull().default([]),
-    deletedAt: timestampWithTimezone("deleted_at").notNull().defaultNow(),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => labels.id, { onDelete: "cascade" }),
+    source: text("source").$type<"gmail" | "ai" | "user">().notNull(),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -498,13 +365,65 @@ export const gmailMessageTombstones = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
-    uniqueIndex("gmail_message_tombstones_account_message_idx").on(
-      table.accountId,
-      table.providerMessageId,
+    uniqueIndex("message_labels_message_label_idx").on(
+      table.messageId,
+      table.labelId,
     ),
-    index("gmail_message_tombstones_account_deleted_idx").on(
+    index("message_labels_account_label_idx").on(
       table.accountId,
-      table.deletedAt,
+      table.labelId,
+    ),
+    check("message_labels_source_check", sql`${table.source} in ('gmail', 'ai', 'user')`),
+  ],
+);
+
+export const messageLabelDecisions = pgTable(
+  "message_label_decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => labels.id, { onDelete: "cascade" }),
+    aiDecision: text("ai_decision").$type<"applied" | "not_applied">().notNull(),
+    confidence: numeric("confidence", { precision: 5, scale: 2 }),
+    modelId: text("model_id"),
+    definitionVersion: integer("definition_version").notNull(),
+    userOverride: text("user_override").$type<"applied" | "suppressed">(),
+    analyzedAt: timestampWithTimezone("analyzed_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("message_label_decisions_message_label_idx").on(
+      table.messageId,
+      table.labelId,
+    ),
+    index("message_label_decisions_label_version_idx").on(
+      table.labelId,
+      table.definitionVersion,
+    ),
+    check(
+      "message_label_decisions_ai_decision_check",
+      sql`${table.aiDecision} in ('applied', 'not_applied')`,
+    ),
+    check(
+      "message_label_decisions_user_override_check",
+      sql`${table.userOverride} is null or ${table.userOverride} in ('applied', 'suppressed')`,
+    ),
+    check(
+      "message_label_decisions_confidence_check",
+      sql`${table.confidence} is null or ${table.confidence} between 0 and 100`,
+    ),
+    check(
+      "message_label_decisions_definition_version_check",
+      sql`${table.definitionVersion} > 0`,
     ),
   ],
 );
@@ -776,9 +695,17 @@ export const drafts = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<"gmail" | "invook">().notNull().default("invook"),
     threadId: uuid("thread_id")
-      .notNull()
       .references(() => threads.id, { onDelete: "cascade" }),
+    providerDraftId: text("provider_draft_id"),
+    providerMessageId: text("provider_message_id"),
+    providerThreadId: text("provider_thread_id"),
+    messageId: uuid("message_id").references(() => messages.id, {
+      onDelete: "set null",
+    }),
+    providerHistoryId: text("provider_history_id"),
+    providerMetadata: jsonb("provider_metadata").$type<JsonObject>().notNull().default({}),
     status: text("status")
       .$type<"editing" | "sent" | "discarded" | "failed">()
       .notNull()
@@ -807,45 +734,21 @@ export const drafts = pgTable(
   },
   (table) => [
     index("drafts_user_updated_idx").on(table.userId, table.updatedAt),
+    uniqueIndex("drafts_account_provider_idx")
+      .on(table.accountId, table.providerDraftId)
+      .where(sql`${table.providerDraftId} is not null`),
+    index("drafts_account_provider_thread_idx").on(
+      table.accountId,
+      table.providerThreadId,
+    ),
+    check("drafts_kind_check", sql`${table.kind} in ('gmail', 'invook')`),
+    check(
+      "drafts_kind_contract_check",
+      sql`(${table.kind} = 'gmail' and ${table.providerDraftId} is not null and ${table.providerThreadId} is not null) or (${table.kind} = 'invook' and ${table.threadId} is not null and ${table.providerDraftId} is null and ${table.providerMessageId} is null and ${table.providerThreadId} is null and ${table.providerHistoryId} is null)`,
+    ),
     check(
       "drafts_status_check",
       sql`${table.status} in ('editing', 'sent', 'discarded', 'failed')`,
-    ),
-  ],
-);
-
-export const gmailDrafts = pgTable(
-  "gmail_drafts",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    providerDraftId: text("provider_draft_id").notNull(),
-    providerMessageId: text("provider_message_id"),
-    providerThreadId: text("provider_thread_id").notNull(),
-    messageId: uuid("message_id").references(() => messages.id, {
-      onDelete: "set null",
-    }),
-    providerHistoryId: text("provider_history_id"),
-    providerMetadata: jsonb("provider_metadata").$type<JsonObject>().notNull().default({}),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    uniqueIndex("gmail_drafts_account_provider_idx").on(
-      table.accountId,
-      table.providerDraftId,
-    ),
-    index("gmail_drafts_account_thread_idx").on(
-      table.accountId,
-      table.providerThreadId,
     ),
   ],
 );
@@ -911,6 +814,7 @@ export const mailSyncRuns = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    runType: text("run_type").$type<"initial" | "repair">().notNull().default("initial"),
     status: text("status")
       .$type<"queued" | "running" | "complete" | "failed" | "superseded">()
       .notNull()
@@ -942,6 +846,7 @@ export const mailSyncRuns = pgTable(
       "mail_sync_runs_status_check",
       sql`${table.status} in ('queued', 'running', 'complete', 'failed', 'superseded')`,
     ),
+    check("mail_sync_runs_type_check", sql`${table.runType} in ('initial', 'repair')`),
     check("mail_sync_runs_page_count_check", sql`${table.pageCount} >= 0`),
     check(
       "mail_sync_runs_message_counts_check",
@@ -1112,129 +1017,6 @@ export const queueOutbox = pgTable(
   ],
 );
 
-export const mailboxActionProposals = pgTable(
-  "mailbox_action_proposals",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    operation: text("operation").$type<MailboxActionOperation>().notNull(),
-    status: text("status")
-      .$type<MailboxActionStatus>()
-      .notNull()
-      .default("pending"),
-    gmailLabelId: uuid("gmail_label_id").references(() => gmailLabels.id, {
-      onDelete: "set null",
-    }),
-    providerLabelId: text("provider_label_id"),
-    gmailLabelName: text("gmail_label_name"),
-    requestFingerprint: text("request_fingerprint").notNull(),
-    idempotencyKey: text("idempotency_key").notNull(),
-    workflowStepId: uuid("workflow_step_id").references(() => workflowSteps.id, {
-      onDelete: "set null",
-    }),
-    approvedAt: timestampWithTimezone("approved_at"),
-    completedAt: timestampWithTimezone("completed_at"),
-    cancelledAt: timestampWithTimezone("cancelled_at"),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    uniqueIndex("mailbox_action_proposals_idempotency_idx").on(
-      table.idempotencyKey,
-    ),
-    index("mailbox_action_proposals_user_created_idx").on(
-      table.userId,
-      table.createdAt,
-    ),
-    index("mailbox_action_proposals_account_status_idx").on(
-      table.accountId,
-      table.status,
-      table.createdAt,
-    ),
-    check(
-      "mailbox_action_proposals_operation_check",
-      sql`${table.operation} in ('archive', 'mark_read', 'mark_unread', 'trash', 'apply_gmail_label', 'remove_gmail_label', 'save_draft_to_gmail')`,
-    ),
-    check(
-      "mailbox_action_proposals_status_check",
-      sql`${table.status} in ('pending', 'executing', 'completed', 'partial_failure', 'failed', 'cancelled')`,
-    ),
-    check(
-      "mailbox_action_proposals_label_check",
-      sql`(${table.operation} in ('apply_gmail_label', 'remove_gmail_label') and ${table.providerLabelId} is not null and ${table.gmailLabelName} is not null) or (${table.operation} not in ('apply_gmail_label', 'remove_gmail_label') and ${table.providerLabelId} is null and ${table.gmailLabelName} is null)`,
-    ),
-  ],
-);
-
-export const mailboxActionTargets = pgTable(
-  "mailbox_action_targets",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    proposalId: uuid("proposal_id")
-      .notNull()
-      .references(() => mailboxActionProposals.id, { onDelete: "cascade" }),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    messageId: uuid("message_id"),
-    draftId: uuid("draft_id"),
-    threadId: uuid("thread_id").notNull(),
-    providerMessageId: text("provider_message_id"),
-    providerThreadId: text("provider_thread_id").notNull(),
-    subject: text("subject").notNull(),
-    sender: text("sender"),
-    sentAt: timestampWithTimezone("sent_at"),
-    expectedUpdatedAt: timestampWithTimezone("expected_updated_at").notNull(),
-    status: text("status")
-      .$type<MailboxActionTargetStatus>()
-      .notNull()
-      .default("pending"),
-    errorCode: text("error_code"),
-    providerEvidence: jsonb("provider_evidence")
-      .$type<JsonObject>()
-      .notNull()
-      .default({}),
-    completedAt: timestampWithTimezone("completed_at"),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    uniqueIndex("mailbox_action_targets_proposal_message_idx")
-      .on(table.proposalId, table.messageId)
-      .where(sql`${table.messageId} is not null`),
-    uniqueIndex("mailbox_action_targets_proposal_draft_idx")
-      .on(table.proposalId, table.draftId)
-      .where(sql`${table.draftId} is not null`),
-    index("mailbox_action_targets_proposal_status_idx").on(
-      table.proposalId,
-      table.status,
-      table.createdAt,
-    ),
-    check(
-      "mailbox_action_targets_kind_check",
-      sql`(${table.messageId} is not null and ${table.draftId} is null and ${table.providerMessageId} is not null) or (${table.messageId} is null and ${table.draftId} is not null and ${table.providerMessageId} is null)`,
-    ),
-    check(
-      "mailbox_action_targets_status_check",
-      sql`${table.status} in ('pending', 'executing', 'completed', 'failed', 'stale')`,
-    ),
-  ],
-);
-
 export const gmailSyncPages = pgTable(
   "gmail_sync_pages",
   {
@@ -1292,87 +1074,6 @@ export const gmailSyncItems = pgTable(
       sql`${table.status} in ('queued', 'running', 'complete', 'failed')`,
     ),
     check("gmail_sync_items_attempts_check", sql`${table.attempts} >= 0`),
-  ],
-);
-
-export const gmailPushEvents = pgTable(
-  "gmail_push_events",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    providerEventId: text("provider_event_id").notNull(),
-    accountId: uuid("account_id").references(() => connectedAccounts.id, {
-      onDelete: "set null",
-    }),
-    emailAddress: text("email_address").notNull(),
-    notificationHistoryId: text("notification_history_id").notNull(),
-    subscription: text("subscription").notNull(),
-    publishedAt: timestampWithTimezone("published_at"),
-    payload: jsonb("payload").$type<JsonObject>().notNull(),
-    status: text("status")
-      .$type<"stored" | "processed" | "failed">()
-      .notNull()
-      .default("stored"),
-    processedAt: timestampWithTimezone("processed_at"),
-    lastError: text("last_error"),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    uniqueIndex("gmail_push_events_provider_event_idx").on(table.providerEventId),
-    index("gmail_push_events_account_created_idx").on(table.accountId, table.createdAt),
-    check(
-      "gmail_push_events_status_check",
-      sql`${table.status} in ('stored', 'processed', 'failed')`,
-    ),
-  ],
-);
-
-export const gmailReplicaAudits = pgTable(
-  "gmail_replica_audits",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    trigger: text("trigger")
-      .$type<"initial" | "history_expired" | "watch_renewal" | "manual">()
-      .notNull(),
-    status: text("status")
-      .$type<"running" | "complete" | "repairing" | "failed">()
-      .notNull()
-      .default("running"),
-    providerMessageCount: integer("provider_message_count"),
-    storedMessageCount: integer("stored_message_count"),
-    missingMessageIds: jsonb("missing_message_ids").$type<string[]>().notNull().default([]),
-    extraMessageIds: jsonb("extra_message_ids").$type<string[]>().notNull().default([]),
-    details: jsonb("details").$type<JsonObject>().notNull().default({}),
-    startedAt: timestampWithTimezone("started_at").notNull().defaultNow(),
-    completedAt: timestampWithTimezone("completed_at"),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-    updatedAt: timestampWithTimezone("updated_at")
-      .notNull()
-      .defaultNow()
-      .$onUpdate(() => new Date()),
-  },
-  (table) => [
-    index("gmail_replica_audits_account_created_idx").on(
-      table.accountId,
-      table.createdAt,
-    ),
-    check(
-      "gmail_replica_audits_trigger_check",
-      sql`${table.trigger} in ('initial', 'history_expired', 'watch_renewal', 'manual')`,
-    ),
-    check(
-      "gmail_replica_audits_status_check",
-      sql`${table.status} in ('running', 'complete', 'repairing', 'failed')`,
-    ),
   ],
 );
 
@@ -1441,23 +1142,4 @@ export const mailboxChangeEvents = pgTable(
       sql`${table.changeType} in ('replica_ready', 'history_applied', 'repair_complete', 'drafts_changed', 'labels_changed')`,
     ),
   ],
-);
-
-export const auditEvents = pgTable(
-  "audit_events",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id").references(() => connectedAccounts.id, {
-      onDelete: "set null",
-    }),
-    eventType: text("event_type").notNull(),
-    targetType: text("target_type"),
-    targetId: text("target_id"),
-    metadata: jsonb("metadata").$type<JsonObject>().notNull().default({}),
-    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-  },
-  (table) => [index("audit_user_created_idx").on(table.userId, table.createdAt)],
 );

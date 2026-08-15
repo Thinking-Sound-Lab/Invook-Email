@@ -74,7 +74,6 @@ test(
         historyCursor: "100",
         state: "ready",
         readyAt: new Date(),
-        lastAuditAt: new Date(),
       });
       await database.insert(threads).values({
         id: threadId,
@@ -295,7 +294,6 @@ test(
         historyCursor: "200",
         state: "ready",
         readyAt: new Date(),
-        lastAuditAt: new Date(),
       });
 
       assert.deepEqual(

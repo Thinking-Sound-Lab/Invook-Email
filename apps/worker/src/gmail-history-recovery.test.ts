@@ -33,15 +33,15 @@ test("an expired Gmail history cursor enters the full repair path", async () => 
     },
     repair: async () => {
       repairCalls += 1;
-      return { historyCursor: "fresh-cursor", auditId: "audit-id" };
+      return { runId: "repair-run", startingHistoryCursor: "fresh-cursor" };
     },
   });
 
   assert.equal(result.outcome, "repaired");
   assert.equal(repairCalls, 1);
   assert.deepEqual(result.result, {
-    historyCursor: "fresh-cursor",
-    auditId: "audit-id",
+    runId: "repair-run",
+    startingHistoryCursor: "fresh-cursor",
   });
 });
 

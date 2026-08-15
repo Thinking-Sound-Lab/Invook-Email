@@ -5,7 +5,7 @@ import {
   StarIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { MailLabel } from "@invook/contracts";
+import type { InvookLabel } from "@invook/contracts";
 import Link from "next/link";
 
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -30,7 +30,7 @@ export interface ThreadReaderProps {
   currentView: MailboxView;
   mailboxCursor?: string;
   aiConfigured: boolean;
-  availableLabels: MailLabel[];
+  availableLabels: InvookLabel[];
 }
 
 export function ThreadReader({

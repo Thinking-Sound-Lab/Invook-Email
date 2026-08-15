@@ -2,19 +2,21 @@ import type { FastifyPluginAsync } from "fastify";
 
 import {
   enqueueGmailHistoryCatchup,
+  GmailDraftWriteConflictError,
   getAiReplyDraftForGmailSave,
   getGmailDraftResourceForUser,
   getGmailMessageLabelMutationContext,
+  getGmailThreadLabelMutationContext,
   getGmailProviderLabelForUser,
 } from "@invook/database";
 import {
-  createGmailDraft,
-  composePlainTextGmailReply,
   createGmailLabel,
   deleteGmailDraft,
   deleteGmailLabel,
   GmailApiError,
   modifyGmailMessageLabels,
+  modifyGmailThreadLabels,
+  trashGmailMessage,
   updateGmailDraft,
   updateGmailLabel,
   type GmailLabelInput,
@@ -27,6 +29,11 @@ import {
 } from "../access";
 import { sendJson, sendProblem } from "../responses";
 import type { GmailProviderAccess } from "../services/gmail-provider";
+import { GmailDraftWritePendingError } from "../services/compose-drafts";
+import {
+  GmailReplyComposeError,
+  promoteReplyDraftToGmail,
+} from "../services/promote-reply-draft";
 import {
   getGmailProviderAccessForRequest,
   sendGmailWriteProblem,
@@ -34,6 +41,7 @@ import {
 
 type GmailLabelParams = { gmailLabelId: string };
 type GmailMessageParams = { messageId: string };
+type GmailThreadParams = { threadId: string };
 type GmailDraftParams = { gmailDraftId: string };
 type AiDraftParams = { draftId: string };
 
@@ -111,6 +119,57 @@ function parseUuidArray(value: unknown): string[] | null {
   const values = value as string[];
   if (values.some((entry) => !isUuid(entry))) return null;
   return [...new Set(values)];
+}
+
+const gmailMessageActions = [
+  "mark_read",
+  "mark_unread",
+  "star",
+  "unstar",
+  "archive",
+  "trash",
+] as const;
+type GmailMessageAction = (typeof gmailMessageActions)[number];
+
+export function gmailMessageActionMutation(action: GmailMessageAction):
+  | { kind: "trash" }
+  | {
+      kind: "labels";
+      changes: { addLabelIds?: string[]; removeLabelIds?: string[] };
+    } {
+  switch (action) {
+    case "mark_read":
+      return { kind: "labels", changes: { removeLabelIds: ["UNREAD"] } };
+    case "mark_unread":
+      return { kind: "labels", changes: { addLabelIds: ["UNREAD"] } };
+    case "star":
+      return { kind: "labels", changes: { addLabelIds: ["STARRED"] } };
+    case "unstar":
+      return { kind: "labels", changes: { removeLabelIds: ["STARRED"] } };
+    case "archive":
+      return { kind: "labels", changes: { removeLabelIds: ["INBOX"] } };
+    case "trash":
+      return { kind: "trash" };
+  }
+}
+
+function parseGmailMessageAction(body: unknown): GmailMessageAction | null {
+  if (
+    !isRecord(body) ||
+    Object.keys(body).some((key) => key !== "action") ||
+    typeof body.action !== "string"
+  ) return null;
+  return gmailMessageActions.find((action) => action === body.action) ?? null;
+}
+
+function resolveProviderLabelIds(
+  labelIds: string[],
+  providerLabelsById: Map<string, string>,
+): string[] {
+  return labelIds.flatMap((labelId) => {
+    const providerLabelId = providerLabelsById.get(labelId);
+    return providerLabelId ? [providerLabelId] : [];
+  });
 }
 
 async function enqueueProviderCatchup(
@@ -291,12 +350,123 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
           access.accessToken,
           context.providerMessageId,
           {
-            addLabelIds: addLabelIds.map((labelId) => providerLabels.get(labelId)!),
-            removeLabelIds: removeLabelIds.map(
-              (labelId) => providerLabels.get(labelId)!,
-            ),
+            addLabelIds: resolveProviderLabelIds(addLabelIds, providerLabels),
+            removeLabelIds: resolveProviderLabelIds(removeLabelIds, providerLabels),
           },
         );
+        const stepId = await enqueueProviderCatchup(session.userId, access);
+        await sendJson(reply, 200, { message, stepId });
+      } catch (error) {
+        if (error instanceof GmailApiError) {
+          await sendGmailWriteProblem(error, request, reply);
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  api.patch<{ Params: GmailThreadParams; Body: unknown }>(
+    "/v1/gmail/threads/:threadId/labels",
+    {
+      onRequest: [
+        ...mutationAccessHooks,
+        requireUuidParameter("threadId", "Thread ID must be valid"),
+      ],
+    },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      if (!isRecord(request.body)) {
+        await sendProblem(request, reply, 400, "Gmail label mutation is invalid");
+        return;
+      }
+      const addLabelIds = parseUuidArray(request.body.addLabelIds);
+      const removeLabelIds = parseUuidArray(request.body.removeLabelIds);
+      if (
+        !addLabelIds ||
+        !removeLabelIds ||
+        (addLabelIds.length === 0 && removeLabelIds.length === 0) ||
+        addLabelIds.some((labelId) => removeLabelIds.includes(labelId))
+      ) {
+        await sendProblem(request, reply, 400, "Gmail label mutation is invalid");
+        return;
+      }
+      const [access, context] = await Promise.all([
+        getGmailProviderAccessForRequest(request, reply),
+        getGmailThreadLabelMutationContext({
+          userId: session.userId,
+          threadId: request.params.threadId,
+          gmailLabelIds: [...new Set([...addLabelIds, ...removeLabelIds])],
+        }),
+      ]);
+      if (!access) return;
+      if (!context || context.accountId !== access.accountId) {
+        await sendProblem(request, reply, 404, "Gmail thread or label not found");
+        return;
+      }
+      const providerLabels = new Map(
+        context.labels.map((label) => [label.id, label.providerLabelId]),
+      );
+      try {
+        const thread = await modifyGmailThreadLabels(
+          access.accessToken,
+          context.providerThreadId,
+          {
+            addLabelIds: resolveProviderLabelIds(addLabelIds, providerLabels),
+            removeLabelIds: resolveProviderLabelIds(removeLabelIds, providerLabels),
+          },
+        );
+        const stepId = await enqueueProviderCatchup(session.userId, access);
+        await sendJson(reply, 200, { thread, stepId });
+      } catch (error) {
+        if (error instanceof GmailApiError) {
+          await sendGmailWriteProblem(error, request, reply);
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  api.post<{ Params: GmailMessageParams; Body: unknown }>(
+    "/v1/gmail/messages/:messageId/actions",
+    {
+      onRequest: [
+        ...mutationAccessHooks,
+        requireUuidParameter("messageId", "Message ID must be valid"),
+      ],
+    },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const action = parseGmailMessageAction(request.body);
+      if (!action) {
+        await sendProblem(request, reply, 400, "Gmail message action is invalid");
+        return;
+      }
+      const [access, context] = await Promise.all([
+        getGmailProviderAccessForRequest(request, reply),
+        getGmailMessageLabelMutationContext({
+          userId: session.userId,
+          messageId: request.params.messageId,
+          gmailLabelIds: [],
+        }),
+      ]);
+      if (!access) return;
+      if (!context || context.accountId !== access.accountId) {
+        await sendProblem(request, reply, 404, "Gmail message not found");
+        return;
+      }
+      try {
+        const mutation = gmailMessageActionMutation(action);
+        const message = mutation.kind === "trash"
+          ? await trashGmailMessage(access.accessToken, context.providerMessageId)
+          : await modifyGmailMessageLabels(
+              access.accessToken,
+              context.providerMessageId,
+              mutation.changes,
+            );
         const stepId = await enqueueProviderCatchup(session.userId, access);
         await sendJson(reply, 200, { message, stepId });
       } catch (error) {
@@ -425,24 +595,32 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         await sendProblem(request, reply, 409, "Draft has no incoming message to reply to");
         return;
       }
-      const raw = composePlainTextGmailReply({
-        accountEmail: draft.accountEmail,
-        subject: draft.subject,
-        currentText: draft.currentText,
-        replyTarget: draft.replyTarget,
-      });
-      if (!raw) {
-        await sendProblem(request, reply, 409, "Draft has no valid reply recipient");
-        return;
-      }
       try {
-        const created = await createGmailDraft(access.accessToken, {
-          raw,
-          threadId: draft.providerThreadId,
+        const result = await promoteReplyDraftToGmail({
+          userId: session.userId,
+          access,
+          draftId: draft.id,
+          updatedAt: draft.updatedAt,
+          accountEmail: draft.accountEmail,
+          providerThreadId: draft.providerThreadId,
+          subject: draft.subject,
+          currentText: draft.currentText,
+          replyTarget: draft.replyTarget,
         });
-        const stepId = await enqueueProviderCatchup(session.userId, access);
-        await sendJson(reply, 201, { draft: created, stepId });
+        await sendJson(reply, 201, result);
       } catch (error) {
+        if (error instanceof GmailReplyComposeError) {
+          await sendProblem(request, reply, 409, "Draft has no valid reply recipient");
+          return;
+        }
+        if (error instanceof GmailDraftWriteConflictError) {
+          await sendProblem(request, reply, 409, "Draft version conflicts with another Gmail write");
+          return;
+        }
+        if (error instanceof GmailDraftWritePendingError) {
+          await sendProblem(request, reply, 409, "Previous Gmail draft save is still being resolved");
+          return;
+        }
         if (error instanceof GmailApiError) {
           await sendGmailWriteProblem(error, request, reply);
           return;

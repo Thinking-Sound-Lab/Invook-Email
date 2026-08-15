@@ -43,19 +43,25 @@ export type GmailMessagePage = {
 
 export type GmailHistoryChange = {
   messageId: string;
-  action: "upsert" | "delete";
+  action: "upsert" | "labels" | "delete";
+  providerLabelIds: string[] | null;
+  isDraftRelated: boolean;
+};
+
+type GmailHistoryMessageReference = GmailMessageReference & {
+  labelIds?: string[];
 };
 
 export type GmailHistoryRecord = {
   id: string;
-  messagesAdded?: Array<{ message: GmailMessageReference }>;
-  messagesDeleted?: Array<{ message: GmailMessageReference }>;
+  messagesAdded?: Array<{ message: GmailHistoryMessageReference }>;
+  messagesDeleted?: Array<{ message: GmailHistoryMessageReference }>;
   labelsAdded?: Array<{
-    message: GmailMessageReference;
+    message: GmailHistoryMessageReference;
     labelIds: string[];
   }>;
   labelsRemoved?: Array<{
-    message: GmailMessageReference;
+    message: GmailHistoryMessageReference;
     labelIds: string[];
   }>;
 };
@@ -258,20 +264,42 @@ async function gmailRequest<T>(
 export function gmailHistoryChanges(
   record: GmailHistoryRecord,
 ): GmailHistoryChange[] {
-  const changes = new Map<string, GmailHistoryChange["action"]>();
+  const changes = new Map<string, GmailHistoryChange>();
+  const mergeChange = (
+    message: GmailHistoryMessageReference,
+    action: GmailHistoryChange["action"],
+    changedLabelIds: string[] = [],
+  ) => {
+    const existing = changes.get(message.id);
+    const nextAction =
+      action === "delete" || existing?.action === "delete"
+        ? "delete"
+        : action === "upsert" || existing?.action === "upsert"
+          ? "upsert"
+          : "labels";
+    changes.set(message.id, {
+      messageId: message.id,
+      action: nextAction,
+      providerLabelIds: message.labelIds ?? existing?.providerLabelIds ?? null,
+      isDraftRelated:
+        existing?.isDraftRelated === true ||
+        message.labelIds?.includes("DRAFT") === true ||
+        changedLabelIds.includes("DRAFT"),
+    });
+  };
   for (const { message } of record.messagesAdded ?? []) {
-    changes.set(message.id, "upsert");
+    mergeChange(message, "upsert");
   }
-  for (const { message } of record.labelsAdded ?? []) {
-    changes.set(message.id, "upsert");
+  for (const { message, labelIds } of record.labelsAdded ?? []) {
+    mergeChange(message, "labels", labelIds);
   }
-  for (const { message } of record.labelsRemoved ?? []) {
-    changes.set(message.id, "upsert");
+  for (const { message, labelIds } of record.labelsRemoved ?? []) {
+    mergeChange(message, "labels", labelIds);
   }
   for (const { message } of record.messagesDeleted ?? []) {
-    changes.set(message.id, "delete");
+    mergeChange(message, "delete");
   }
-  return [...changes].map(([messageId, action]) => ({ messageId, action }));
+  return [...changes.values()];
 }
 
 export function getGmailProfile(accessToken: string): Promise<GmailProfile> {
@@ -399,6 +427,18 @@ export function modifyGmailMessageLabels(
   return gmailRequest<GmailMessageState>(
     accessToken,
     `/users/me/messages/${encodeURIComponent(messageId)}/modify`,
+    { method: "POST", data: changes },
+  );
+}
+
+export function modifyGmailThreadLabels(
+  accessToken: string,
+  threadId: string,
+  changes: { addLabelIds?: string[]; removeLabelIds?: string[] },
+): Promise<{ id: string; historyId?: string }> {
+  return gmailRequest<{ id: string; historyId?: string }>(
+    accessToken,
+    `/users/me/threads/${encodeURIComponent(threadId)}/modify`,
     { method: "POST", data: changes },
   );
 }

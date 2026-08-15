@@ -62,7 +62,7 @@ test("terminal watch recovery runs immediately when expiration is within a day",
   assert.equal(step.payload?.runAt, "2026-08-13T10:00:00.000Z");
 });
 
-test("audited-ready derivations fan out to independent BullMQ queues", () => {
+test("ready-replica derivations fan out to independent BullMQ queues", () => {
   const steps = createPostSyncDerivationSteps({
     userId: "11111111-1111-4111-8111-111111111111",
     accountId: "22222222-2222-4222-8222-222222222222",

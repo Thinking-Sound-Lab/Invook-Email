@@ -24,7 +24,7 @@ import {
   gmailWatchStates,
   gmailSyncItems,
   gmailSyncPages,
-  mailLabels,
+  labels,
   mailSyncRuns,
   queueOutbox,
   workflowSteps,
@@ -52,14 +52,11 @@ const gmailConnectedAccountStepTypes = [
   "gmail.sync.finalize",
   "gmail.history.catchup",
   "gmail.watch.renew",
-  "gmail.replica.audit",
-  "gmail.action.execute",
 ] as const;
 
 const gmailReplicaStepTypes = [
   "gmail.history.catchup",
   "gmail.watch.renew",
-  "gmail.replica.audit",
 ] as const;
 const gmailReplicaStepTypeSet = new Set<string>(gmailReplicaStepTypes);
 
@@ -255,9 +252,8 @@ export function queueNameForStepType(stepType: string): QueueName {
       return "gmail-messages";
     case "gmail.history.catchup":
     case "gmail.watch.renew":
-    case "gmail.replica.audit":
     case "gmail.account.cleanup":
-    case "gmail.action.execute":
+    case "gmail.objects.delete":
       return "gmail-control";
     case "embedding.backfill":
     case "embedding.batch.event":
@@ -389,11 +385,12 @@ export async function enqueueWorkflowStep(
   );
 }
 
-export async function createInitialMailSyncRun(
+async function createMailSyncRun(
   input: {
     userId: string;
     accountId: string;
     startingHistoryCursor: string;
+    runType: "initial" | "repair";
   },
   database: Database = getDatabase(),
 ): Promise<string> {
@@ -419,7 +416,10 @@ export async function createInitialMailSyncRun(
         ),
       )
       .limit(1);
-    const idempotencyKey = `gmail.initial-sync:${input.accountId}`;
+    const idempotencyKey =
+      input.runType === "initial"
+        ? `gmail.initial-sync:${input.accountId}`
+        : `gmail.repair-sync:${input.accountId}:${input.startingHistoryCursor}`;
     const [inserted] = activeRun
       ? []
       : await transaction
@@ -427,6 +427,7 @@ export async function createInitialMailSyncRun(
           .values({
             userId: input.userId,
             accountId: input.accountId,
+            runType: input.runType,
             startingHistoryCursor: input.startingHistoryCursor,
             idempotencyKey,
           })
@@ -460,9 +461,79 @@ export async function createInitialMailSyncRun(
         },
         executor,
       );
+      if (input.runType === "repair") {
+        await transaction
+          .update(gmailReplicaStates)
+          .set({ state: "repairing", lastError: null, updatedAt: new Date() })
+          .where(eq(gmailReplicaStates.accountId, input.accountId));
+      }
     }
     return runId;
   });
+}
+
+export function createInitialMailSyncRun(
+  input: {
+    userId: string;
+    accountId: string;
+    startingHistoryCursor: string;
+  },
+  database: Database = getDatabase(),
+): Promise<string> {
+  return createMailSyncRun({ ...input, runType: "initial" }, database);
+}
+
+export async function createRepairMailSyncRun(
+  input: {
+    userId: string;
+    accountId: string;
+    startingHistoryCursor: string;
+  },
+  database: Database = getDatabase(),
+): Promise<string> {
+  return createMailSyncRun(
+    { ...input, runType: "repair" },
+    database,
+  );
+}
+
+export async function getMailSyncRunContext(
+  input: { runId: string; accountId: string },
+  database: Database = getDatabase(),
+) {
+  const [run] = await database
+    .select({
+      id: mailSyncRuns.id,
+      runType: mailSyncRuns.runType,
+      startingHistoryCursor: mailSyncRuns.startingHistoryCursor,
+      status: mailSyncRuns.status,
+    })
+    .from(mailSyncRuns)
+    .where(
+      and(
+        eq(mailSyncRuns.id, input.runId),
+        eq(mailSyncRuns.accountId, input.accountId),
+      ),
+    )
+    .limit(1);
+  return run ?? null;
+}
+
+export async function getMailSyncRunProviderMessageIds(
+  input: { runId: string; accountId: string },
+  database: Database = getDatabase(),
+): Promise<string[]> {
+  const rows = await database
+    .select({ providerMessageId: gmailSyncItems.providerMessageId })
+    .from(gmailSyncItems)
+    .innerJoin(mailSyncRuns, eq(mailSyncRuns.id, gmailSyncItems.runId))
+    .where(
+      and(
+        eq(gmailSyncItems.runId, input.runId),
+        eq(mailSyncRuns.accountId, input.accountId),
+      ),
+    );
+  return rows.map((row) => row.providerMessageId);
 }
 
 export async function enqueueMissingMailSyncRuns(
@@ -686,7 +757,7 @@ export async function completeWorkflowStep(
     const cleanupId =
       typeof step.input.cleanupId === "string" ? step.input.cleanupId : null;
     if (!cleanupId) {
-      throw new Error("The Gmail account cleanup step is missing its audit ID.");
+      throw new Error("The Gmail account cleanup step is missing its cleanup ID.");
     }
     await transaction
       .update(gmailAccountCleanups)
@@ -900,13 +971,13 @@ export async function failWorkflowStep(
       }
       if (typeof labelId === "string" && typeof definitionVersion === "number") {
         await transaction
-          .update(mailLabels)
+          .update(labels)
           .set({ analysisState: "failed", updatedAt: new Date() })
           .where(
             and(
-              eq(mailLabels.id, labelId),
-              eq(mailLabels.accountId, input.step.accountId),
-              eq(mailLabels.definitionVersion, definitionVersion),
+              eq(labels.id, labelId),
+              eq(labels.accountId, input.step.accountId),
+              eq(labels.definitionVersion, definitionVersion),
             ),
           );
       }
@@ -1352,7 +1423,6 @@ export async function completeMailSyncRun(
         status: mailSyncRuns.status,
         replicaState: gmailReplicaStates.state,
         replicaCursor: gmailReplicaStates.historyCursor,
-        replicaLastAuditAt: gmailReplicaStates.lastAuditAt,
         accountStatus: connectedAccounts.status,
       })
       .from(mailSyncRuns)
@@ -1376,11 +1446,10 @@ export async function completeMailSyncRun(
     }
     if (
       run.replicaState !== "ready" ||
-      run.replicaCursor !== input.finalHistoryCursor ||
-      !run.replicaLastAuditAt
+      run.replicaCursor !== input.finalHistoryCursor
     ) {
       throw new Error(
-        "The Gmail synchronization run cannot complete before audited replica readiness.",
+        "The Gmail synchronization run cannot complete before replica readiness.",
       );
     }
     const counts = await getItemCounts(input.runId, executor);
@@ -1413,19 +1482,21 @@ export async function completeMailSyncRun(
       sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: run.accountId, state: "pending" })})`,
     );
 
-    const labels = await transaction
+    const analysisLabels = await transaction
       .select({
-        id: mailLabels.id,
-        definitionVersion: mailLabels.definitionVersion,
+        id: labels.id,
+        definitionVersion: labels.definitionVersion,
       })
-      .from(mailLabels)
-      .where(eq(mailLabels.accountId, run.accountId));
+      .from(labels)
+      .where(
+        and(eq(labels.accountId, run.accountId), eq(labels.kind, "invook")),
+      );
     await enqueueWorkflowStepsWithExecutor(
       createPostSyncDerivationSteps({
         userId: run.userId,
         accountId: run.accountId,
         historyCursor: input.finalHistoryCursor,
-        labels,
+        labels: analysisLabels,
       }),
       executor,
     );
@@ -1443,7 +1514,6 @@ export async function completeGmailSynchronizationRecovery(
         status: connectedAccounts.status,
         replicaState: gmailReplicaStates.state,
         historyCursor: gmailReplicaStates.historyCursor,
-        lastAuditAt: gmailReplicaStates.lastAuditAt,
       })
       .from(connectedAccounts)
       .innerJoin(
@@ -1457,8 +1527,7 @@ export async function completeGmailSynchronizationRecovery(
       !account ||
       account.status !== "connected" ||
       account.replicaState !== "ready" ||
-      account.historyCursor !== input.historyCursor ||
-      !account.lastAuditAt
+      account.historyCursor !== input.historyCursor
     ) {
       return false;
     }
@@ -1492,7 +1561,6 @@ export async function enqueuePostSyncWorkflowSteps(
       userId: connectedAccounts.userId,
       historyCursor: gmailReplicaStates.historyCursor,
       replicaState: gmailReplicaStates.state,
-      replicaLastAuditAt: gmailReplicaStates.lastAuditAt,
       syncState: connectedAccounts.syncState,
     })
     .from(connectedAccounts)
@@ -1506,22 +1574,21 @@ export async function enqueuePostSyncWorkflowSteps(
     if (
       account.syncState.mailSync !== "complete" ||
       account.replicaState !== "ready" ||
-      !account.replicaLastAuditAt ||
       !account.historyCursor
     ) continue;
-    const labels = await database
+    const analysisLabels = await database
       .select({
-        id: mailLabels.id,
-        definitionVersion: mailLabels.definitionVersion,
+        id: labels.id,
+        definitionVersion: labels.definitionVersion,
       })
-      .from(mailLabels)
-      .where(eq(mailLabels.accountId, account.id));
+      .from(labels)
+      .where(and(eq(labels.accountId, account.id), eq(labels.kind, "invook")));
     const steps = await enqueueWorkflowStepsWithExecutor(
       createPostSyncDerivationSteps({
         userId: account.userId,
         accountId: account.id,
         historyCursor: account.historyCursor,
-        labels,
+        labels: analysisLabels,
       }),
       database,
     );
