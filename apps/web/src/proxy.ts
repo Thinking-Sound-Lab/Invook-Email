@@ -15,13 +15,13 @@ export function proxy(request: NextRequest) {
   const target = new URL(request.nextUrl.pathname, getApiOrigin());
   target.search = request.nextUrl.search;
 
-  if (request.nextUrl.pathname === "/auth/callback") {
-    target.pathname = "/v1/auth/google/callback";
+  if (request.nextUrl.pathname === "/connections/gmail/callback") {
+    target.pathname = "/v1/connections/gmail/callback";
   }
 
   return NextResponse.rewrite(target);
 }
 
 export const config = {
-  matcher: ["/v1/:path*", "/auth/callback"],
+  matcher: ["/v1/:path*", "/connections/gmail/callback"],
 };

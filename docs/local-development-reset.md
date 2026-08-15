@@ -18,4 +18,4 @@ It does not drop PostgreSQL schemas or the `drizzle.__drizzle_migrations` table,
 
 After clearing the stores, the command verifies the zero-data state while API, web, and worker services are still stopped, so an authenticated inbound webhook cannot race the destructive operation's result. It fails unless all product tables, requested BullMQ job states and mailbox objects are empty and the Drizzle migration row count is unchanged. It then rebuilds and restarts the normal stack. Its final output includes zero counts for profiles, connected accounts, messages, embeddings, drafts, memories, workflows and queued jobs.
 
-Open [http://localhost:3000](http://localhost:3000) after completion. A clean state presents the `Sign in with Google` entry action. The reset does not perform Google OAuth or create mailbox data.
+Open [http://localhost:3000](http://localhost:3000) after completion. A clean state presents the Better Auth `Sign in with Google` identity action. Signing in creates no mailbox data until the user separately authorizes `Connect Gmail`.

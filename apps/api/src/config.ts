@@ -1,12 +1,15 @@
 const requiredApiVariables = [
   "APP_URL",
   "DATABASE_URL",
-  "GOOGLE_CLIENT_ID",
-  "GOOGLE_CLIENT_SECRET",
-  "TOKEN_ENCRYPTION_KEY",
+  "BETTER_AUTH_SECRET",
+  "BETTER_AUTH_GOOGLE_CLIENT_ID",
+  "BETTER_AUTH_GOOGLE_CLIENT_SECRET",
 ] as const;
 
 const requiredGmailReplicaVariables = [
+  "GMAIL_GOOGLE_CLIENT_ID",
+  "GMAIL_GOOGLE_CLIENT_SECRET",
+  "TOKEN_ENCRYPTION_KEY",
   "GMAIL_PUBSUB_TOPIC",
   "GOOGLE_PUBSUB_PUSH_AUDIENCE",
   "GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL",
@@ -19,7 +22,6 @@ export function getMissingApiConfiguration(): string[] {
 
 export function getMissingGmailConnectionConfiguration(): string[] {
   return [
-    ...getMissingApiConfiguration(),
     ...requiredGmailReplicaVariables.filter((name) => !process.env[name]?.trim()),
   ];
 }

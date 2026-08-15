@@ -3,7 +3,6 @@ import {
   Delete02Icon,
   FileEditIcon,
   InboxIcon,
-  Logout01Icon,
   Mail01Icon,
   PencilEdit01Icon,
   Search02Icon,
@@ -22,7 +21,7 @@ import type {
 } from "@invook/contracts";
 import Link from "next/link";
 
-import { Button } from "@/components/ui/button";
+import { SignOutButton } from "@/components/auth/sign-out-button";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { cn } from "@/lib/utils";
 
@@ -118,17 +117,9 @@ export function MailSidebar({
           <p className="truncate text-sm font-semibold text-sidebar-foreground">Invook</p>
           <p className="truncate text-xs text-sidebar-foreground/45">{account.email}</p>
         </div>
-        <form action="/v1/auth/sign-out" method="post" className="hidden lg:block">
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            type="submit"
-            aria-label="Sign out"
-            className="text-sidebar-foreground/45 hover:bg-sidebar-accent hover:text-sidebar-foreground"
-          >
-            <HugeiconsIcon icon={Logout01Icon} size={14} />
-          </Button>
-        </form>
+        <div className="hidden lg:block">
+          <SignOutButton isIconOnly />
+        </div>
       </div>
 
       <nav className="mt-3 space-y-0.5" aria-label="Workspace">

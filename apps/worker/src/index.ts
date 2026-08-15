@@ -163,8 +163,8 @@ import { gmailHistoryCatchupDisposition } from "./gmail-history-catchup";
 import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
-const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
-const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET ?? "";
+const googleClientId = process.env.GMAIL_GOOGLE_CLIENT_ID ?? "";
+const googleClientSecret = process.env.GMAIL_GOOGLE_CLIENT_SECRET ?? "";
 const feedbackBatchSize = 24;
 const embeddingBatchRequestLimit = 2_000;
 const embeddingBatchAttemptLimit = 3;
@@ -226,7 +226,7 @@ async function refreshCredentialIfRequired(
 
   if (!googleClientId || !googleClientSecret) {
     throw new Error(
-      "The worker needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to refresh Gmail access.",
+      "The worker needs GMAIL_GOOGLE_CLIENT_ID and GMAIL_GOOGLE_CLIENT_SECRET to refresh Gmail access.",
     );
   }
 

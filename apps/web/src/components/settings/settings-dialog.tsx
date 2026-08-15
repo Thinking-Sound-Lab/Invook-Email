@@ -16,6 +16,7 @@ import type {
 } from "@invook/contracts";
 import { useState } from "react";
 
+import { SignOutButton } from "@/components/auth/sign-out-button";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -56,7 +57,7 @@ function AccountSettings({ account, aiConfigured }: AccountSettingsProps) {
     <section className="mx-auto w-full max-w-2xl px-6 py-8 sm:px-10 sm:py-10">
       <h2 className="text-xl font-semibold tracking-[-0.03em]">Account</h2>
       <p className="mt-1.5 text-sm leading-6 text-muted-foreground">
-        Manage the Google account and local Invook session used by this mailbox.
+        Manage this Gmail mailbox separately from your Invook sign-in session.
       </p>
 
       <div className="mt-7 rounded-xl bg-card/65 p-5">
@@ -88,11 +89,12 @@ function AccountSettings({ account, aiConfigured }: AccountSettingsProps) {
         </dl>
       </div>
 
-      <form action="/v1/auth/sign-out" method="post" className="mt-6">
-        <Button type="submit" variant="secondary">
-          Sign out of Invook
+      <div className="mt-6 flex flex-wrap gap-3">
+        <Button asChild variant="outline">
+          <a href="/v1/connections/gmail/start">Connect another Gmail account</a>
         </Button>
-      </form>
+        <SignOutButton />
+      </div>
     </section>
   );
 }

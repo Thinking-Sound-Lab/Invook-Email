@@ -46,20 +46,21 @@ The model may use facts present in the current thread and applicable Memory. It 
 
 ### Onboarding and indexing
 
-The first page contains only the Invook name and **Sign in with Google**.
+The first page contains only the Invook name and **Sign in with Google**. Better Auth owns this global Invook identity and its database-backed browser session. Its Google OAuth client requests only `openid`, `email`, and `profile`; it never requests Gmail access or offline access.
 
-Google OAuth must:
+After sign-in, an authenticated user with no mailbox sees an honest **Connect Gmail** state. Gmail connection uses a different Google OAuth client and must:
 
 - let the user choose an account;
-- authenticate directly with Google's OAuth client;
 - request the Gmail permissions required by the product;
 - return to `/mail` after a valid callback;
 - encrypt refresh and access credentials before persistence;
 - on first connection, capture H0, register a Gmail watch, and create exactly one durable full-mailbox replication run without blocking the callback;
-- on returning authentication, refresh the session, profile, and encrypted credentials without resetting replica, cursor, watch, sync-stage, or mailbox state;
+- on reconnection, refresh only the selected mailbox identity and encrypted credential without resetting the global session, profile, replica, cursor, watch, sync-stage, or mailbox state;
+- allow several Gmail mailboxes for one Invook user while preventing one Gmail provider identity from being attached to different Invook users;
+- bind each one-time callback state to the authenticated user and, for reconnection, to the existing connected-account ID;
 - keep an existing initial replication run, or enqueue stored-cursor history catch-up for a ready replica only when Gmail reports newer history.
 
-Signing out clears only the browser session cookie. It does not revoke Google credentials, stop the Gmail watch, cancel durable work, or change the mailbox replica. Account deletion remains the explicit destructive lifecycle.
+Signing out revokes only the Better Auth browser session. It does not revoke Gmail credentials, stop a Gmail watch, cancel durable work, or change a mailbox replica. Mailbox disconnection and account deletion remain explicit lifecycles.
 
 The first connection follows every Gmail result page with Spam and Trash included, stores exact raw MIME and attachment bytes in S3-compatible storage, and stores complete headers, text/HTML, normalized message-level labels, Gmail Draft resources, applied/pending cursors, watch state, and workflow checkpoints in PostgreSQL. It replays history from H0, performs a final locked catch-up, and atomically becomes ready before indexing or Memory can start. Authenticated Pub/Sub pushes coalesce into the highest pending cursor and durable workflow/outbox work without storing raw events. An expired cursor creates an exceptional full repair `mail_sync_run`. Gmail remains canonical. The detailed boundary is defined in `docs/gmail-replica-contract.md`.
 
@@ -185,7 +186,8 @@ Browser
   -> Next.js UI
   -> /v1 reverse proxy
   -> Fastify API
-       -> Google OAuth and Gmail API
+       -> Better Auth and Google Identity
+       -> separate Gmail OAuth and Gmail API
        -> Drizzle repositories
        -> PostgreSQL
 
@@ -240,6 +242,10 @@ Current mailbox, label, Memory, and draft endpoints include:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `POST` | `/v1/auth/sign-in/social` | Begin Better Auth Google Identity sign-in |
+| `POST` | `/v1/auth/sign-out` | Revoke the current Better Auth session |
+| `GET` | `/v1/connections/gmail/start` | Begin an authenticated Gmail add or reconnect flow |
+| `GET` | `/v1/connections/gmail/callback` | Consume the user-bound Gmail OAuth callback |
 | `GET` | `/v1/mailbox` | Return the connected mailbox workspace |
 | `POST` | `/v1/mailbox/sync` | Durably queue Gmail history catch-up from the stored replica cursor |
 | `DELETE` | `/v1/mailbox/account` | Stop the watch, clean object storage, then delete the connected account |
@@ -262,7 +268,7 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `POST` | `/v1/gmail/messages/:id/actions` | Apply read, star, archive, or Trash state at Gmail first |
 | `PUT/DELETE` | `/v1/gmail/drafts/:id` | Update or delete an existing Gmail Draft resource |
 
-Every mutation requires an authenticated signed session and an allowed request origin. IDs and bodies are validated before repository calls. User ownership is enforced in every product lookup.
+Every product mutation requires an authenticated Better Auth database session and an allowed request origin. IDs and bodies are validated before repository calls. User ownership is enforced in every product lookup.
 
 ## Initial non-goals
 

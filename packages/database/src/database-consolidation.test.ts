@@ -13,6 +13,10 @@ const removeBuiltInLabelsMigrationUrl = new URL(
   "../drizzle/0022_burly_magneto.sql",
   import.meta.url,
 );
+const separateAuthenticationMigrationUrl = new URL(
+  "../drizzle/0023_right_thunderball.sql",
+  import.meta.url,
+);
 const schemaUrl = new URL("./schema.ts", import.meta.url);
 const migrationsUrl = new URL("../drizzle/", import.meta.url);
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -25,9 +29,22 @@ function assertBefore(source: string, earlier: string, later: string): void {
   assert.ok(earlierIndex < laterIndex, `${earlier} must precede ${later}`);
 }
 
-test("the consolidated Drizzle schema has exactly the 25 owned tables", async () => {
+test("the Drizzle schema has exactly the 29 owned tables", async () => {
   const source = await readFile(schemaUrl, "utf8");
-  assert.equal(source.match(/\bpgTable\s*\(/g)?.length, 25);
+  assert.equal(source.match(/\bpgTable\s*\(/g)?.length, 29);
+});
+
+test("the auth migration preserves identity without copying Gmail credentials", async () => {
+  const migration = await readFile(separateAuthenticationMigrationUrl, "utf8");
+
+  assertBefore(
+    migration,
+    'UPDATE "profiles" AS profile',
+    'CREATE UNIQUE INDEX "profiles_email_idx"',
+  );
+  assert.match(migration, /'google'/);
+  assert.match(migration, /'openid,email,profile'/);
+  assert.doesNotMatch(migration, /INSERT INTO "auth_accounts"[^;]+token_ciphertext/s);
 });
 
 test("the consolidation migration backfills durable state before removing legacy tables", async () => {

@@ -5,11 +5,13 @@ import { after, before, test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { validate as validateUuid } from "uuid";
 
+import type { InvookSession } from "@invook/auth";
 import { composePlainTextGmailReply } from "@invook/gmail";
 import { ObjectStorageObjectNotFoundError } from "@invook/object-storage";
 
 import { buildApi } from "./app";
-import { createSessionCookie } from "./auth/session";
+import type { AuthService } from "./auth/auth-service";
+import { getGmailConnectionIdentityError } from "./routes/gmail-connections";
 import { parseGmailNotification } from "./routes/google-pubsub";
 
 let api: FastifyInstance;
@@ -29,6 +31,47 @@ const attachmentBytes = Buffer.from([0, 1, 2, 253, 254, 255]);
 const attachmentChecksum = createHash("sha256").update(attachmentBytes).digest("hex");
 let attachmentObjectReadCount = 0;
 
+function getTestSession(headers: Headers): InvookSession | null {
+  const cookie = headers.get("cookie") ?? "";
+  const userId = cookie
+    .split(";")
+    .map((value) => value.trim())
+    .find((value) => value.startsWith("test_session="))
+    ?.slice("test_session=".length);
+  if (!userId) return null;
+
+  return {
+    userId,
+    user: {
+      email: `${userId}@example.com`,
+      image: null,
+      name: "Test User",
+    },
+    expiresAt: new Date(Date.now() + 60_000),
+  };
+}
+
+const testAuth: AuthService = {
+  getSession: async (headers) => getTestSession(headers),
+  handle: async (request) => {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/v1/auth/sign-out") {
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "set-cookie":
+            "invook.session_token=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+        },
+      });
+    }
+    return new Response(JSON.stringify({ message: "Not found" }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    });
+  },
+};
+
 before(async () => {
   process.env.APP_URL = "http://localhost:3000";
   delete process.env.OPENAI_WEBHOOK_SECRET;
@@ -37,6 +80,7 @@ before(async () => {
   delete process.env.GOOGLE_PUBSUB_SUBSCRIPTION;
   process.env.TOKEN_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
   api = await buildApi({
+    auth: testAuth,
     attachmentRoutes: {
       getAttachment: async ({ userId, attachmentId: requestedAttachmentId }) => {
         if (userId !== attachmentOwnerId || requestedAttachmentId === absentAttachmentId) {
@@ -70,16 +114,6 @@ before(async () => {
       },
     },
   });
-  api.get<{ Querystring: { userId: string } }>(
-    "/__test/session",
-    async (request, reply) => {
-      createSessionCookie(reply, {
-        userId: request.query.userId,
-        googleSubject: `subject:${request.query.userId}`,
-      });
-      await reply.send({ authenticated: true });
-    },
-  );
 });
 
 after(async () => {
@@ -118,14 +152,7 @@ after(async () => {
 });
 
 async function sessionCookie(userId: string): Promise<string> {
-  const response = await api.inject({
-    method: "GET",
-    url: `/__test/session?userId=${encodeURIComponent(userId)}`,
-  });
-  const header = response.headers["set-cookie"];
-  const value = Array.isArray(header) ? header[0] : header;
-  assert.ok(value);
-  return value.split(";", 1)[0] ?? "";
+  return `test_session=${userId}`;
 }
 
 test("liveness uses the existing response contract", async () => {
@@ -169,10 +196,28 @@ test("signing out clears only the browser session cookie", async () => {
   const sessionCookie = Array.isArray(setCookie)
     ? setCookie.join("; ")
     : setCookie ?? "";
-  assert.equal(response.statusCode, 303);
-  assert.equal(response.headers.location, "http://localhost:3000/");
-  assert.match(sessionCookie, /^invook_session=;/);
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { success: true });
+  assert.match(sessionCookie, /^invook\.session_token=;/);
   assert.match(sessionCookie, /Max-Age=0/);
+});
+
+test("global Google authentication rejects caller-supplied Gmail scopes", async () => {
+  const response = await api.inject({
+    method: "POST",
+    url: "/v1/auth/sign-in/social",
+    headers: { "content-type": "application/json" },
+    payload: JSON.stringify({
+      provider: "google",
+      scopes: ["https://www.googleapis.com/auth/gmail.modify"],
+    }),
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(
+    response.json().title,
+    "Google authentication accepts identity scopes only",
+  );
 });
 
 test("authentication runs before JSON body parsing", async () => {
@@ -195,6 +240,47 @@ test("mailbox refresh requires an authenticated session", async () => {
 
   assert.equal(response.statusCode, 401);
   assert.equal(response.json().title, "Authentication required");
+});
+
+test("Gmail add and callback routes require a Better Auth session", async () => {
+  for (const url of [
+    "/v1/connections/gmail/start",
+    "/v1/connections/gmail/callback",
+  ]) {
+    const response = await api.inject({ method: "GET", url });
+    assert.equal(response.statusCode, 401, url);
+    assert.equal(response.json().title, "Authentication required");
+  }
+});
+
+test("Gmail connection identities preserve user and reconnect ownership", () => {
+  const currentUserId = attachmentOwnerId;
+  const otherUserAccount = {
+    id: attachmentId,
+    userId: otherUserId,
+  };
+  assert.equal(
+    getGmailConnectionIdentityError({
+      userId: currentUserId,
+      providerAccountId: "google-subject",
+      reconnectAccount: null,
+      existingAccount: otherUserAccount,
+    }),
+    "already_connected",
+  );
+  assert.equal(
+    getGmailConnectionIdentityError({
+      userId: currentUserId,
+      providerAccountId: "different-google-subject",
+      reconnectAccount: {
+        id: attachmentId,
+        userId: currentUserId,
+        providerAccountId: "google-subject",
+      },
+      existingAccount: { id: attachmentId, userId: currentUserId },
+    }),
+    "mailbox_mismatch",
+  );
 });
 
 test("mailbox deletion requires an authenticated session", async () => {

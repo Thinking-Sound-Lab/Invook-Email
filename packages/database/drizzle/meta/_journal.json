@@ -162,6 +162,13 @@
       "when": 1786769099657,
       "tag": "0022_burly_magneto",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1786815618270,
+      "tag": "0023_right_thunderball",
+      "breakpoints": true
     }
   ]
 }

@@ -93,10 +93,11 @@ export default async function MailPage({ searchParams }: MailPageProps) {
             after Google authorization succeeds.
           </p>
           <form
-            action="/v1/auth/google/start"
+            action="/v1/connections/gmail/start"
             method="get"
             className="mt-7 w-full"
           >
+            <input type="hidden" name="accountId" value={workspace.account.id} />
             <Button type="submit" size="lg" className="h-11 w-full gap-2.5">
               <HugeiconsIcon icon={GoogleIcon} size={18} strokeWidth={1.7} />
               Reconnect Gmail
@@ -132,7 +133,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
       />
     );
   } else if (currentSurface === "compose") {
-    centerPane = <ComposeSurface />;
+    centerPane = <ComposeSurface gmailAccountId={workspace.account.id} />;
   } else if (currentSurface === "search" && !query) {
     centerPane = <SearchSurface />;
   } else if (currentSurface === "search" && query) {

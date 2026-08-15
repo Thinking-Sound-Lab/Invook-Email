@@ -5,12 +5,14 @@ import type {
 } from "fastify";
 import { validate as validateUuid } from "uuid";
 
-import { getCurrentSession } from "./auth/session";
+import { createWebHeaders } from "./auth/auth-service";
 import { getPublicAppOrigin } from "./config";
 import { sendProblem } from "./responses";
 
 export const requireSession: onRequestHookHandler = async (request, reply) => {
-  const session = getCurrentSession(request);
+  const session = await request.server.invookAuth.getSession(
+    createWebHeaders(request.headers),
+  );
   if (!session) {
     await sendProblem(request, reply, 401, "Authentication required");
     return;
