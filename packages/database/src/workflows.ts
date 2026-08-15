@@ -519,6 +519,79 @@ export async function getMailSyncRunContext(
   return run ?? null;
 }
 
+export async function getActiveRepairMailSyncRunContext(
+  accountId: string,
+  database: Database = getDatabase(),
+) {
+  const [run] = await database
+    .select({
+      id: mailSyncRuns.id,
+      startingHistoryCursor: mailSyncRuns.startingHistoryCursor,
+      status: mailSyncRuns.status,
+    })
+    .from(mailSyncRuns)
+    .where(
+      and(
+        eq(mailSyncRuns.accountId, accountId),
+        eq(mailSyncRuns.runType, "repair"),
+        inArray(mailSyncRuns.status, ["queued", "running"]),
+      ),
+    )
+    .orderBy(desc(mailSyncRuns.createdAt))
+    .limit(1);
+  return run ?? null;
+}
+
+export async function enqueuePendingGmailHistoryCatchups(
+  database: Database = getDatabase(),
+): Promise<number> {
+  const accounts = await database
+    .select({
+      id: connectedAccounts.id,
+      userId: connectedAccounts.userId,
+      pendingHistoryCursor: gmailReplicaStates.pendingHistoryCursor,
+      replicaState: gmailReplicaStates.state,
+    })
+    .from(connectedAccounts)
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
+    .where(
+      and(
+        eq(connectedAccounts.status, "connected"),
+        inArray(gmailReplicaStates.state, ["ready", "repairing"]),
+        not(isNull(gmailReplicaStates.pendingHistoryCursor)),
+      ),
+    );
+
+  let enqueued = 0;
+  for (const account of accounts) {
+    if (!account.pendingHistoryCursor) continue;
+    const repairRun =
+      account.replicaState === "repairing"
+        ? await getActiveRepairMailSyncRunContext(account.id, database)
+        : null;
+    if (account.replicaState === "repairing" && !repairRun) continue;
+    const activation = repairRun?.id ?? "ready";
+    await enqueueWorkflowStep(
+      {
+        userId: account.userId,
+        accountId: account.id,
+        stepType: "gmail.history.catchup",
+        payload: {
+          reason: "pending_reconciliation",
+          pendingHistoryCursor: account.pendingHistoryCursor,
+        },
+        idempotencyKey: `gmail-history-pending-reconciliation:${account.id}:${activation}:${account.pendingHistoryCursor}`,
+      },
+      database,
+    );
+    enqueued += 1;
+  }
+  return enqueued;
+}
+
 export async function getMailSyncRunProviderMessageIds(
   input: { runId: string; accountId: string },
   database: Database = getDatabase(),

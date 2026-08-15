@@ -2,7 +2,7 @@
 
 **Status:** Implemented contract
 **Canonical provider:** Gmail
-**Updated:** August 14, 2026
+**Updated:** August 15, 2026
 
 ## Scope and ownership
 
@@ -45,7 +45,7 @@ A successful normal synchronization does not run a separate full-replica audit.
 
 Google Pub/Sub sends OIDC-authenticated pushes to `/v1/webhooks/google-pubsub`. The API validates the audience, service-account identity, exact subscription, envelope, email address, and decimal history ID.
 
-For a matching connected account, one PostgreSQL transaction locks replica state, retains only the highest pending history cursor, and creates an idempotent `gmail.history.catchup` workflow step plus queue-outbox record. Duplicate and reordered notifications coalesce through the pending cursor and workflow idempotency key. The raw Pub/Sub payload, message ID, email address, and delivery event are not persisted. The route returns `204` without calling Gmail inline. Notifications received during initial synchronization remain pending and are replayed before or immediately after readiness.
+For a matching connected account, one PostgreSQL transaction locks replica state, retains only the highest pending history cursor, and creates an idempotent `gmail.history.catchup` workflow step plus queue-outbox record. Duplicate and reordered notifications coalesce through the pending cursor and workflow idempotency key. The raw Pub/Sub payload, message ID, email address, and delivery event are not persisted. The route returns `204` without calling Gmail inline. Notifications received during an initial snapshot remain pending for its final H0 replay. During repair, catch-up applies notifications immediately from the repair run's fresh baseline so newly changed messages can be used while the repair continues.
 
 ## Incremental catch-up
 
@@ -66,7 +66,7 @@ Duplicate execution is safe through provider identifiers, expected-cursor checks
 
 Watch renewal is a durable daily one-shot action. It persists the renewed watch, schedules its successor, and performs stored-cursor catch-up as a safety net. It does not poll or run a routine full-mailbox audit.
 
-If Gmail rejects an expired history cursor, Invook captures a fresh provider baseline, renews the watch, and creates an exceptional repair-type `mail_sync_run`. Repair uses the same paged discovery and per-message jobs as initial synchronization, then replays from the fresh baseline under the account lock before returning to ready. A reconnect-required account follows the same durable repair-run path after successful OAuth.
+If Gmail rejects an expired history cursor, Invook captures a fresh provider baseline, renews the watch, and creates an exceptional repair-type `mail_sync_run`. Repair uses the same paged discovery and per-message jobs as initial synchronization. Pub/Sub catch-up is serialized under the account lock and may advance the committed cursor while the snapshot proceeds, but keeps the replica in `repairing` and does not release indexing or analysis work. The finalizer still replays from the repair baseline, reconciles the full snapshot, and is the only repair path that marks the replica ready. A reconnect-required account follows the same durable repair-run path after successful OAuth.
 
 Permanent credential rejection atomically marks the account `reconnect_required`, fails active Gmail work, and prevents already-published jobs from reactivating terminal state. Transient provider and transport failures retain bounded workflow retries.
 

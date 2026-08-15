@@ -34,7 +34,7 @@ test("account progress events are validated before entering client state", () =>
   );
 });
 
-test("the sidebar presents only the earliest incomplete pipeline phase", () => {
+test("the progress stripe presents only the earliest incomplete pipeline phase", () => {
   const indexing = {
     state: "running",
     completedMessageCount: 4_000,
@@ -71,7 +71,7 @@ test("the sidebar presents only the earliest incomplete pipeline phase", () => {
   );
 });
 
-test("a completed account pipeline leaves the sidebar clean", () => {
+test("a completed account pipeline removes the progress stripe", () => {
   assert.equal(
     getAccountPipelinePresentation({
       mailSync: completeMailSync,

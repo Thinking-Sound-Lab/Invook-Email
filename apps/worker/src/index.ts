@@ -56,6 +56,7 @@ import {
   enqueueBatchEvent,
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
+  enqueuePendingGmailHistoryCatchups,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
   failMailSyncItem,
@@ -77,6 +78,7 @@ import {
   getWorkerAccount,
   getGmailReplicaContext,
   getGmailWatchContext,
+  getActiveRepairMailSyncRunContext,
   getMailSyncRunContext,
   getMailSyncRunProviderMessageIds,
   getStoredProviderMessageIds,
@@ -159,7 +161,10 @@ import {
   applyGmailHistoryWithExpiredCursorRepair,
   shouldRepairNonReadyGmailReplica,
 } from "./gmail-history-recovery";
-import { gmailHistoryCatchupDisposition } from "./gmail-history-catchup";
+import {
+  gmailHistoryCatchupDisposition,
+  planGmailHistoryCatchup,
+} from "./gmail-history-catchup";
 import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
@@ -932,7 +937,7 @@ async function catchUpGmailHistory(options: {
 }) {
   const replica = await getGmailReplicaContext(options.accountId);
   if (!replica) throw new Error("The Gmail replica state was not found.");
-  if (replica.state !== "ready") {
+  if (replica.state !== "ready" && replica.state !== "repairing") {
     if (shouldRepairNonReadyGmailReplica({
       isFailed: replica.state === "failed",
       resumeNonReady: options.resumeNonReady,
@@ -952,26 +957,47 @@ async function catchUpGmailHistory(options: {
       historyCursor: replica.historyCursor,
     };
   }
+  const activeRepairRun =
+    replica.state === "repairing"
+      ? await getActiveRepairMailSyncRunContext(options.accountId)
+      : null;
+  const plan = planGmailHistoryCatchup({
+    replicaState: replica.state,
+    initialHistoryId: replica.initialHistoryId,
+    historyCursor: replica.historyCursor,
+    repairStartingHistoryCursor: activeRepairRun?.startingHistoryCursor,
+  });
+  if (plan.kind === "defer") {
+    return {
+      status: "deferred",
+      state: plan.state,
+      historyCursor: replica.historyCursor,
+    };
+  }
   const { account, credential } = await getMailSyncContext(options.accountId);
-  const expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
-  const replayOrRepair = await applyGmailHistoryWithExpiredCursorRepair({
-    apply: () => applyHistoryRange({
+  const apply = () =>
+    applyHistoryRange({
       accessToken: credential.accessToken,
       userId: account.userId,
       accountId: account.id,
       accountEmail: account.email,
-      startHistoryId: expectedCursor,
-      expectedCursor,
-      stateAfterApply: "ready",
-      ingestionMode: "incremental",
+      startHistoryId: plan.startHistoryId,
+      expectedCursor: plan.expectedCursor,
+      stateAfterApply: plan.stateAfterApply,
+      ingestionMode: plan.ingestionMode,
       continuationSourceStepId: options.sourceStepId,
-    }),
-    repair: () => repairExpiredHistory({
-      accessToken: credential.accessToken,
-      userId: account.userId,
-      accountId: account.id,
-    }),
-  });
+    });
+  const replayOrRepair = plan.shouldRepairExpiredCursor
+    ? await applyGmailHistoryWithExpiredCursorRepair({
+        apply,
+        repair: () =>
+          repairExpiredHistory({
+            accessToken: credential.accessToken,
+            userId: account.userId,
+            accountId: account.id,
+          }),
+      })
+    : { outcome: "applied" as const, result: await apply() };
   if (replayOrRepair.outcome === "repaired") {
     return {
       status: "repair_queued",
@@ -1006,7 +1032,7 @@ async function catchUpGmailHistory(options: {
     };
   }
   return {
-    status: "complete",
+    status: plan.stateAfterApply === "repairing" ? "live_applied" : "complete",
     historyCursor: replay.historyId,
     changedThreadCount: replay.changedThreadIds.length,
   };
@@ -2990,6 +3016,7 @@ async function run() {
 
   try {
     await enqueueMissingMailSyncRuns();
+    await enqueuePendingGmailHistoryCatchups();
     await enqueueReadyMailSyncFinalizers();
     await ensureDailyGmailWatchRenewals();
     await enqueuePostSyncWorkflowSteps();

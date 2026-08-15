@@ -26,7 +26,6 @@ import { Button } from "@/components/ui/button";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
 import { cn } from "@/lib/utils";
 
-import { AccountPipelineProgress } from "./account-pipeline-progress";
 import { initials } from "./mail-format";
 import { MailNavigationPending } from "./mail-navigation-pending";
 import { listSidebarLabels } from "./mail-sidebar-labels";
@@ -198,14 +197,6 @@ export function MailSidebar({
           ))}
         </nav>
       </div>
-
-      <AccountPipelineProgress
-        initialProgress={{
-          mailSync: account.mailSyncProgress,
-          indexing: account.indexingProgress,
-          memory: account.syncState.memory,
-        }}
-      />
     </aside>
   );
 }

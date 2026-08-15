@@ -6,6 +6,7 @@ import { validate as validateUuid } from "uuid";
 
 import { mailboxViews } from "@invook/contracts";
 
+import { AccountPipelineStripe } from "@/components/mail/account-pipeline-stripe";
 import { AgentPanel } from "@/components/mail/agent-panel";
 import { ComposeSurface } from "@/components/mail/compose-surface";
 import { MailList } from "@/components/mail/mail-list";
@@ -154,9 +155,9 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   }
 
   return (
-    <main className="h-dvh overflow-hidden bg-background">
+    <main className="flex h-dvh flex-col overflow-hidden bg-background">
       <MailboxEventSubscriber />
-      <div className="grid h-full grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
+      <div className="grid min-h-0 flex-1 grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
         <MailSidebar
           account={workspace.account}
           currentView={currentView}
@@ -180,6 +181,14 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           aiConfigured={workspace.aiConfigured}
         />
       </div>
+      <AccountPipelineStripe
+        accountEmail={workspace.account.email}
+        initialProgress={{
+          mailSync: workspace.account.mailSyncProgress,
+          indexing: workspace.account.indexingProgress,
+          memory: workspace.account.syncState.memory,
+        }}
+      />
     </main>
   );
 }
