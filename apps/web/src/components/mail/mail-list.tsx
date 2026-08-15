@@ -14,6 +14,7 @@ import { cn } from "@/lib/utils";
 
 import { createMailDateSections } from "./mail-date-sections";
 import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
+import { mailLabelColorClassName } from "./mail-label-colors";
 import { MailboxRefreshButton } from "./mailbox-refresh-button";
 import { MailNavigationPending } from "./mail-navigation-pending";
 import { listMailRowLabels, type MailRowLabel } from "./mail-row-labels";
@@ -65,9 +66,7 @@ function MailLabelChip({ label }: MailLabelChipProps) {
       title={`${label.name} (${sourceName})`}
       className={cn(
         "min-w-0 max-w-28 truncate rounded px-1.5 py-0.5 text-[11px] font-medium",
-        label.kind === "gmail"
-          ? "bg-secondary text-muted-foreground"
-          : "bg-primary/12 text-primary",
+        mailLabelColorClassName(label),
       )}
     >
       {label.name}
@@ -142,17 +141,32 @@ function MailRow({
           {formatMailText(thread.snippet) || "No message preview is available."}
         </p>
         {isStarred ? (
-          <HugeiconsIcon icon={StarIcon} size={13} className="shrink-0 text-warning" fill="currentColor" />
+          <HugeiconsIcon
+            icon={StarIcon}
+            size={13}
+            className="shrink-0 text-warning lg:hidden"
+            fill="currentColor"
+          />
         ) : null}
       </div>
 
       <div
-        className="hidden min-w-0 items-center justify-end gap-1 overflow-hidden lg:flex"
+        className="hidden min-w-0 items-center justify-end gap-2 lg:flex"
         aria-label={labels.length > 0 ? "Message labels" : undefined}
       >
-        {labels.map((label) => (
-          <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
-        ))}
+        <div className="flex min-w-0 items-center justify-end gap-1 overflow-hidden">
+          {labels.map((label) => (
+            <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
+          ))}
+        </div>
+        {isStarred ? (
+          <HugeiconsIcon
+            icon={StarIcon}
+            size={13}
+            className="shrink-0 text-warning"
+            fill="currentColor"
+          />
+        ) : null}
       </div>
 
       <time className="w-full whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
