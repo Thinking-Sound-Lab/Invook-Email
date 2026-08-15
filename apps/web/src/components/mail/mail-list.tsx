@@ -147,7 +147,7 @@ function MailRow({
       </div>
 
       <div
-        className="hidden min-w-0 items-center gap-1 overflow-hidden lg:flex"
+        className="hidden min-w-0 items-center justify-end gap-1 overflow-hidden lg:flex"
         aria-label={labels.length > 0 ? "Message labels" : undefined}
       >
         {labels.map((label) => (
