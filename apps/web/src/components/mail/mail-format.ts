@@ -78,32 +78,54 @@ export function formatMailBody(value: string): string {
     .trim();
 }
 
-export function formatMailDate(value: string | null): string {
+interface FormatMailDateOptions {
+  now?: Date;
+  timeZone?: string;
+}
+
+export function formatMailDate(
+  value: string | null,
+  options: FormatMailDateOptions = {},
+): string {
   if (!value) return "";
 
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  const now = new Date();
+  const now = options.now ?? new Date();
+  const timeZoneOptions = options.timeZone
+    ? { timeZone: options.timeZone }
+    : {};
+  const calendarDateFormatter = new Intl.DateTimeFormat("en", {
+    ...timeZoneOptions,
+    day: "numeric",
+    month: "numeric",
+    year: "numeric",
+  });
+  const yearFormatter = new Intl.DateTimeFormat("en", {
+    ...timeZoneOptions,
+    year: "numeric",
+  });
   const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
+    calendarDateFormatter.format(date) === calendarDateFormatter.format(now);
 
   if (sameDay) {
     return new Intl.DateTimeFormat("en", {
+      ...timeZoneOptions,
       hour: "numeric",
       minute: "2-digit",
     }).format(date);
   }
 
-  if (date.getFullYear() === now.getFullYear()) {
+  if (yearFormatter.format(date) === yearFormatter.format(now)) {
     return new Intl.DateTimeFormat("en", {
+      ...timeZoneOptions,
       month: "short",
       day: "numeric",
     }).format(date);
   }
 
   return new Intl.DateTimeFormat("en", {
+    ...timeZoneOptions,
     month: "short",
     day: "numeric",
     year: "numeric",

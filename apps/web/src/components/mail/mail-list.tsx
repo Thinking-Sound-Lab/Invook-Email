@@ -13,8 +13,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 import { createMailDateSections } from "./mail-date-sections";
-import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
+import { formatMailText, threadPeople } from "./mail-format";
 import { mailLabelColorClassName } from "./mail-label-colors";
+import { LocalMailDate } from "./local-mail-date";
 import { MailboxRefreshButton } from "./mailbox-refresh-button";
 import { MailNavigationPending } from "./mail-navigation-pending";
 import { listMailRowLabels, type MailRowLabel } from "./mail-row-labels";
@@ -94,7 +95,7 @@ function MailRow({
       href={mailboxHref(currentView, mailboxCursor, thread.id)}
       scroll={false}
       className={cn(
-        "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_4.5rem] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors lg:grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_7rem_4.5rem]",
+        "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_4.5rem] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors lg:grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_7rem_1rem_4.5rem] lg:gap-3",
         "hover:bg-accent/55 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         isUnread && "bg-card/45",
       )}
@@ -151,14 +152,15 @@ function MailRow({
       </div>
 
       <div
-        className="hidden min-w-0 items-center justify-end gap-2 lg:flex"
+        className="hidden min-w-0 items-center justify-end gap-1 overflow-hidden lg:flex"
         aria-label={labels.length > 0 ? "Message labels" : undefined}
       >
-        <div className="flex min-w-0 items-center justify-end gap-1 overflow-hidden">
-          {labels.map((label) => (
-            <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
-          ))}
-        </div>
+        {labels.map((label) => (
+          <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
+        ))}
+      </div>
+
+      <div className="hidden size-4 items-center justify-center lg:flex">
         {isStarred ? (
           <HugeiconsIcon
             icon={StarIcon}
@@ -169,9 +171,10 @@ function MailRow({
         ) : null}
       </div>
 
-      <time className="w-full whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
-        {formatMailDate(thread.latestMessageAt)}
-      </time>
+      <LocalMailDate
+        className="w-full whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground"
+        value={thread.latestMessageAt}
+      />
     </Link>
   );
 }
