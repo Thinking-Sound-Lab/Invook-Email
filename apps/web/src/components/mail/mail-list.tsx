@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
+import { createMailDateSections } from "./mail-date-sections";
 import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
 import { MailboxRefreshButton } from "./mailbox-refresh-button";
 import { MailNavigationPending } from "./mail-navigation-pending";
@@ -152,14 +153,29 @@ function MailRows({
   currentView,
   mailboxCursor,
 }: MailRowsProps) {
-  return threads.map((thread) => (
-    <MailRow
-      key={thread.id}
-      thread={thread}
-      accountEmail={accountEmail}
-      currentView={currentView}
-      mailboxCursor={mailboxCursor}
-    />
+  const sections = createMailDateSections(threads);
+
+  return sections.map((section, sectionIndex) => (
+    <section
+      key={section.id}
+      aria-label={section.label ?? "Today"}
+      className={cn(section.label && (sectionIndex === 0 ? "pt-4" : "pt-6"))}
+    >
+      {section.label ? (
+        <h2 className="px-5 pb-2 text-xs font-medium text-muted-foreground">
+          {section.label}
+        </h2>
+      ) : null}
+      {section.threads.map((thread) => (
+        <MailRow
+          key={thread.id}
+          thread={thread}
+          accountEmail={accountEmail}
+          currentView={currentView}
+          mailboxCursor={mailboxCursor}
+        />
+      ))}
+    </section>
   ));
 }
 
