@@ -37,8 +37,8 @@ export const profiles = pgTable(
   "profiles",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    displayName: text("display_name"),
-    email: text("email"),
+    displayName: text("display_name").notNull(),
+    email: text("email").notNull(),
     emailVerified: boolean("email_verified").notNull().default(false),
     image: text("image"),
     memoryAcknowledgedAt: timestampWithTimezone("memory_acknowledged_at"),

@@ -17,6 +17,10 @@ const separateAuthenticationMigrationUrl = new URL(
   "../drizzle/0023_right_thunderball.sql",
   import.meta.url,
 );
+const enforceAuthenticationUserMigrationUrl = new URL(
+  "../drizzle/0024_breezy_next_avengers.sql",
+  import.meta.url,
+);
 const schemaUrl = new URL("./schema.ts", import.meta.url);
 const migrationsUrl = new URL("../drizzle/", import.meta.url);
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -45,6 +49,26 @@ test("the auth migration preserves identity without copying Gmail credentials", 
   assert.match(migration, /'google'/);
   assert.match(migration, /'openid,email,profile'/);
   assert.doesNotMatch(migration, /INSERT INTO "auth_accounts"[^;]+token_ciphertext/s);
+});
+
+test("the auth user contract backfills real identity data before enforcing required fields", async () => {
+  const migration = await readFile(enforceAuthenticationUserMigrationUrl, "utf8");
+
+  assertBefore(
+    migration,
+    'FROM "connected_accounts"',
+    "Cannot enforce Better Auth user requirements",
+  );
+  assertBefore(
+    migration,
+    "Cannot enforce Better Auth user requirements",
+    'ALTER TABLE "profiles" ALTER COLUMN "display_name" SET NOT NULL',
+  );
+  assertBefore(
+    migration,
+    "Cannot enforce Better Auth user requirements",
+    'ALTER TABLE "profiles" ALTER COLUMN "email" SET NOT NULL',
+  );
 });
 
 test("the consolidation migration backfills durable state before removing legacy tables", async () => {
@@ -124,6 +148,89 @@ async function applyMigrationFile(
     if (statement.trim()) await client.unsafe(statement);
   }
 }
+
+test(
+  "the auth migrations produce a strict Better Auth user contract",
+  { skip: !testDatabaseUrl },
+  async () => {
+    if (!testDatabaseUrl) return;
+    const client = postgres(testDatabaseUrl, { max: 1, prepare: false });
+    const testSchema = `auth_migration_${uuidv4().replaceAll("-", "")}`;
+    try {
+      await client.unsafe(`CREATE SCHEMA "${testSchema}"`);
+      await client.unsafe("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public");
+      await client.unsafe(`SET search_path TO "${testSchema}", public`);
+      const migrationFiles = (await readdir(migrationsUrl))
+        .filter((filename) => /^\d{4}_.+\.sql$/.test(filename))
+        .sort();
+      for (const filename of migrationFiles.filter((name) => name < "0023_")) {
+        await applyMigrationFile(client, filename, testSchema);
+      }
+
+      await client.unsafe(`
+        INSERT INTO profiles (id) VALUES
+          ('11111111-1111-4111-8111-111111111111'),
+          ('33333333-3333-4333-8333-333333333333');
+        INSERT INTO connected_accounts (
+          id, user_id, provider_account_id, email, memory_acknowledged_at
+        ) VALUES (
+          '22222222-2222-4222-8222-222222222222',
+          '11111111-1111-4111-8111-111111111111',
+          'provider-account',
+          'owner@example.com',
+          now()
+        );
+      `);
+
+      await applyMigrationFile(client, "0023_right_thunderball.sql", testSchema);
+      await assert.rejects(
+        () =>
+          applyMigrationFile(
+            client,
+            "0024_breezy_next_avengers.sql",
+            testSchema,
+          ),
+        /Cannot enforce Better Auth user requirements/,
+      );
+      await client.unsafe(`
+        DELETE FROM profiles
+        WHERE id = '33333333-3333-4333-8333-333333333333'
+      `);
+      await applyMigrationFile(client, "0024_breezy_next_avengers.sql", testSchema);
+
+      assert.deepEqual(
+        Array.from(
+          await client`
+            SELECT email, display_name
+            FROM profiles
+            WHERE id = '11111111-1111-4111-8111-111111111111'
+          `,
+        ),
+        [{ email: "owner@example.com", display_name: "owner@example.com" }],
+      );
+      assert.deepEqual(
+        Array.from(
+          await client`
+            SELECT column_name, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = ${testSchema}
+              AND table_name = 'profiles'
+              AND column_name IN ('display_name', 'email')
+            ORDER BY column_name
+          `,
+        ),
+        [
+          { column_name: "display_name", is_nullable: "NO" },
+          { column_name: "email", is_nullable: "NO" },
+        ],
+      );
+    } finally {
+      await client.unsafe("SET search_path TO public");
+      await client.unsafe(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
+      await client.end();
+    }
+  },
+);
 
 test(
   "the consolidation migration preserves legacy label, draft, push, and cleanup state",

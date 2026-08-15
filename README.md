@@ -7,7 +7,7 @@ The application starts with Google Identity sign-in through Better Auth. That fl
 ## What works today
 
 1. Better Auth owns global Google Identity users and database-backed browser sessions. Its OAuth client requests identity scopes only and never receives Gmail access.
-2. An authenticated user can separately add or reconnect Gmail mailboxes through a second Google OAuth client. On first connection, the callback validates the mailbox identity, captures H0, registers a Gmail watch, encrypts the Gmail credentials with AES-256-GCM, and transactionally records exactly one replica run plus its first BullMQ step. Reconnection refreshes only the selected mailbox credential and preserves durable replica/watch/run state. Signing out clears only the Better Auth session.
+2. An authenticated user can separately add or reconnect Gmail mailboxes through a dedicated Google OAuth authorization flow. On first connection, the callback validates the mailbox identity, captures H0, registers a Gmail watch, encrypts the Gmail credentials with AES-256-GCM, and transactionally records exactly one replica run plus its first BullMQ step. Reconnection refreshes only the selected mailbox credential and preserves durable replica/watch/run state. Signing out clears only the Better Auth session.
 3. A sequential page worker discovers every message in 500-result pages, including Spam and Trash, while configurable parallel per-message workers fetch exact raw MIME. Raw MIME and attachment bytes go to S3-compatible object storage with checksums; PostgreSQL stores complete headers, text/HTML, provider metadata, normalized labels and message memberships, Gmail Draft resources, watch state, pending/applied history cursors, and workflow checkpoints. Finalization replays history from H0, performs a final locked catch-up, and only then releases indexing, initial Memory, and Invook-label analysis concurrently.
 4. Settings can add an Invook label and description, which queues the selected native Batch provider to analyze every already-indexed thread against that user-created definition. Applied relationships and explicit user overrides are persisted per message; thread display is calculated from current messages. Replicated Gmail labels remain provider-owned and are never sent through Invook label analysis.
 5. Initial Memory analysis sends all eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Later eligible owner-sent messages accumulate as targeted global and contact evidence without rescanning the original mailbox. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
@@ -56,7 +56,7 @@ The frontend uses shadcn/ui source components, the free Hugeicons package, Plus 
 
 ## Google Identity and Gmail OAuth setup
 
-Create two Google Cloud OAuth web applications so identity grants and mailbox grants cannot be combined under one client.
+One Google Cloud OAuth web client can serve both flows because each authorization request selects its own scopes. You may use two clients in production to isolate credential rotation and redirect configuration, but the security boundary is the separate flow and enforced scope set rather than the client ID.
 
 The Better Auth identity client requests only `openid`, `email`, and `profile`. Configure:
 
@@ -70,7 +70,7 @@ Enable the Gmail API for the Gmail connection client and configure:
 - Local: `http://localhost:3000/connections/gmail/callback`
 - Hosted: `https://your-domain.example/connections/gmail/callback`
 
-Set `GMAIL_GOOGLE_CLIENT_ID` and `GMAIL_GOOGLE_CLIENT_SECRET` for this second client.
+Set `GMAIL_GOOGLE_CLIENT_ID` and `GMAIL_GOOGLE_CLIENT_SECRET`. To reuse one Google OAuth client, set both environment-variable pairs to the same client ID and secret and register both callback URLs on that client.
 
 Copy the environment template and fill every blank value:
 

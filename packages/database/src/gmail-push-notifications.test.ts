@@ -98,7 +98,11 @@ test(
     const accountId = uuidv4();
     const emailAddress = `${accountId}@example.com`;
     try {
-      await database.insert(profiles).values({ id: userId });
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
       await database.insert(connectedAccounts).values({
         id: accountId,
         userId,

@@ -48,7 +48,7 @@ The model may use facts present in the current thread and applicable Memory. It 
 
 The first page contains only the Invook name and **Sign in with Google**. Better Auth owns this global Invook identity and its database-backed browser session. Its Google OAuth client requests only `openid`, `email`, and `profile`; it never requests Gmail access or offline access.
 
-After sign-in, an authenticated user with no mailbox sees an honest **Connect Gmail** state. Gmail connection uses a different Google OAuth client and must:
+After sign-in, an authenticated user with no mailbox sees an honest **Connect Gmail** state. Gmail connection uses a separate OAuth authorization flow that may reuse the Google Identity client credentials and must:
 
 - let the user choose an account;
 - request the Gmail permissions required by the product;

@@ -101,6 +101,14 @@ export function createInvookAuth(
     user: {
       modelName: "profiles",
       fields: { name: "displayName" },
+      additionalFields: {
+        memoryAcknowledgedAt: {
+          type: "date",
+          required: false,
+          input: false,
+          returned: false,
+        },
+      },
     },
     session: {
       modelName: "authSessions",
