@@ -1,4 +1,5 @@
 import {
+  AlertCircleIcon,
   ArrowLeft02Icon,
   Download01Icon,
   MoreHorizontalIcon,
@@ -42,6 +43,11 @@ export function ThreadReader({
 }: ThreadReaderProps) {
   const mailboxQuery = new URLSearchParams({ view: currentView });
   if (mailboxCursor) mailboxQuery.set("cursor", mailboxCursor);
+  const failedMessageCount = thread.messages.filter(
+    (message) => message.labelAnalysisState === "failed",
+  ).length;
+  const hasLabelAnalysisFailure =
+    thread.hasLabelAnalysisFailure || failedMessageCount > 0;
 
   return (
     <section className="flex min-h-0 flex-col bg-background" aria-label="Open email thread">
@@ -70,6 +76,26 @@ export function ThreadReader({
           <h1 className="mt-2 text-balance text-2xl font-semibold leading-8 tracking-[-0.035em] sm:text-[28px] sm:leading-9">
             {formatMailText(thread.subject) || "(No subject)"}
           </h1>
+          {hasLabelAnalysisFailure ? (
+            <div
+              role="alert"
+              className="mt-4 flex items-start gap-2.5 rounded-lg bg-warning/10 px-3 py-2.5 text-sm"
+            >
+              <HugeiconsIcon
+                icon={AlertCircleIcon}
+                size={16}
+                className="mt-0.5 shrink-0 text-warning"
+              />
+              <p className="leading-5 text-foreground/80">
+                Automatic label analysis failed
+                {failedMessageCount > 1
+                  ? ` for ${failedMessageCount} messages`
+                  : " for a message"}
+                . The stored content remains available, but its Invook labels may be
+                incomplete.
+              </p>
+            </div>
+          ) : null}
           <SmartLabelControls
             key={thread.id}
             threadId={thread.id}

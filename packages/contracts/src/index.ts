@@ -33,6 +33,7 @@ export type AccountSyncStatusEvent = {
 
 export const mailboxViews = [
   "all",
+  "important",
   "starred",
   "drafts",
   "sent",
@@ -42,31 +43,65 @@ export const mailboxViews = [
 
 export type MailboxView = (typeof mailboxViews)[number] | `label:${string}`;
 
-export type LabelAnalysisState = "pending" | "running" | "complete" | "failed";
+export type MessageLabelAnalysisState =
+  | "pending"
+  | "running"
+  | "complete"
+  | "failed";
+
+export type InvookSystemLabelKey = "newsletter";
 
 export type InvookLabel = {
   id: string;
   name: string;
   description: string;
+  systemKey: InvookSystemLabelKey | null;
   definitionVersion: number;
-  analysisState: LabelAnalysisState;
-  analyzedThreadCount: number;
-  totalThreadCount: number;
 };
+
+export type LabelHistoryWindowDays = 7 | 30 | 90;
 
 export type CreateInvookLabelRequest = {
   name: string;
   description: string;
+  applyToPastDays?: LabelHistoryWindowDays | null;
+};
+
+export type UpdateInvookLabelRequest = Pick<
+  CreateInvookLabelRequest,
+  "name" | "description"
+>;
+
+export type PreviewInvookLabelRequest = UpdateInvookLabelRequest;
+
+export type InvookLabelPreviewMatch = {
+  messageId: string;
+  sender: string;
+  subject: string;
+  sentAt: string;
+  confidence: number;
+};
+
+export type InvookLabelPreviewResponse = {
+  scannedMessageCount: number;
+  matches: InvookLabelPreviewMatch[];
 };
 
 export type InvookLabelResponse = {
   label: InvookLabel;
 };
 
+export type CreateInvookLabelResponse = InvookLabelResponse & {
+  historicalAnalysis: {
+    windowDays: LabelHistoryWindowDays;
+    queuedMessageCount: number;
+  } | null;
+};
+
 export type InvookThreadLabel = {
   labelId: string;
   name: string;
-  source: "ai" | "user";
+  source: "ai" | "user" | "derived";
   confidence: number | null;
 };
 
@@ -167,12 +202,7 @@ export type GmailLabel = {
   id: string;
   providerLabelId: string;
   name: string;
-  type: "system" | "user";
-  color: { textColor?: string; backgroundColor?: string } | null;
-};
-
-export type GmailUserLabel = Omit<GmailLabel, "type"> & {
-  type: "user";
+  type: "system";
 };
 
 export type GmailDraftResource = {
@@ -192,6 +222,8 @@ export type MailboxThreadSummary = {
   invookLabels: InvookThreadLabel[];
   latestMessageAt: string | null;
   messageCount: number;
+  isOthers: boolean;
+  hasLabelAnalysisFailure: boolean;
 };
 
 export type MailboxThreadMessage = {
@@ -213,6 +245,8 @@ export type MailboxThreadMessage = {
     contentLength: number;
   } | null;
   sentAt: string;
+  labelAnalysisState: MessageLabelAnalysisState;
+  isOthers: boolean;
   attachments: MailboxAttachment[];
 };
 
@@ -295,7 +329,6 @@ export type MailboxWorkspace = {
   batchConfigured: boolean;
   account: MailboxAccount;
   memories: MemoryEntry[];
-  gmailUserLabels: GmailUserLabel[];
   invookLabels: InvookLabel[];
   pagination: MailboxPagination;
   threads: MailboxThreadSummary[];

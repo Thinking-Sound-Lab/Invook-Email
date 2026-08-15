@@ -1,28 +1,36 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, beforeEach, test } from "node:test";
 
 import axios, { type AxiosRequestConfig } from "axios";
 
 import {
   GmailApiError,
   GMAIL_MESSAGE_LIST_MAX_RESULTS,
+  getGmailDraft,
   getGmailMessage,
   getGmailMessageState,
+  gmailHistoryChanges,
   isGoogleReauthenticationRequired,
   listGmailDrafts,
   listGmailMessages,
-  modifyGmailThreadLabels,
+  modifyGmailMessageLabels,
   sendGmailDraft,
 } from "./client";
 
 const originalAxiosRequest = axios.request;
 const requests: AxiosRequestConfig[] = [];
+let responseData: unknown;
 
 before(() => {
   axios.request = (async (configuration: AxiosRequestConfig) => {
     requests.push(configuration);
-    return { data: { messages: [], raw: "cmF3" } };
+    return { data: responseData };
   }) as typeof axios.request;
+});
+
+beforeEach(() => {
+  requests.length = 0;
+  responseData = { messages: [], raw: "cmF3" };
 });
 
 after(() => {
@@ -30,7 +38,6 @@ after(() => {
 });
 
 test("complete Gmail message pages use the provider maximum with Spam and Trash", async () => {
-  requests.length = 0;
   await listGmailMessages("access-token", { pageToken: "next-page" });
 
   assert.equal(GMAIL_MESSAGE_LIST_MAX_RESULTS, 500);
@@ -45,8 +52,16 @@ test("complete Gmail message pages use the provider maximum with Spam and Trash"
 });
 
 test("each listed Gmail message is fetched as raw MIME", async () => {
-  requests.length = 0;
-  await getGmailMessage("access-token", "message/with spaces");
+  responseData = {
+    id: "message/with spaces",
+    threadId: "thread-id",
+    raw: "cmF3",
+    labelIds: ["IMPORTANT", "INBOX", "Label_7", "CATEGORY_PROMOTIONS"],
+  };
+  const message = await getGmailMessage(
+    "access-token",
+    "message/with spaces",
+  );
 
   const request = requests[0];
   assert.ok(request);
@@ -54,17 +69,83 @@ test("each listed Gmail message is fetched as raw MIME", async () => {
   assert.equal(request.baseURL, "https://gmail.googleapis.com/gmail/v1");
   assert.equal(url.pathname, "/users/me/messages/message%2Fwith%20spaces");
   assert.equal(url.searchParams.get("format"), "raw");
+  assert.deepEqual(message.labelIds, ["IMPORTANT", "INBOX"]);
 });
 
 test("label-only history reads minimal state without downloading raw MIME", async () => {
-  requests.length = 0;
-  await getGmailMessageState("access-token", "label-only-message");
+  responseData = {
+    id: "label-only-message",
+    threadId: "thread-id",
+    labelIds: ["UNREAD", "IMPORTANT", "Label_9"],
+  };
+  const message = await getGmailMessageState(
+    "access-token",
+    "label-only-message",
+  );
 
   const request = requests[0];
   assert.ok(request);
   const url = new URL(request.url ?? "", request.baseURL);
   assert.equal(url.pathname, "/users/me/messages/label-only-message");
   assert.equal(url.searchParams.get("format"), "minimal");
+  assert.deepEqual(message.labelIds, ["UNREAD", "IMPORTANT"]);
+});
+
+test("draft and provider-write responses discard opaque Gmail label IDs", async () => {
+  responseData = {
+    id: "draft-id",
+    message: {
+      id: "draft-message",
+      threadId: "thread-id",
+      raw: "cmF3",
+      labelIds: ["DRAFT", "IMPORTANT", "Label_9", "CATEGORY_UPDATES"],
+    },
+  };
+  const draft = await getGmailDraft("access-token", "draft-id");
+  assert.deepEqual(draft.message.labelIds, ["DRAFT", "IMPORTANT"]);
+
+  responseData = {
+    id: "message-id",
+    threadId: "thread-id",
+    labelIds: ["STARRED", "Label_7"],
+  };
+  const modified = await modifyGmailMessageLabels(
+    "access-token",
+    "message-id",
+    { addLabelIds: ["STARRED"] },
+  );
+  assert.deepEqual(modified.labelIds, ["STARRED"]);
+});
+
+test("history mapping retains only recognized Gmail system labels", () => {
+  assert.deepEqual(
+    gmailHistoryChanges({
+      id: "history-id",
+      labelsAdded: [
+        {
+          message: {
+            id: "message-id",
+            threadId: "thread-id",
+            labelIds: [
+              "IMPORTANT",
+              "INBOX",
+              "Label_7",
+              "CATEGORY_PROMOTIONS",
+            ],
+          },
+          labelIds: ["IMPORTANT", "Label_7"],
+        },
+      ],
+    }),
+    [
+      {
+        messageId: "message-id",
+        action: "labels",
+        providerLabelIds: ["IMPORTANT", "INBOX"],
+        isDraftRelated: false,
+      },
+    ],
+  );
 });
 
 test("a rejected Google refresh token requires immediate reauthentication", () => {
@@ -104,7 +185,6 @@ test("a transient Google provider failure remains retryable", () => {
 });
 
 test("Gmail draft listing forwards an exact provider search query", async () => {
-  requests.length = 0;
   await listGmailDrafts("access-token", {
     maxResults: 10,
     query: "rfc822msgid:invook-compose@example.invalid",
@@ -121,7 +201,6 @@ test("Gmail draft listing forwards an exact provider search query", async () => 
 });
 
 test("sending uses Gmail's existing-draft endpoint and provider draft identity", async () => {
-  requests.length = 0;
   await sendGmailDraft("access-token", "provider-draft");
 
   const request = requests[0];
@@ -130,22 +209,4 @@ test("sending uses Gmail's existing-draft endpoint and provider draft identity",
   assert.equal(url.pathname, "/users/me/drafts/send");
   assert.equal(request.method, "POST");
   assert.deepEqual(request.data, { id: "provider-draft" });
-});
-
-test("thread label writes use Gmail's authoritative thread endpoint", async () => {
-  requests.length = 0;
-  await modifyGmailThreadLabels("access-token", "thread/with spaces", {
-    addLabelIds: ["STARRED"],
-    removeLabelIds: ["INBOX"],
-  });
-
-  const request = requests[0];
-  assert.ok(request);
-  const url = new URL(request.url ?? "", request.baseURL);
-  assert.equal(url.pathname, "/users/me/threads/thread%2Fwith%20spaces/modify");
-  assert.equal(request.method, "POST");
-  assert.deepEqual(request.data, {
-    addLabelIds: ["STARRED"],
-    removeLabelIds: ["INBOX"],
-  });
 });

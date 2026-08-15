@@ -20,16 +20,12 @@ import {
   isMemoryBatchProviderConfigured,
   batchProviders,
   MemoryBatchConfigurationError,
-  readLabelBatch,
-  submitLabelBatch,
   readEmbeddingBatch,
   readMemoryBatch,
   prepareEmbeddingBatch,
   submitMemoryBatch,
   uploadEmbeddingBatchInput,
   type FeedbackMemoryCandidate,
-  type LabelAnalysisThread,
-  type LabelBatchManifestEntry,
   type MemoryAnalysisThread,
   type MemoryBatchManifestEntry,
   type BatchProvider,
@@ -51,8 +47,6 @@ import {
   enqueueDailyGmailWatchRenewal,
   ensureDailyGmailWatchRenewals,
   enqueuePendingAnalysisWorkflowSteps,
-  enqueueLabelBackfillContinuation,
-  enqueueLabelBatchRetry,
   enqueueBatchEvent,
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
@@ -70,11 +64,7 @@ import {
   getIndexingProgressForAccount,
   getIndexedMessageIds,
   getDraftFeedbackSamples,
-  getLabelBatchSubmission,
-  getLabelForAnalysis,
   getMemoryAnalysisThreads,
-  getThreadsForLabelBackfill,
-  getThreadsForLabelRetry,
   getUserAuthoredMemories,
   getWorkerAccount,
   getGmailReplicaContext,
@@ -83,11 +73,8 @@ import {
   getMailSyncRunContext,
   getMailSyncRunProviderMessageIds,
   getStoredProviderMessageIds,
-  GmailLabelCatalogMismatchError,
   InactiveMailSyncRunError,
   isActiveMailSyncRun,
-  saveLabelBatchResults,
-  setLabelAnalysisState,
   getBatchSubmission,
   hasCompletedMailSyncPage,
   listenForOutboxNotifications,
@@ -104,7 +91,6 @@ import {
   saveExtractedMemories,
   saveGmailWatchState,
   saveGmailDraftResource,
-  saveGmailProviderLabel,
   deleteGmailDraftResourceByMessageId,
   setGmailReplicaState,
   setIndexingSyncStage,
@@ -113,7 +99,6 @@ import {
   publishOutboxBatch,
   createRepairMailSyncRun,
   replaceGmailDraftResources,
-  replaceGmailLabelCatalog,
   prepareEmbeddingBatchSubmission,
   recordEmbeddingBatchInputFile,
   recordEmbeddingProviderBatch,
@@ -132,8 +117,8 @@ import {
 import {
   extractEmailAddress,
   gmailHistoryChanges,
+  gmailSystemLabels,
   getGmailDraft,
-  getGmailLabel,
   getGmailMessage,
   getGmailMessageState,
   getGmailProfile,
@@ -142,7 +127,6 @@ import {
   isMemoryEligible,
   listGmailDrafts,
   listGmailHistory,
-  listGmailLabels,
   listGmailMessages,
   parseGmailMessage,
   refreshGoogleAccessToken,
@@ -157,6 +141,7 @@ import {
   gmailControlConcurrency,
   gmailMessageConcurrency,
   isBullMqStalledTerminalFailure,
+  mailLabelConcurrency,
   type WorkflowJob,
 } from "./queue";
 import { classifyGmailWorkflowFailure } from "./gmail-workflow-failure";
@@ -169,6 +154,12 @@ import {
   planGmailHistoryCatchup,
 } from "./gmail-history-catchup";
 import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
+import {
+  failTerminalMessageLabelAnalysis,
+  isMessageLabelWorkflowStep,
+  messageLabelAnalysisErrorCode,
+  runLabelSubmission,
+} from "./message-label-analysis";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GOOGLE_CLIENT_ID ?? "";
@@ -332,7 +323,7 @@ async function prepareMessage(options: {
     participants: [message.from, ...message.to, ...message.cc]
       .filter(Boolean)
       .map(toPostgresTextProjection),
-    gmailLabelIds: message.labelIds,
+    gmailLabels: gmailSystemLabels(message.labelIds),
     providerHistoryId: message.historyId,
     internalDate,
     sizeEstimate: message.sizeEstimate,
@@ -362,92 +353,14 @@ async function prepareMessage(options: {
   };
 }
 
-async function withRefreshedGmailLabelCatalog<T>(
-  options: { accessToken: string; userId: string; accountId: string },
-  operation: () => Promise<T>,
-): Promise<T> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (!(error instanceof GmailLabelCatalogMismatchError)) throw error;
-    for (const providerLabelId of error.missingProviderLabelIds) {
-      const label = await getGmailLabel(options.accessToken, providerLabelId);
-      if (label.type !== "system" && label.type !== "user") {
-        throw new Error(`Gmail label ${label.id} did not include a supported type.`);
-      }
-      await saveGmailProviderLabel({
-        userId: options.userId,
-        accountId: options.accountId,
-        label: {
-          providerLabelId: label.id,
-          name: label.name,
-          type: label.type,
-          messageListVisibility: label.messageListVisibility ?? null,
-          labelListVisibility: label.labelListVisibility ?? null,
-          color: label.color ?? null,
-          providerMetadata: {
-            messagesTotal: label.messagesTotal ?? null,
-            messagesUnread: label.messagesUnread ?? null,
-            threadsTotal: label.threadsTotal ?? null,
-            threadsUnread: label.threadsUnread ?? null,
-          },
-        },
-      });
-    }
-    return operation();
-  }
-}
-
 async function storeMessage(
   options: Parameters<typeof prepareMessage>[0] & {
-    accessToken: string;
     activeRunId?: string;
   },
 ) {
-  const { accessToken, activeRunId, ...messageOptions } = options;
+  const { activeRunId, ...messageOptions } = options;
   const message = await prepareMessage(messageOptions);
-  return withRefreshedGmailLabelCatalog(
-    {
-      accessToken,
-      userId: messageOptions.userId,
-      accountId: messageOptions.accountId,
-    },
-    () => upsertMailboxMessage(message, undefined, activeRunId),
-  );
-}
-
-async function syncGmailLabelCatalog(options: {
-  accessToken: string;
-  userId: string;
-  accountId: string;
-  notify?: boolean;
-}) {
-  const labels = await listGmailLabels(options.accessToken);
-  for (const label of labels) {
-    if (label.type !== "system" && label.type !== "user") {
-      throw new Error(`Gmail label ${label.id} did not include a supported type.`);
-    }
-  }
-  await replaceGmailLabelCatalog({
-    userId: options.userId,
-    accountId: options.accountId,
-    notify: options.notify,
-    labels: labels.map((label) => ({
-      providerLabelId: label.id,
-      name: label.name,
-      type: label.type as "system" | "user",
-      messageListVisibility: label.messageListVisibility ?? null,
-      labelListVisibility: label.labelListVisibility ?? null,
-      color: label.color ?? null,
-      providerMetadata: {
-        messagesTotal: label.messagesTotal ?? null,
-        messagesUnread: label.messagesUnread ?? null,
-        threadsTotal: label.threadsTotal ?? null,
-        threadsUnread: label.threadsUnread ?? null,
-      },
-    })),
-  });
-  return labels;
+  return upsertMailboxMessage(message, undefined, activeRunId);
 }
 
 async function syncGmailDraftResources(options: {
@@ -475,7 +388,6 @@ async function syncGmailDraftResources(options: {
       const draft = await getGmailDraft(options.accessToken, reference.id);
       const parsed = await parseGmailMessage(draft.message);
       await storeMessage({
-        accessToken: options.accessToken,
         userId: options.userId,
         accountId: options.accountId,
         accountEmail: options.accountEmail,
@@ -488,7 +400,7 @@ async function syncGmailDraftResources(options: {
         providerThreadId: draft.message.threadId,
         providerHistoryId: draft.message.historyId ?? null,
         providerMetadata: {
-          labelIds: draft.message.labelIds ?? [],
+          labelIds: parsed.labelIds,
           snippet: draft.message.snippet ?? null,
           internalDate: draft.message.internalDate ?? null,
           sizeEstimate: draft.message.sizeEstimate ?? null,
@@ -550,12 +462,12 @@ async function refreshAffectedGmailDraftResources(options: {
       continue;
     }
     const draft = await getGmailDraft(options.accessToken, reference.providerDraftId);
+    const parsed = await parseGmailMessage(draft.message);
     await storeMessage({
-      accessToken: options.accessToken,
       userId: options.userId,
       accountId: options.accountId,
       accountEmail: options.accountEmail,
-      message: await parseGmailMessage(draft.message),
+      message: parsed,
       ingestionMode: options.ingestionMode,
     });
     await saveGmailDraftResource({
@@ -568,7 +480,7 @@ async function refreshAffectedGmailDraftResources(options: {
         providerThreadId: draft.message.threadId,
         providerHistoryId: draft.message.historyId ?? null,
         providerMetadata: {
-          labelIds: draft.message.labelIds ?? [],
+          labelIds: parsed.labelIds,
           snippet: draft.message.snippet ?? null,
           internalDate: draft.message.internalDate ?? null,
           sizeEstimate: draft.message.sizeEstimate ?? null,
@@ -596,7 +508,7 @@ async function applyHistoryRange(options: {
     {
       action: "upsert" | "labels" | "delete";
       providerHistoryId: string | null;
-      providerLabelIds: string[] | null;
+      gmailLabels: ReturnType<typeof gmailSystemLabels> | null;
       isDraftRelated: boolean;
     }
   >();
@@ -617,7 +529,9 @@ async function applyHistoryRange(options: {
               ? current.action
               : change.action,
           providerHistoryId: history.id ?? null,
-          providerLabelIds: change.providerLabelIds ?? current?.providerLabelIds ?? null,
+          gmailLabels: change.providerLabelIds
+            ? gmailSystemLabels(change.providerLabelIds)
+            : current?.gmailLabels ?? null,
           isDraftRelated: change.isDraftRelated || (current?.isDraftRelated ?? false),
         });
       }
@@ -651,18 +565,19 @@ async function applyHistoryRange(options: {
   const labelChanges: Array<{
     providerMessageId: string;
     providerHistoryId: string | null;
-    providerLabelIds: string[];
+    gmailLabels: ReturnType<typeof gmailSystemLabels>;
   }> = [];
   for (const providerMessageId of labelActionIds) {
     if (!storedLabelActionIds.has(providerMessageId)) continue;
     const change = messageActions.get(providerMessageId);
     if (!change) continue;
-    let providerLabelIds = change.providerLabelIds;
-    if (!providerLabelIds) {
+    let gmailLabels = change.gmailLabels;
+    if (!gmailLabels) {
       try {
-        providerLabelIds =
+        gmailLabels = gmailSystemLabels(
           (await getGmailMessageState(options.accessToken, providerMessageId))
-            .labelIds ?? [];
+            .labelIds,
+        );
       } catch (error) {
         if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
         deletedMessageIds.push({
@@ -675,7 +590,7 @@ async function applyHistoryRange(options: {
     labelChanges.push({
       providerMessageId,
       providerHistoryId: change.providerHistoryId,
-      providerLabelIds,
+      gmailLabels,
     });
   }
 
@@ -718,25 +633,17 @@ async function applyHistoryRange(options: {
     }
   }
 
-  const applied = await withRefreshedGmailLabelCatalog(
-    {
-      accessToken: options.accessToken,
-      userId: options.userId,
-      accountId: options.accountId,
-    },
-    () =>
-      applyGmailHistoryBatch({
-        userId: options.userId,
-        accountId: options.accountId,
-        expectedCursor: options.expectedCursor,
-        nextCursor: historyId,
-        messages,
-        labelChanges,
-        deletedMessageIds,
-        stateAfterApply: options.stateAfterApply,
-        continuationSourceStepId: options.continuationSourceStepId,
-      }),
-  );
+  const applied = await applyGmailHistoryBatch({
+    userId: options.userId,
+    accountId: options.accountId,
+    expectedCursor: options.expectedCursor,
+    nextCursor: historyId,
+    messages,
+    labelChanges,
+    deletedMessageIds,
+    stateAfterApply: options.stateAfterApply,
+    continuationSourceStepId: options.continuationSourceStepId,
+  });
   if (applied.applied) {
     await refreshAffectedGmailDraftResources({
       accessToken: options.accessToken,
@@ -790,11 +697,6 @@ async function runGmailPage(job: WorkflowStepJob) {
     await setGmailReplicaState({
       accountId: account.id,
       state: run.runType === "repair" ? "repairing" : "snapshotting",
-    });
-    await syncGmailLabelCatalog({
-      accessToken: credential.accessToken,
-      userId: account.userId,
-      accountId: account.id,
     });
   }
   const page = await listGmailMessages(credential.accessToken, {
@@ -853,7 +755,6 @@ async function runGmailMessage(job: WorkflowStepJob) {
   }
   try {
     await storeMessage({
-      accessToken: credential.accessToken,
       userId: account.userId,
       accountId: account.id,
       accountEmail: account.email,
@@ -908,7 +809,6 @@ async function runGmailMessageRefresh(job: WorkflowStepJob) {
   }
 
   const stored = await storeMessage({
-    accessToken: credential.accessToken,
     userId: account.userId,
     accountId: account.id,
     accountEmail: account.email,
@@ -1100,11 +1000,6 @@ async function runGmailFinalize(job: WorkflowStepJob) {
   await ensureGmailWatch(account.id, credential.accessToken);
   const replayState = run.runType === "repair" ? "repairing" : "replaying";
   await setGmailReplicaState({ accountId: account.id, state: replayState });
-  await syncGmailLabelCatalog({
-    accessToken: credential.accessToken,
-    userId: account.userId,
-    accountId: account.id,
-  });
 
   if (run.runType === "repair") {
     const [providerMessageIds, storedMessageIds] = await Promise.all([
@@ -2249,420 +2144,6 @@ async function runMemoryBatchEvent(job: WorkflowStepJob) {
   };
 }
 
-type LabelSubmissionResult = {
-  provider: BatchProvider;
-  providerBatchId: string;
-  inputFileId: string;
-  modelId: string;
-  requestCount: number;
-  manifest: LabelBatchManifestEntry[];
-  batchAttempt: number;
-  rootSubmissionJobId: string;
-  labelId: string;
-  definitionVersion: number;
-  continueBackfill: boolean;
-};
-
-function parseLabelManifest(value: unknown): LabelBatchManifestEntry[] {
-  if (!Array.isArray(value)) throw new Error("The label Batch manifest is missing.");
-  return value.map((entry) => {
-    if (!entry || typeof entry !== "object") {
-      throw new Error("The label Batch manifest is invalid.");
-    }
-    const key = "key" in entry ? entry.key : undefined;
-    const labelId = "labelId" in entry ? entry.labelId : undefined;
-    const definitionVersion =
-      "definitionVersion" in entry ? entry.definitionVersion : undefined;
-    const threadId = "threadId" in entry ? entry.threadId : undefined;
-    const threadVersion = "threadVersion" in entry ? entry.threadVersion : undefined;
-    if (
-      typeof key !== "string" ||
-      typeof labelId !== "string" ||
-      typeof definitionVersion !== "number" ||
-      !Number.isInteger(definitionVersion) ||
-      definitionVersion < 1 ||
-      typeof threadId !== "string" ||
-      typeof threadVersion !== "number" ||
-      !Number.isInteger(threadVersion) ||
-      threadVersion < 1
-    ) {
-      throw new Error("The label Batch manifest is invalid.");
-    }
-    return { key, labelId, definitionVersion, threadId, threadVersion };
-  });
-}
-
-function parseLabelSubmissionResult(value: unknown): LabelSubmissionResult | null {
-  if (!value || typeof value !== "object") {
-    throw new Error("The label Batch submission result is missing.");
-  }
-  const result = value as Record<string, unknown>;
-  if (!batchProviders.includes(result.provider as BatchProvider)) {
-    return null;
-  }
-  if (typeof result.continueBackfill !== "boolean") {
-    throw new Error("The label Batch continuation state is missing.");
-  }
-  const manifest = parseLabelManifest(result.manifest);
-  const requestCount = requiredInteger(result.requestCount, "Label Batch request count");
-  const labelId = requiredString(result.labelId, "Label ID");
-  const definitionVersion = requiredInteger(
-    result.definitionVersion,
-    "Label definition version",
-  );
-  if (
-    manifest.length !== requestCount ||
-    new Set(manifest.map((entry) => entry.key)).size !== manifest.length ||
-    manifest.some(
-      (entry) =>
-        entry.labelId !== labelId || entry.definitionVersion !== definitionVersion,
-    )
-  ) {
-    throw new Error("The label Batch manifest does not match its request count or label.");
-  }
-  return {
-    provider: result.provider as BatchProvider,
-    providerBatchId: requiredString(result.providerBatchId, "Provider batch ID"),
-    inputFileId: requiredString(result.inputFileId, "Provider input file"),
-    modelId: requiredString(result.modelId, "Label Batch model"),
-    requestCount,
-    manifest,
-    batchAttempt: requiredInteger(result.batchAttempt, "Label Batch attempt"),
-    rootSubmissionJobId: requiredString(
-      result.rootSubmissionJobId,
-      "Root label submission job ID",
-    ),
-    labelId,
-    definitionVersion,
-    continueBackfill: result.continueBackfill,
-  };
-}
-
-async function cleanupLabelBatchFiles(input: {
-  provider: BatchProvider;
-  inputFileId: string;
-  outputFileId: string | null;
-  errorFileId: string | null;
-  submissionJobId: string;
-}) {
-  const failures = await deleteBatchFiles({
-    provider: input.provider,
-    inputFileId: input.inputFileId,
-    outputFileId: input.outputFileId,
-    errorFileId: input.errorFileId,
-  });
-  if (failures.length > 0) {
-    console.error("worker: label Batch files could not be deleted", {
-      provider: input.provider,
-      submissionJobId: input.submissionJobId,
-      fileCount: failures.length,
-    });
-  }
-}
-
-async function runLabelBackfill(job: WorkflowStepJob) {
-  if (!job.accountId) throw new Error("The label backfill has no connected account.");
-  const labelId = requiredString(job.payload.labelId, "Label ID");
-  const definitionVersion = requiredInteger(
-    job.payload.definitionVersion,
-    "Label definition version",
-  );
-  const label = await getLabelForAnalysis(job.accountId, labelId);
-  if (!label || label.definitionVersion !== definitionVersion) {
-    return { status: "superseded", labelId, definitionVersion };
-  }
-  const threads = await getThreadsForLabelBackfill({
-    accountId: job.accountId,
-    labelId,
-    definitionVersion,
-  });
-  if (threads.length === 0) {
-    await setLabelAnalysisState({
-      accountId: job.accountId,
-      labelId,
-      definitionVersion,
-      state: "complete",
-    });
-    return { status: "complete", labelId, definitionVersion, threadCount: 0 };
-  }
-  if (!isMemoryBatchConfigured()) throw new MemoryBatchConfigurationError();
-
-  await setLabelAnalysisState({
-    accountId: job.accountId,
-    labelId,
-    definitionVersion,
-    state: "running",
-  });
-  const submission = await submitLabelBatch({
-    submissionId: job.id,
-    batchAttempt: 1,
-    label,
-    threads: threads satisfies LabelAnalysisThread[],
-  });
-  if (!submission) throw new Error("The label Batch produced no requests.");
-
-  return {
-    status: "submitted",
-    ...submission,
-    batchAttempt: 1,
-    rootSubmissionJobId: job.id,
-    labelId,
-    definitionVersion,
-    continueBackfill: true,
-  };
-}
-
-async function runLabelBatchRetry(job: WorkflowStepJob) {
-  if (!job.accountId) throw new Error("The label Batch retry has no connected account.");
-  const parentSubmissionJobId = requiredString(
-    job.payload.parentSubmissionJobId,
-    "Parent label submission job ID",
-  );
-  const parentSubmission = await getLabelBatchSubmission(parentSubmissionJobId);
-  if (parentSubmission?.accountId !== job.accountId) {
-    throw new Error("The parent label submission could not be matched to this account.");
-  }
-  const parentDetails = parseLabelSubmissionResult(parentSubmission.result);
-  if (!parentDetails) return { status: "superseded", provider: "unsupported" };
-  if (!isMemoryBatchProviderConfigured(parentDetails.provider)) {
-    throw new MemoryBatchConfigurationError(
-      `The ${parentDetails.provider} provider used by this label Batch retry is not configured.`,
-    );
-  }
-
-  const labelId = requiredString(job.payload.labelId, "Label ID");
-  const definitionVersion = requiredInteger(
-    job.payload.definitionVersion,
-    "Label definition version",
-  );
-  const label = await getLabelForAnalysis(job.accountId, labelId);
-  if (!label || label.definitionVersion !== definitionVersion) {
-    return { status: "superseded", labelId, definitionVersion };
-  }
-  const manifest = parseLabelManifest(job.payload.manifest);
-  const threads = await getThreadsForLabelRetry(
-    job.accountId,
-    manifest.map((entry) => entry.threadId),
-  );
-  const batchAttempt = requiredInteger(job.payload.batchAttempt, "Label Batch attempt");
-  const rootSubmissionJobId = requiredString(
-    job.payload.rootSubmissionJobId,
-    "Root label submission job ID",
-  );
-  if (typeof job.payload.continueBackfill !== "boolean") {
-    throw new Error("The label Batch continuation state is missing.");
-  }
-  const submission = await submitLabelBatch({
-    provider: parentDetails.provider,
-    submissionId: job.id,
-    batchAttempt,
-    label,
-    threads: threads satisfies LabelAnalysisThread[],
-    retryManifest: manifest,
-  });
-  if (!submission) throw new Error("The label Batch retry produced no requests.");
-
-  return {
-    status: "submitted",
-    ...submission,
-    batchAttempt,
-    rootSubmissionJobId,
-    labelId,
-    definitionVersion,
-    continueBackfill: job.payload.continueBackfill,
-  };
-}
-
-async function runLabelBatchEvent(job: WorkflowStepJob) {
-  if (!job.accountId) throw new Error("The label Batch event has no account.");
-  const submissionJobId = requiredString(
-    job.payload.submissionJobId,
-    "Label submission job ID",
-  );
-  const submission = await getLabelBatchSubmission(submissionJobId);
-  if (!submission?.accountId || !submission.userId || submission.accountId !== job.accountId) {
-    throw new Error("The label Batch submission could not be matched to this account.");
-  }
-  const details = parseLabelSubmissionResult(submission.result);
-  if (!details) return { status: "superseded", provider: "unsupported" };
-  const providerBatchId = requiredString(
-    job.payload.providerBatchId,
-    "Provider event batch ID",
-  );
-  if (
-    job.payload.provider !== details.provider ||
-    providerBatchId !== details.providerBatchId
-  ) {
-    throw new Error("The provider event does not match its label submission.");
-  }
-
-  const batch = await readLabelBatch({
-    provider: details.provider,
-    providerBatchId: details.providerBatchId,
-    modelId: details.modelId,
-    expectedKeys: details.manifest.map((entry) => entry.key),
-  });
-  const terminalState =
-    batch.state === "completed" ||
-    batch.state === "failed" ||
-    batch.state === "cancelled" ||
-    batch.state === "expired";
-  if (!terminalState) {
-    throw new Error(
-      `${details.provider} emitted a terminal event while the label Batch is ${batch.state}.`,
-    );
-  }
-
-  const currentLabel = await getLabelForAnalysis(
-    submission.accountId,
-    details.labelId,
-  );
-  if (!currentLabel || currentLabel.definitionVersion !== details.definitionVersion) {
-    await cleanupLabelBatchFiles({
-      provider: details.provider,
-      inputFileId: details.inputFileId,
-      outputFileId: batch.outputFileId,
-      errorFileId: batch.errorFileId,
-      submissionJobId: submission.id,
-    });
-    return { status: "superseded", reason: "label_deleted" };
-  }
-
-  const currentThreads = await getThreadsForLabelRetry(
-    submission.accountId,
-    details.manifest.map((entry) => entry.threadId),
-  );
-  const currentVersions = new Map(
-    currentThreads.map((thread) => [thread.id, thread.contentVersion]),
-  );
-  const staleKeys = new Set(
-    details.manifest
-      .filter(
-        (entry) =>
-          currentVersions.get(entry.threadId) !== entry.threadVersion,
-      )
-      .map((entry) => entry.key),
-  );
-  const failedKeys = new Set(batch.failedKeys);
-  const results: Array<{
-    threadId: string;
-    threadVersion: number;
-    matched: boolean;
-    confidence: number;
-  }> = [];
-  let savedThreadCount = 0;
-  for (const entry of details.manifest) {
-    if (staleKeys.has(entry.key)) continue;
-    if (failedKeys.has(entry.key)) continue;
-    const candidate = batch.candidatesByKey.get(entry.key);
-    if (
-      !candidate ||
-      candidate.threadId !== entry.threadId ||
-      candidate.labelId !== entry.labelId
-    ) {
-      failedKeys.add(entry.key);
-      continue;
-    }
-    results.push({
-      threadId: candidate.threadId,
-      threadVersion: entry.threadVersion,
-      matched: candidate.matched,
-      confidence: candidate.confidence,
-    });
-  }
-  if (results.length > 0) {
-    const saved = await saveLabelBatchResults({
-      userId: submission.userId,
-      accountId: submission.accountId,
-      labelId: details.labelId,
-      definitionVersion: details.definitionVersion,
-      modelId: batch.modelId,
-      results,
-    });
-    if (!saved) {
-      await cleanupLabelBatchFiles({
-        provider: details.provider,
-        inputFileId: details.inputFileId,
-        outputFileId: batch.outputFileId,
-        errorFileId: batch.errorFileId,
-        submissionJobId: submission.id,
-      });
-      return { status: "superseded", reason: "label_deleted" };
-    }
-    for (const threadId of saved.staleThreadIds) {
-      const entry = details.manifest.find((candidate) => candidate.threadId === threadId);
-      if (entry) staleKeys.add(entry.key);
-    }
-    savedThreadCount = saved.savedThreadCount;
-  }
-
-  const failedManifest = details.manifest.filter(
-    (entry) => failedKeys.has(entry.key) && !staleKeys.has(entry.key),
-  );
-  let nextJobId: string | null = null;
-  if (failedManifest.length > 0 && details.batchAttempt < submission.maxAttempts) {
-    nextJobId = await enqueueLabelBatchRetry({
-      userId: submission.userId,
-      accountId: submission.accountId,
-      labelId: details.labelId,
-      definitionVersion: details.definitionVersion,
-      parentSubmissionJobId: submission.id,
-      rootSubmissionJobId: details.rootSubmissionJobId,
-      batchAttempt: details.batchAttempt + 1,
-      continueBackfill: details.continueBackfill,
-      manifest: failedManifest,
-    });
-  } else if (failedManifest.length > 0) {
-    await setLabelAnalysisState({
-      accountId: submission.accountId,
-      labelId: details.labelId,
-      definitionVersion: details.definitionVersion,
-      state: "failed",
-    });
-  } else if (details.continueBackfill || staleKeys.size > 0) {
-    nextJobId = await enqueueLabelBackfillContinuation({
-      userId: submission.userId,
-      accountId: submission.accountId,
-      labelId: details.labelId,
-      definitionVersion: details.definitionVersion,
-      parentSubmissionJobId: submission.id,
-    });
-  } else {
-    await setLabelAnalysisState({
-      accountId: submission.accountId,
-      labelId: details.labelId,
-      definitionVersion: details.definitionVersion,
-      state: "complete",
-    });
-  }
-
-  await cleanupLabelBatchFiles({
-    provider: details.provider,
-    inputFileId: details.inputFileId,
-    outputFileId: batch.outputFileId,
-    errorFileId: batch.errorFileId,
-    submissionJobId: submission.id,
-  });
-
-  return {
-    status:
-      failedManifest.length === 0
-        ? nextJobId
-          ? "continuation_queued"
-          : "complete"
-        : nextJobId
-          ? "retry_submitted"
-          : "failed",
-    providerState: batch.state,
-    provider: details.provider,
-    providerError: batch.providerError,
-    analyzedThreadCount: savedThreadCount,
-    staleThreadCount: staleKeys.size,
-    failedRequestCount: failedManifest.length,
-    nextJobId,
-  };
-}
-
 async function runMemoryFeedback(job: WorkflowStepJob) {
   if (!job.accountId) throw new Error("The feedback job has no connected account.");
   const account = await getWorkerAccount(job.accountId);
@@ -2804,9 +2285,12 @@ function workflowStepFromBullJob(bullJob: WorkflowJob): WorkflowStepJob {
 async function reconcileTerminalQueueFailure(bullJob: WorkflowJob, error: Error) {
   const job = workflowStepFromBullJob(bullJob);
   const message =
-    isBullMqStalledTerminalFailure(error) && job.stepType.startsWith("gmail.")
-      ? "gmail_workflow_stalled"
-      : error.message || "BullMQ reported a terminal workflow failure.";
+    isMessageLabelWorkflowStep(job.stepType)
+      ? messageLabelAnalysisErrorCode(error)
+      : isBullMqStalledTerminalFailure(error) && job.stepType.startsWith("gmail.")
+        ? "gmail_workflow_stalled"
+        : error.message || "BullMQ reported a terminal workflow failure.";
+  await failTerminalMessageLabelAnalysis(job, error);
   await persistWorkflowFailure(
     job,
     message,
@@ -2836,14 +2320,24 @@ async function executeWorkflowJob(
       attempt: job.attempts,
       maxAttempts: job.maxAttempts,
     });
+    const persistedMessage =
+      isMessageLabelWorkflowStep(job.stepType)
+        ? messageLabelAnalysisErrorCode(error)
+        : failure.persistedMessage;
+    if (failure.isTerminal) {
+      await failTerminalMessageLabelAnalysis(job, error);
+    }
     await persistWorkflowFailure(
       job,
-      failure.persistedMessage,
+      persistedMessage,
       failure.isTerminal,
       failure.isReconnectRequired,
     );
     if (failure.isReconnectRequired) {
-      throw new UnrecoverableError(failure.persistedMessage);
+      throw new UnrecoverableError(persistedMessage);
+    }
+    if (isMessageLabelWorkflowStep(job.stepType)) {
+      throw new Error(persistedMessage, { cause: error });
     }
     throw error;
   }
@@ -2922,15 +2416,7 @@ function processMemoryFeedback(bullJob: WorkflowJob) {
 }
 
 function processLabelSubmission(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, runLabelBackfill);
-}
-
-function processLabelEvent(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, async (job) => {
-    if (job.stepType === "label.batch.retry") return runLabelBatchRetry(job);
-    if (job.stepType === "label.batch.event") return runLabelBatchEvent(job);
-    throw new Error(`Unsupported label Batch step: ${job.stepType}`);
-  });
+  return executeWorkflowJob(bullJob, runLabelSubmission);
 }
 
 function startBullWorkers(
@@ -2978,20 +2464,15 @@ function startBullWorkers(
       ...withFailureReconciliation,
       lockDuration: batchWorkerLockDuration,
     });
-    runtime.createWorker("mail-label-submit", processLabelSubmission, {
-      ...withFailureReconciliation,
-      lockDuration: batchWorkerLockDuration,
-    });
   }
+  runtime.createWorker("mail-label-submit", processLabelSubmission, {
+    ...withFailureReconciliation,
+    concurrency: mailLabelConcurrency,
+  });
   if (isAnyMemoryBatchProviderConfigured()) {
     runtime.createWorker(
       "mail-memory-events",
       processMemoryEvent,
-      withFailureReconciliation,
-    );
-    runtime.createWorker(
-      "mail-label-events",
-      processLabelEvent,
       withFailureReconciliation,
     );
   }
@@ -3015,7 +2496,7 @@ async function reconcileSubmittedEmbeddingBatches() {
     } catch (error) {
       console.error("worker: submitted embedding Batch reconciliation failed", {
         providerBatchId,
-        message: error instanceof Error ? error.message : "Unknown provider failure",
+        name: error instanceof Error ? error.name : "UnknownError",
       });
     }
   }
@@ -3091,7 +2572,6 @@ async function run() {
 run().catch((error) => {
   console.error("worker: fatal", {
     name: error instanceof Error ? error.name : "UnknownError",
-    message: error instanceof Error ? error.message : "Unknown worker failure",
   });
   process.exitCode = 1;
 });

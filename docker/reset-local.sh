@@ -166,7 +166,7 @@ SQL
 queue_evidence=$(compose exec -T redis sh -c '
   set -eu
   total=0
-  for queue_name in gmail-pages gmail-messages gmail-control mail-indexing-batch mail-indexing-live mail-memory-submit mail-memory-events mail-memory-feedback mail-label-submit mail-label-events; do
+  for queue_name in gmail-pages gmail-messages gmail-control mail-indexing-batch mail-indexing-live mail-memory-submit mail-memory-events mail-memory-feedback mail-label-submit; do
     queue_total=0
     for state_name in wait active paused; do
       state_count=$(redis-cli -n 0 LLEN "bull:$queue_name:$state_name")

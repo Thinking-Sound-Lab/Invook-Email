@@ -13,7 +13,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
 import { createMailDateSections } from "./mail-date-sections";
-import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
+import { formatMailText, threadPeople } from "./mail-format";
+import { mailLabelColorClassName } from "./mail-label-colors";
+import { LocalMailDate } from "./local-mail-date";
 import { MailboxRefreshButton } from "./mailbox-refresh-button";
 import { MailNavigationPending } from "./mail-navigation-pending";
 import { listMailRowLabels, type MailRowLabel } from "./mail-row-labels";
@@ -26,6 +28,7 @@ import type {
 
 const viewTitles: Record<StaticMailboxView, string> = {
   all: "All mail",
+  important: "Important",
   starred: "Starred",
   drafts: "Drafts",
   sent: "Sent",
@@ -64,9 +67,7 @@ function MailLabelChip({ label }: MailLabelChipProps) {
       title={`${label.name} (${sourceName})`}
       className={cn(
         "min-w-0 max-w-28 truncate rounded px-1.5 py-0.5 text-[11px] font-medium",
-        label.kind === "gmail"
-          ? "bg-secondary text-muted-foreground"
-          : "bg-primary/12 text-primary",
+        mailLabelColorClassName(label),
       )}
     >
       {label.name}
@@ -94,7 +95,7 @@ function MailRow({
       href={mailboxHref(currentView, mailboxCursor, thread.id)}
       scroll={false}
       className={cn(
-        "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_auto] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors",
+        "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_4.5rem] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors lg:grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_7rem_1rem_4.5rem] lg:gap-3",
         "hover:bg-accent/55 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         isUnread && "bg-card/45",
       )}
@@ -140,24 +141,40 @@ function MailRow({
         <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {formatMailText(thread.snippet) || "No message preview is available."}
         </p>
-        {labels.length > 0 ? (
-          <div
-            className="hidden min-w-0 max-w-[40%] shrink items-center gap-1 overflow-hidden lg:flex"
-            aria-label="User-created labels"
-          >
-            {labels.map((label) => (
-              <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
-            ))}
-          </div>
-        ) : null}
         {isStarred ? (
-          <HugeiconsIcon icon={StarIcon} size={13} className="shrink-0 text-warning" fill="currentColor" />
+          <HugeiconsIcon
+            icon={StarIcon}
+            size={13}
+            className="shrink-0 text-warning lg:hidden"
+            fill="currentColor"
+          />
         ) : null}
       </div>
 
-      <time className="text-xs tabular-nums text-muted-foreground">
-        {formatMailDate(thread.latestMessageAt)}
-      </time>
+      <div
+        className="hidden min-w-0 items-center justify-end gap-1 overflow-hidden lg:flex"
+        aria-label={labels.length > 0 ? "Message labels" : undefined}
+      >
+        {labels.map((label) => (
+          <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
+        ))}
+      </div>
+
+      <div className="hidden size-4 items-center justify-center lg:flex">
+        {isStarred ? (
+          <HugeiconsIcon
+            icon={StarIcon}
+            size={13}
+            className="shrink-0 text-warning"
+            fill="currentColor"
+          />
+        ) : null}
+      </div>
+
+      <LocalMailDate
+        className="w-full whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground"
+        value={thread.latestMessageAt}
+      />
     </Link>
   );
 }

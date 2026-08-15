@@ -10,6 +10,10 @@ import {
 } from "mailparser";
 
 import type { GmailRawMessage } from "./client";
+import {
+  filterGmailSystemLabelIds,
+  type GmailSystemLabelId,
+} from "./system-labels";
 
 export type ParsedGmailHeader = {
   /** Lowercase field name as interpreted by the MIME parser. */
@@ -41,7 +45,7 @@ export type ParsedGmailMessage = {
   historyId: string | null;
   internalDate: string | null;
   sizeEstimate: number | null;
-  labelIds: string[];
+  labelIds: GmailSystemLabelId[];
   snippet: string;
   raw: Buffer;
   rawSize: number;
@@ -208,7 +212,7 @@ export async function parseGmailMessage(
     internalDate: message.internalDate ?? null,
     sizeEstimate:
       typeof message.sizeEstimate === "number" ? message.sizeEstimate : null,
-    labelIds: [...(message.labelIds ?? [])],
+    labelIds: filterGmailSystemLabelIds(message.labelIds),
     snippet: message.snippet ?? "",
     raw,
     rawSize: raw.byteLength,

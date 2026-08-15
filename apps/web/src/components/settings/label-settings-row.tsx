@@ -1,7 +1,6 @@
 import {
-  AiMagicIcon,
   Delete02Icon,
-  Tag01Icon,
+  Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -19,37 +18,27 @@ import {
 import { Button } from "@/components/ui/button";
 
 export interface LabelSettingsRowProps {
-  kind: "gmail" | "invook";
   name: string;
   description: string;
   status: string;
   deleting: boolean;
-  onDelete: () => Promise<void>;
+  onDelete?: () => Promise<void>;
 }
 
 export function LabelSettingsRow({
-  kind,
   name,
   description,
   status,
   deleting,
   onDelete,
 }: LabelSettingsRowProps) {
-  const isGmailLabel = kind === "gmail";
-
   return (
     <article className="group flex min-h-14 items-center gap-3 rounded-lg px-2.5 py-2 transition-colors hover:bg-muted/35">
-      <span
-        className={`grid size-7 shrink-0 place-items-center rounded-md ${
-          isGmailLabel
-            ? "bg-secondary text-muted-foreground"
-            : "bg-primary/12 text-primary"
-        }`}
-      >
+      <span className="grid size-4 shrink-0 place-items-center rounded-[4px] bg-primary text-primary-foreground">
         <HugeiconsIcon
-          icon={isGmailLabel ? Tag01Icon : AiMagicIcon}
-          size={14}
-          strokeWidth={1.8}
+          icon={Tick02Icon}
+          size={11}
+          strokeWidth={2.4}
         />
       </span>
 
@@ -64,43 +53,46 @@ export function LabelSettingsRow({
 
       <div className="hidden shrink-0 text-right lg:block">
         <p className="text-[11px] font-medium text-foreground/65">
-          {isGmailLabel ? "Gmail" : "Invook"}
+          Invook
         </p>
         <p className="mt-0.5 max-w-40 truncate text-[10px] text-muted-foreground">
           {status}
         </p>
       </div>
 
-      <AlertDialog>
-        <AlertDialogTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            aria-label={`Delete ${name}`}
-            disabled={deleting}
-            className="text-muted-foreground opacity-70 hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
-          >
-            <HugeiconsIcon icon={Delete02Icon} size={13} />
-          </Button>
-        </AlertDialogTrigger>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete {name}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              {isGmailLabel
-                ? "This deletes the label in Gmail and removes it from every message. The messages themselves are not deleted."
-                : "This removes the Invook label and all of its automatic and manual thread decisions."}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter className="border-0">
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction disabled={deleting} onClick={() => void onDelete()}>
-              Delete label
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {onDelete ? (
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label={`Delete ${name}`}
+              disabled={deleting}
+              className="text-muted-foreground opacity-70 hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
+            >
+              <HugeiconsIcon icon={Delete02Icon} size={13} />
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete {name}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This removes the Invook label and all of its automatic and manual
+                thread decisions.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter className="border-0">
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction disabled={deleting} onClick={() => void onDelete()}>
+                Delete label
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      ) : (
+        <span className="w-7 shrink-0" aria-label={`${name} cannot be deleted`} />
+      )}
     </article>
   );
 }

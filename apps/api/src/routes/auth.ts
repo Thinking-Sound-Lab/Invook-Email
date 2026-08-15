@@ -174,7 +174,6 @@ async function handleGoogleCallback(
     console.error("api: gmail oauth callback failed", {
       requestId: request.id,
       name: error instanceof Error ? error.name : "UnknownError",
-      message: error instanceof Error ? error.message : "Unknown callback failure",
       status: error instanceof GmailApiError ? error.status : undefined,
     });
     clearOAuthRequestCookies(reply);

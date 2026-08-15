@@ -13,7 +13,6 @@ export const queueNames: QueueName[] = [
   "mail-memory-events",
   "mail-memory-feedback",
   "mail-label-submit",
-  "mail-label-events",
 ];
 
 export type WorkflowJob = Job<WorkflowStepJob, Record<string, unknown>, string>;
@@ -24,8 +23,13 @@ export const gmailMessageConcurrency = parsePositiveInteger(
   5,
   "GMAIL_MESSAGE_CONCURRENCY",
 );
+export const mailLabelConcurrency = parsePositiveInteger(
+  process.env.MAIL_LABEL_CONCURRENCY,
+  5,
+  "MAIL_LABEL_CONCURRENCY",
+);
 
-function parsePositiveInteger(
+export function parsePositiveInteger(
   value: string | undefined,
   fallback: number,
   name: string,
@@ -77,7 +81,6 @@ export class BullQueueRuntime {
     this.connection.on("error", (error) => {
       console.error("worker: Redis connection error", {
         name: error.name,
-        message: error.message,
       });
     });
     for (const queueName of queueNames) {
@@ -106,6 +109,9 @@ export class BullQueueRuntime {
     const gmailControl = this.queues.get("gmail-control");
     if (!gmailControl) throw new Error("The Gmail control queue is unavailable.");
     await gmailControl.setGlobalConcurrency(gmailControlConcurrency);
+    const mailLabels = this.queues.get("mail-label-submit");
+    if (!mailLabels) throw new Error("The mail label queue is unavailable.");
+    await mailLabels.setGlobalConcurrency(mailLabelConcurrency);
   }
 
   async publish(jobs: OutboxJob[]) {
@@ -178,7 +184,6 @@ export class BullQueueRuntime {
       console.error("worker: BullMQ worker error", {
         queueName,
         name: error.name,
-        message: error.message,
       });
     });
     worker.on("completed", (job) => {
@@ -198,7 +203,6 @@ export class BullQueueRuntime {
         attemptsMade: job?.attemptsMade,
         terminal,
         name: error.name,
-        message: error.message,
       });
       if (terminal && job && onTerminalFailure) {
         void onTerminalFailure(job, error).catch((caught: unknown) => {
@@ -209,7 +213,6 @@ export class BullQueueRuntime {
             queueName,
             stepId: job.id,
             name: reconciliationError.name,
-            message: reconciliationError.message,
           });
           onTerminalFailureReconciliationError?.(reconciliationError);
         });

@@ -4,6 +4,11 @@ import axios, {
   type Method,
 } from "axios";
 
+import {
+  filterGmailSystemLabelIds,
+  type GmailSystemLabelId,
+} from "./system-labels";
+
 const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 export const GMAIL_MESSAGE_LIST_MAX_RESULTS = 500;
@@ -44,7 +49,7 @@ export type GmailMessagePage = {
 export type GmailHistoryChange = {
   messageId: string;
   action: "upsert" | "labels" | "delete";
-  providerLabelIds: string[] | null;
+  providerLabelIds: GmailSystemLabelId[] | null;
   isDraftRelated: boolean;
 };
 
@@ -70,32 +75,6 @@ export type GmailHistoryPage = {
   history?: GmailHistoryRecord[];
   nextPageToken?: string;
   historyId?: string;
-};
-
-export type GmailLabel = {
-  id: string;
-  name: string;
-  type?: "system" | "user";
-  messageListVisibility?: "hide" | "show";
-  labelListVisibility?: "labelHide" | "labelShow" | "labelShowIfUnread";
-  messagesTotal?: number;
-  messagesUnread?: number;
-  threadsTotal?: number;
-  threadsUnread?: number;
-  color?: {
-    textColor?: string;
-    backgroundColor?: string;
-  };
-};
-
-export type GmailLabelInput = {
-  name: string;
-  messageListVisibility?: "hide" | "show";
-  labelListVisibility?: "labelHide" | "labelShow" | "labelShowIfUnread";
-  color?: {
-    textColor: string;
-    backgroundColor: string;
-  };
 };
 
 export type GmailDraftReference = {
@@ -185,11 +164,8 @@ export class GmailApiError extends Error {
         ? payload.error
         : undefined;
     const oauthCode = typeof payload?.error === "string" ? payload.error : undefined;
-    const responseMessage = googleError?.message ?? payload?.error_description;
     const statusDescription = status > 0 ? ` with status ${status}` : "";
-    const message = responseMessage
-      ? `${context.operation} failed${statusDescription}: ${responseMessage}`
-      : `${context.operation} failed${statusDescription}.`;
+    const message = `${context.operation} failed${statusDescription}.`;
 
     return new GmailApiError(message, status, responseText(data ?? error.message), {
       responseData: data,
@@ -280,7 +256,9 @@ export function gmailHistoryChanges(
     changes.set(message.id, {
       messageId: message.id,
       action: nextAction,
-      providerLabelIds: message.labelIds ?? existing?.providerLabelIds ?? null,
+      providerLabelIds: message.labelIds
+        ? filterGmailSystemLabelIds(message.labelIds)
+        : existing?.providerLabelIds ?? null,
       isDraftRelated:
         existing?.isDraftRelated === true ||
         message.labelIds?.includes("DRAFT") === true ||
@@ -306,26 +284,35 @@ export function getGmailProfile(accessToken: string): Promise<GmailProfile> {
   return gmailRequest<GmailProfile>(accessToken, "/users/me/profile");
 }
 
-export function getGmailMessage(
+function filterGmailMessageState<T extends GmailMessageState>(message: T): T {
+  return {
+    ...message,
+    labelIds: filterGmailSystemLabelIds(message.labelIds),
+  };
+}
+
+export async function getGmailMessage(
   accessToken: string,
   messageId: string,
 ): Promise<GmailRawMessage> {
   const search = new URLSearchParams({ format: "raw" });
-  return gmailRequest<GmailRawMessage>(
+  const message = await gmailRequest<GmailRawMessage>(
     accessToken,
     `/users/me/messages/${encodeURIComponent(messageId)}?${search.toString()}`,
   );
+  return filterGmailMessageState(message);
 }
 
-export function getGmailMessageState(
+export async function getGmailMessageState(
   accessToken: string,
   messageId: string,
 ): Promise<GmailMessageState> {
   const search = new URLSearchParams({ format: "minimal" });
-  return gmailRequest<GmailMessageState>(
+  const message = await gmailRequest<GmailMessageState>(
     accessToken,
     `/users/me/messages/${encodeURIComponent(messageId)}?${search.toString()}`,
   );
+  return filterGmailMessageState(message);
 }
 
 export function listGmailMessages(
@@ -368,57 +355,6 @@ export function listGmailHistory(
   );
 }
 
-export async function listGmailLabels(accessToken: string): Promise<GmailLabel[]> {
-  const response = await gmailRequest<{ labels?: GmailLabel[] }>(
-    accessToken,
-    "/users/me/labels",
-  );
-  return response.labels ?? [];
-}
-
-export function getGmailLabel(
-  accessToken: string,
-  labelId: string,
-): Promise<GmailLabel> {
-  return gmailRequest<GmailLabel>(
-    accessToken,
-    `/users/me/labels/${encodeURIComponent(labelId)}`,
-  );
-}
-
-export function createGmailLabel(
-  accessToken: string,
-  label: GmailLabelInput,
-): Promise<GmailLabel> {
-  return gmailRequest<GmailLabel>(accessToken, "/users/me/labels", {
-    method: "POST",
-    data: label,
-  });
-}
-
-export function updateGmailLabel(
-  accessToken: string,
-  labelId: string,
-  changes: Partial<GmailLabelInput>,
-): Promise<GmailLabel> {
-  return gmailRequest<GmailLabel>(
-    accessToken,
-    `/users/me/labels/${encodeURIComponent(labelId)}`,
-    { method: "PATCH", data: changes },
-  );
-}
-
-export async function deleteGmailLabel(
-  accessToken: string,
-  labelId: string,
-): Promise<void> {
-  await gmailRequest<unknown>(
-    accessToken,
-    `/users/me/labels/${encodeURIComponent(labelId)}`,
-    { method: "DELETE" },
-  );
-}
-
 export function modifyGmailMessageLabels(
   accessToken: string,
   messageId: string,
@@ -428,19 +364,7 @@ export function modifyGmailMessageLabels(
     accessToken,
     `/users/me/messages/${encodeURIComponent(messageId)}/modify`,
     { method: "POST", data: changes },
-  );
-}
-
-export function modifyGmailThreadLabels(
-  accessToken: string,
-  threadId: string,
-  changes: { addLabelIds?: string[]; removeLabelIds?: string[] },
-): Promise<{ id: string; historyId?: string }> {
-  return gmailRequest<{ id: string; historyId?: string }>(
-    accessToken,
-    `/users/me/threads/${encodeURIComponent(threadId)}/modify`,
-    { method: "POST", data: changes },
-  );
+  ).then(filterGmailMessageState);
 }
 
 export function trashGmailMessage(
@@ -451,7 +375,7 @@ export function trashGmailMessage(
     accessToken,
     `/users/me/messages/${encodeURIComponent(messageId)}/trash`,
     { method: "POST" },
-  );
+  ).then(filterGmailMessageState);
 }
 
 export function untrashGmailMessage(
@@ -462,7 +386,7 @@ export function untrashGmailMessage(
     accessToken,
     `/users/me/messages/${encodeURIComponent(messageId)}/untrash`,
     { method: "POST" },
-  );
+  ).then(filterGmailMessageState);
 }
 
 export function listGmailDrafts(
@@ -486,7 +410,10 @@ export function getGmailDraft(
   return gmailRequest<GmailDraft>(
     accessToken,
     `/users/me/drafts/${encodeURIComponent(draftId)}?${search.toString()}`,
-  );
+  ).then((draft) => ({
+    ...draft,
+    message: filterGmailMessageState(draft.message),
+  }));
 }
 
 function gmailDraftBody(draft: GmailDraftWrite): {
