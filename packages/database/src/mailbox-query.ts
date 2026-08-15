@@ -15,7 +15,6 @@ import { validate as validateUuid } from "uuid";
 import { getDatabase, type Database } from "./client";
 import {
   connectedAccounts,
-  gmailReplicaStates,
   labels,
   messageLabels,
   messages,
@@ -78,12 +77,8 @@ export async function queryInvookMailbox(
   database: Database = getDatabase(),
 ) {
   const [account] = await database
-    .select({ id: connectedAccounts.id, replicaState: gmailReplicaStates.state })
+    .select({ id: connectedAccounts.id })
     .from(connectedAccounts)
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(connectedAccounts.userId, input.userId),
@@ -94,9 +89,6 @@ export async function queryInvookMailbox(
     .limit(1);
   if (!account) {
     return { status: "unavailable" as const, reason: "mailbox_not_connected" as const };
-  }
-  if (account.replicaState !== "ready") {
-    return { status: "unavailable" as const, reason: "replica_not_ready" as const };
   }
 
   const limit = Math.max(1, Math.min(input.limit ?? 25, 50));

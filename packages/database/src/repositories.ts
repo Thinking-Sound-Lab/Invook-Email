@@ -701,15 +701,13 @@ export async function searchMailbox(
     .from(messages)
     .innerJoin(threads, eq(threads.id, messages.threadId))
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(messages.userId, input.userId),
+        eq(threads.userId, input.userId),
+        eq(connectedAccounts.userId, input.userId),
+        eq(threads.accountId, connectedAccounts.id),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
         or(fullTextMatch, metadataMatch),
       ),
     )
@@ -736,15 +734,15 @@ export async function searchMailbox(
     .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
     .innerJoin(threads, eq(threads.id, messages.threadId))
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(messageAttachments.userId, input.userId),
+        eq(messages.userId, input.userId),
+        eq(threads.userId, input.userId),
+        eq(connectedAccounts.userId, input.userId),
+        eq(messageAttachments.accountId, connectedAccounts.id),
+        eq(threads.accountId, connectedAccounts.id),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
         sql`${messageAttachments.filenameSearchDocument} @@ ${tsQuery}`,
       ),
     )
@@ -774,6 +772,10 @@ export async function searchMailbox(
         .where(
           and(
             eq(messageEmbeddings.userId, input.userId),
+            eq(messages.userId, input.userId),
+            eq(threads.userId, input.userId),
+            eq(connectedAccounts.userId, input.userId),
+            eq(threads.accountId, connectedAccounts.id),
             eq(connectedAccounts.status, "connected"),
             eq(gmailReplicaStates.state, "ready"),
             eq(messageEmbeddings.modelId, input.embedding.modelId),
@@ -886,16 +888,12 @@ export async function getMailboxThreadForAgent(
     })
     .from(threads)
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(threads.id, threadId),
         eq(threads.userId, userId),
+        eq(connectedAccounts.userId, userId),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
       ),
     )
     .limit(1);
@@ -962,17 +960,16 @@ export async function listMailboxThreadAttachments(
     .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
     .innerJoin(threads, eq(threads.id, messages.threadId))
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(messageAttachments.userId, userId),
+        eq(messages.userId, userId),
         eq(threads.id, threadId),
         eq(threads.userId, userId),
+        eq(connectedAccounts.userId, userId),
+        eq(messageAttachments.accountId, connectedAccounts.id),
+        eq(threads.accountId, connectedAccounts.id),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
       ),
     )
     .orderBy(asc(messageAttachments.filename));
@@ -4446,16 +4443,12 @@ export async function getReplyDraftContext(
     })
     .from(threads)
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(threads.id, threadId),
         eq(threads.userId, userId),
+        eq(connectedAccounts.userId, userId),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
       ),
     )
     .limit(1);

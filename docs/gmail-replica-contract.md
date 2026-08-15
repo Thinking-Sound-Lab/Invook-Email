@@ -31,6 +31,14 @@ An account is unavailable to indexing, Memory, and AI-label workflows until this
 9. Atomically mark the replica ready at the final applied cursor.
 10. Only then publish embedding, Memory, and Invook-label derivation work.
 
+A connected account's stored messages remain usable while this sequence is in
+progress. Mailbox browsing, ordinary text and metadata search, attachment
+metadata, reply drafting, and provider-first Gmail actions operate only on
+specific messages or threads already committed to PostgreSQL. Missing rows stay
+unavailable, progress remains authoritative, and semantic indexing is not a
+prerequisite. Provider writes still converge through Gmail history; the final H0
+replay remains the only path that marks the replica ready.
+
 A successful normal synchronization does not run a separate full-replica audit.
 
 ## Pub/Sub admission

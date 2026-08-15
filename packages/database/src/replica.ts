@@ -52,17 +52,23 @@ export type GmailWatchInput = {
   expirationAt: Date;
 };
 
+export type GmailProviderWriteContext = {
+  userId: string;
+  accountId: string;
+  email: string;
+  tokenCiphertext: string;
+};
+
 export async function getGmailProviderWriteContext(
   userId: string,
   database: Database = getDatabase(),
-) {
+): Promise<GmailProviderWriteContext | null> {
   const [context] = await database
     .select({
       userId: connectedAccounts.userId,
       accountId: connectedAccounts.id,
       email: connectedAccounts.email,
       tokenCiphertext: accountSecrets.tokenCiphertext,
-      replicaState: gmailReplicaStates.state,
     })
     .from(connectedAccounts)
     .innerJoin(accountSecrets, eq(accountSecrets.accountId, connectedAccounts.id))
@@ -258,18 +264,14 @@ export async function getAiReplyDraftForGmailSave(
     .from(drafts)
     .innerJoin(threads, eq(threads.id, drafts.threadId))
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, drafts.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(drafts.id, input.draftId),
         eq(drafts.kind, "invook"),
         eq(drafts.userId, input.userId),
         eq(drafts.status, "editing"),
+        eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
       ),
     )
     .limit(1);

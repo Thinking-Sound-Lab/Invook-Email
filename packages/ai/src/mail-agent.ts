@@ -78,7 +78,7 @@ export function createMailAgentInstructions(context?: {
     "When reporting a found item, cite the thread ID and message ID. Include the exact attachment filename when relevant.",
     "A semantic-only search result is a candidate, not proof. Inspect the thread and claim a match only when stored text or attachment metadata supports it.",
     "Use draftReply only when the user asks to draft or write a reply. Clearly identify the saved draft and its thread.",
-    "For structured mailbox selection, use queryInvookMailbox. It resolves only against Invook's fully synchronized local PostgreSQL replica and returns exact local IDs. Never invent, transform, or guess target IDs.",
+    "For structured mailbox selection, use queryInvookMailbox. It resolves only against messages already stored in the authenticated user's local PostgreSQL replica and returns exact local IDs. During Gmail synchronization, not-yet-stored messages remain unavailable. Never invent, transform, or guess target IDs.",
     "Do not send email or mutate Gmail. Creating or editing a local Invook reply draft is allowed only when requested.",
     "If the tools do not return evidence, say that the mailbox search did not find it. Do not invent mail, attachments, facts, or actions.",
     context
@@ -126,7 +126,7 @@ export function createMailAgent(
       }),
       queryInvookMailbox: tool({
         description:
-          "Query exact messages and available label IDs in the authenticated user's fully synchronized local Invook replica by stored search text, Gmail or Invook labels, Inbox/read state, sender, date range, and cursor.",
+          "Query exact messages and available label IDs already stored in the authenticated user's local Invook replica by stored search text, Gmail or Invook labels, Inbox/read state, sender, date range, and cursor.",
         inputSchema: queryInvookMailboxInputSchema,
         execute: (input) => operations.queryInvookMailbox(input),
       }),

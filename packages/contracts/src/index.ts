@@ -271,7 +271,7 @@ export type MailboxQueryResult =
     }
   | {
       status: "unavailable";
-      reason: "replica_not_ready" | "mailbox_not_connected";
+      reason: "mailbox_not_connected";
       messages: [];
       availableGmailLabels?: never;
       availableInvookLabels?: never;

@@ -77,7 +77,7 @@ The left sidebar contains:
 
 The center pane shows the selected mailbox or label view in reverse chronological order. Selecting a thread replaces the list with the real thread.
 
-The right pane is the agent for Find and local Write. It reads only from the fully synchronized Invook replica and may create local drafts, but it has no Gmail mutation tools. Explicit product actions for archive, read state, star, Trash, Gmail labels, and Gmail Drafts write Gmail first and converge through provider history. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
+The right pane is the agent for Find and local Write. It reads only messages already stored in the authenticated user's Invook replica and may create local drafts, but it has no Gmail mutation tools. During initial synchronization, not-yet-stored messages remain unavailable and the UI continues to show authoritative sync progress. Explicit product actions for archive, read state, star, Trash, Gmail labels, and Gmail Drafts write Gmail first and converge through provider history. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
 
 ### Label settings
 
