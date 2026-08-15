@@ -25,7 +25,7 @@ export function AccountPipelineStripe({
     <div
       role={presentation.isFailed ? "alert" : "status"}
       aria-live="polite"
-      className="flex h-8 shrink-0 items-center justify-center bg-sidebar px-4 text-sidebar-foreground"
+      className="flex h-10 shrink-0 items-center justify-center bg-sidebar px-4 text-sidebar-foreground"
       title={`${presentation.title}: ${presentation.detail}`}
     >
       <div className="flex min-w-0 items-center justify-center gap-3">
@@ -36,7 +36,7 @@ export function AccountPipelineStripe({
           value={presentation.percentage}
           aria-label={`${presentation.title} for ${accountEmail}`}
           className={cn(
-            "h-1 w-28 shrink-0 bg-sidebar-accent sm:w-40",
+            "h-1.5 w-28 shrink-0 bg-sidebar-accent sm:w-40",
             presentation.isFailed &&
               "[&_[data-slot=progress-indicator]]:bg-destructive",
           )}
