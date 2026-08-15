@@ -144,6 +144,7 @@ export function MailSidebar({
         <SettingsDialog
           account={account}
           memories={memories}
+          gmailUserLabels={gmailUserLabels}
           invookLabels={invookLabels}
           aiConfigured={aiConfigured}
           batchConfigured={batchConfigured}

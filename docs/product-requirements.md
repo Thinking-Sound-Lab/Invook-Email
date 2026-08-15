@@ -81,7 +81,7 @@ The right pane is the agent for Find and local Write. It reads only from the ful
 
 ### Label settings
 
-Settings lists each user-created Invook label, its classification description, real analysis progress, and a delete control. Deletion also removes that label's automatic and manual thread decisions and analysis history. Creating a label requires both a name and description. If native Batch is configured and Gmail indexing is complete, creation queues a durable BullMQ backfill through the transactional PostgreSQL outbox that checks every indexed thread. If Batch is unavailable, the label remains in an honest pending state. Gmail user labels appear in mailbox navigation but are managed by Gmail and do not appear in Invook label settings.
+Settings lists every Gmail user label and user-created Invook label in one view. Gmail label deletion writes to Gmail first and converges locally through provider history; it never deletes the messages. Invook labels show their classification description and real analysis progress, and deleting one removes its automatic and manual thread decisions and analysis history. Creating an Invook label requires both a name and description. If native Batch is configured and Gmail indexing is complete, creation queues a durable BullMQ backfill through the transactional PostgreSQL outbox that checks every indexed thread. If Batch is unavailable, the label remains in an honest pending state.
 
 Creating a label is deliberately different from processing new mail: a new definition has no prior decisions, so it scans every indexed thread once. After that backfill, newly indexed mail invalidates and recomputes label decisions only for the affected threads.
 

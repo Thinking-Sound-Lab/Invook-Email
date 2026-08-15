@@ -9,6 +9,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
+  GmailUserLabel,
   InvookLabel,
   MailboxAccount,
   MemoryEntry,
@@ -120,6 +121,7 @@ function BillingSettings() {
 export interface SettingsDialogProps {
   account: MailboxAccount;
   memories: MemoryEntry[];
+  gmailUserLabels: GmailUserLabel[];
   invookLabels: InvookLabel[];
   aiConfigured: boolean;
   batchConfigured: boolean;
@@ -129,6 +131,7 @@ export interface SettingsDialogProps {
 export function SettingsDialog({
   account,
   memories,
+  gmailUserLabels,
   invookLabels,
   aiConfigured,
   batchConfigured,
@@ -158,38 +161,45 @@ export function SettingsDialog({
           <span className="hidden truncate lg:block">Settings</span>
         </button>
       </DialogTrigger>
-      <DialogContent className="h-[min(760px,calc(100dvh-2rem))] max-w-[min(1040px,calc(100%-2rem))] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 sm:max-w-[min(1040px,calc(100%-2rem))]">
-        <DialogHeader className="px-6 py-5 pr-14">
-          <DialogTitle className="text-lg font-semibold tracking-[-0.025em]">
-            Settings
-          </DialogTitle>
+      <DialogContent className="block h-[min(720px,calc(100dvh-2rem))] max-w-[min(1040px,calc(100%-2rem))] overflow-hidden bg-background p-0 sm:max-w-[min(1040px,calc(100%-2rem))]">
+        <DialogHeader className="sr-only">
+          <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
-            Manage your account, Memory, labels, and billing in one place.
+            Manage your account, Memory, labels, and billing.
           </DialogDescription>
         </DialogHeader>
-
         <Tabs
           defaultValue="account"
           orientation="vertical"
-          className="grid min-h-0 grid-cols-[64px_minmax(0,1fr)] gap-0 bg-background sm:grid-cols-[180px_minmax(0,1fr)]"
+          className="grid h-full min-h-0 grid-cols-[64px_minmax(0,1fr)] gap-0 sm:grid-cols-[210px_minmax(0,1fr)]"
         >
-          <TabsList
-            variant="line"
-            aria-label="Settings sections"
-            className="h-full w-full items-stretch justify-start gap-1 rounded-none bg-muted/35 p-3"
-          >
-            {settingsSections.map((section) => (
-              <TabsTrigger
-                key={section.value}
-                value={section.value}
-                className="h-10 w-full flex-none justify-start gap-2.5 px-3 text-[13px] after:inset-y-2 after:right-auto after:-left-3 after:h-auto after:w-0.5"
-                aria-label={section.label}
-              >
-                <HugeiconsIcon icon={section.icon} size={15} />
-                <span className="hidden sm:inline">{section.label}</span>
-              </TabsTrigger>
-            ))}
-          </TabsList>
+          <div className="flex h-full min-h-0 flex-col bg-muted/35 px-2 py-3 sm:px-3 sm:py-4">
+            <div className="mb-4 hidden px-3 pt-1 text-left sm:block">
+              <p className="text-sm font-semibold tracking-[-0.02em] text-foreground">
+                Settings
+              </p>
+              <p className="mt-1 truncate text-[11px] text-muted-foreground">
+                {account.email}
+              </p>
+            </div>
+            <TabsList
+              variant="line"
+              aria-label="Settings sections"
+              className="w-full items-stretch justify-start gap-1 rounded-none p-0"
+            >
+              {settingsSections.map((section) => (
+                <TabsTrigger
+                  key={section.value}
+                  value={section.value}
+                  className="h-9 w-full flex-none justify-center gap-2.5 px-2 text-[13px] after:hidden data-active:bg-background/80 sm:justify-start sm:px-3"
+                  aria-label={section.label}
+                >
+                  <HugeiconsIcon icon={section.icon} size={15} />
+                  <span className="hidden sm:inline">{section.label}</span>
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </div>
 
           <TabsContent value="account" className="min-h-0 overflow-y-auto">
             <AccountSettings account={account} aiConfigured={aiConfigured} />
@@ -203,6 +213,7 @@ export function SettingsDialog({
           </TabsContent>
           <TabsContent value="labels" className="min-h-0 overflow-y-auto">
             <LabelSettings
+              gmailUserLabels={gmailUserLabels}
               invookLabels={invookLabels}
               batchConfigured={batchConfigured}
             />
