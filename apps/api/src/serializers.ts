@@ -49,6 +49,7 @@ export async function serializeWorkspace(
     },
     memories: workspace.memories,
     invookLabels: workspace.invookLabels,
+    sidebarCounts: workspace.sidebarCounts,
     pagination: workspace.pagination,
     threads: workspace.threads.map((thread) => ({
       ...thread,

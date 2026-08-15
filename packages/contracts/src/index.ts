@@ -41,7 +41,8 @@ export const mailboxViews = [
   "trash",
 ] as const;
 
-export type MailboxView = (typeof mailboxViews)[number] | `label:${string}`;
+export type StaticMailboxView = (typeof mailboxViews)[number];
+export type MailboxView = StaticMailboxView | `label:${string}`;
 
 export type MessageLabelAnalysisState =
   | "pending"
@@ -324,12 +325,18 @@ export type MailboxPagination = {
   totalThreadCount: number;
 };
 
+export type MailboxSidebarCounts = {
+  views: Record<StaticMailboxView, number>;
+  labels: Record<string, number>;
+};
+
 export type MailboxWorkspace = {
   aiConfigured: boolean;
   batchConfigured: boolean;
   account: MailboxAccount;
   memories: MemoryEntry[];
   invookLabels: InvookLabel[];
+  sidebarCounts: MailboxSidebarCounts;
   pagination: MailboxPagination;
   threads: MailboxThreadSummary[];
   selectedThread: MailboxSelectedThread | null;

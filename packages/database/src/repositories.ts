@@ -6,6 +6,7 @@ import {
   type LabelHistoryWindowDays,
   type MailSyncProgress,
   type MailboxView,
+  type StaticMailboxView,
 } from "@invook/contracts";
 import {
   and,
@@ -99,6 +100,19 @@ const initialSyncState: AccountSyncState = {
 
 const mailboxPageSize = 100;
 
+const gmailProviderLabelByMailboxView = {
+  important: "IMPORTANT",
+  starred: "STARRED",
+  drafts: "DRAFT",
+  sent: "SENT",
+  spam: "SPAM",
+  trash: "TRASH",
+} as const satisfies Record<Exclude<StaticMailboxView, "all">, string>;
+
+const countedGmailProviderLabelIds = Object.values(
+  gmailProviderLabelByMailboxView,
+);
+
 const visibleMessageCondition = inArray(
   messages.labelAnalysisState,
   visibleMessageLabelAnalysisStates,
@@ -187,7 +201,7 @@ function mailboxViewCondition(view: MailboxView) {
     case "sent":
     case "spam":
     case "trash": {
-      const providerLabelId = view.toUpperCase();
+      const providerLabelId = gmailProviderLabelByMailboxView[view];
       return sql<boolean>`exists (
         select 1
         from ${messages}
@@ -201,6 +215,27 @@ function mailboxViewCondition(view: MailboxView) {
           and ${messages.labelAnalysisState} in ('complete', 'failed')
       )`;
     }
+  }
+}
+
+function mailboxViewForProviderLabelId(
+  providerLabelId: string | null,
+): Exclude<StaticMailboxView, "all"> | null {
+  switch (providerLabelId) {
+    case "IMPORTANT":
+      return "important";
+    case "STARRED":
+      return "starred";
+    case "DRAFT":
+      return "drafts";
+    case "SENT":
+      return "sent";
+    case "SPAM":
+      return "spam";
+    case "TRASH":
+      return "trash";
+    default:
+      return null;
   }
 }
 
@@ -1146,6 +1181,8 @@ export async function getMailboxWorkspace(
     memoryRows,
     invookLabelRows,
     selectedThreadRows,
+    [allThreadCount],
+    mailboxLabelCountRows,
   ] = await Promise.all([
     database
       .select({
@@ -1233,6 +1270,41 @@ export async function getMailboxWorkspace(
       )
       .orderBy(asc(labels.createdAt), asc(labels.name)),
     selectedThreadPromise,
+    database
+      .select({ value: countDistinct(messages.threadId) })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.userId, userId),
+          eq(messages.accountId, account.id),
+          visibleMessageCondition,
+        ),
+      ),
+    database
+      .select({
+        kind: labels.kind,
+        labelId: labels.id,
+        providerLabelId: labels.providerLabelId,
+        value: countDistinct(messages.threadId),
+      })
+      .from(messages)
+      .innerJoin(messageLabels, eq(messageLabels.messageId, messages.id))
+      .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+      .where(
+        and(
+          eq(messages.userId, userId),
+          eq(messages.accountId, account.id),
+          visibleMessageCondition,
+          or(
+            eq(labels.kind, "invook"),
+            and(
+              eq(labels.kind, "gmail"),
+              inArray(labels.providerLabelId, countedGmailProviderLabelIds),
+            ),
+          ),
+        ),
+      )
+      .groupBy(labels.kind, labels.id, labels.providerLabelId),
   ]);
   const [selectedThread] = selectedThreadRows;
   const hasExtraPage = rawMailboxThreads.length > mailboxPageSize;
@@ -1265,6 +1337,36 @@ export async function getMailboxWorkspace(
       definitionVersion: label.definitionVersion,
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
+
+  const sidebarViewCounts: Record<StaticMailboxView, number> = {
+    all: allThreadCount?.value ?? 0,
+    important: 0,
+    starred: 0,
+    drafts: 0,
+    sent: 0,
+    spam: 0,
+    trash: 0,
+  };
+  const countedInvookLabels = new Map<string, number>();
+  for (const countRow of mailboxLabelCountRows) {
+    if (countRow.kind === "invook") {
+      countedInvookLabels.set(countRow.labelId, countRow.value);
+      continue;
+    }
+    const countedView = mailboxViewForProviderLabelId(
+      countRow.providerLabelId,
+    );
+    if (countedView) sidebarViewCounts[countedView] = countRow.value;
+  }
+  const sidebarCounts = {
+    views: sidebarViewCounts,
+    labels: Object.fromEntries(
+      invookLabels.map((label) => [
+        label.id,
+        countedInvookLabels.get(label.id) ?? 0,
+      ]),
+    ),
+  };
 
   const threadIds = Array.from(
     new Set([
@@ -1382,6 +1484,7 @@ export async function getMailboxWorkspace(
       account,
       memories: serializedMemories,
       invookLabels,
+      sidebarCounts,
       pagination,
       threads: mailboxThreadsWithLabels,
       selectedThread: null,
@@ -1529,6 +1632,7 @@ export async function getMailboxWorkspace(
     account,
     memories: serializedMemories,
     invookLabels,
+    sidebarCounts,
     pagination,
     threads: mailboxThreadsWithLabels,
     selectedThread: {

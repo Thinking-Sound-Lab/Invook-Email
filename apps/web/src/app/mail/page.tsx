@@ -141,11 +141,12 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   } else {
     centerPane = (
       <MailList
-        account={workspace.account}
+        key={currentView}
+        accountEmail={workspace.account.email}
         currentView={currentView}
+        initialOlderCursor={workspace.pagination.olderCursor}
+        mailSyncState={workspace.account.syncState.mailSync}
         title={currentLabel?.name}
-        mailboxCursor={mailboxCursor}
-        pagination={workspace.pagination}
         threads={mailboxThreads}
         query={currentSurface === "search" ? query : undefined}
       />
@@ -162,6 +163,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           currentSurface={currentSurface}
           memories={workspace.memories}
           invookLabels={workspace.invookLabels}
+          sidebarCounts={workspace.sidebarCounts}
           aiConfigured={workspace.aiConfigured}
         />
         <div

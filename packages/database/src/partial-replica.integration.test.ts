@@ -50,6 +50,7 @@ interface PartialReplicaFixture {
   messageId: string;
   draftId: string;
   gmailLabelId: string;
+  invookLabelId: string;
   initialRunId: string;
 }
 
@@ -66,6 +67,8 @@ async function withPartialReplicaFixture(
   const messageId = uuidv4();
   const draftId = uuidv4();
   const gmailLabelId = uuidv4();
+  const gmailDraftLabelId = uuidv4();
+  const invookLabelId = uuidv4();
   const sentAt = new Date("2026-08-15T08:00:00.000Z");
   try {
     await database
@@ -144,23 +147,60 @@ async function withPartialReplicaFixture(
       labelAnalysisState: "complete",
       sentAt,
     });
-    await database.insert(labels).values({
-      id: gmailLabelId,
-      userId,
-      accountId,
-      kind: "gmail",
-      providerLabelId: "INBOX",
-      name: "Inbox",
-      normalizedName: "inbox",
-      providerType: "system",
-    });
-    await database.insert(messageLabels).values({
-      userId,
-      accountId,
-      messageId,
-      labelId: gmailLabelId,
-      source: "gmail",
-    });
+    await database.insert(labels).values([
+      {
+        id: gmailLabelId,
+        userId,
+        accountId,
+        kind: "gmail",
+        providerLabelId: "INBOX",
+        name: "Inbox",
+        normalizedName: "inbox",
+        providerType: "system",
+      },
+      {
+        id: gmailDraftLabelId,
+        userId,
+        accountId,
+        kind: "gmail",
+        providerLabelId: "DRAFT",
+        name: "Drafts",
+        normalizedName: "drafts",
+        providerType: "system",
+      },
+      {
+        id: invookLabelId,
+        userId,
+        accountId,
+        kind: "invook",
+        name: "Action needed",
+        normalizedName: "action needed",
+        description: "Requires a reply",
+      },
+    ]);
+    await database.insert(messageLabels).values([
+      {
+        userId,
+        accountId,
+        messageId,
+        labelId: gmailLabelId,
+        source: "gmail",
+      },
+      {
+        userId,
+        accountId,
+        messageId,
+        labelId: gmailDraftLabelId,
+        source: "gmail",
+      },
+      {
+        userId,
+        accountId,
+        messageId,
+        labelId: invookLabelId,
+        source: "user",
+      },
+    ]);
     await database.insert(messageAttachments).values({
       userId,
       accountId,
@@ -194,6 +234,7 @@ async function withPartialReplicaFixture(
       messageId,
       draftId,
       gmailLabelId,
+      invookLabelId,
       initialRunId,
     });
   } finally {
@@ -217,6 +258,7 @@ test(
         messageId,
         draftId,
         gmailLabelId,
+        invookLabelId,
       } = fixture;
       const missingThreadId = uuidv4();
 
@@ -230,6 +272,22 @@ test(
       assert.deepEqual(
         workspace?.selectedThread?.messages.map((message) => message.id),
         [messageId],
+      );
+      assert.deepEqual(workspace?.sidebarCounts.views, {
+        all: 1,
+        important: 0,
+        starred: 0,
+        drafts: 1,
+        sent: 0,
+        spam: 0,
+        trash: 0,
+      });
+      assert.equal(workspace?.sidebarCounts.labels[invookLabelId], 1);
+      assert.deepEqual(
+        (
+          await getMailboxWorkspace(userId, { view: "drafts" }, database)
+        )?.threads.map((thread) => thread.id),
+        [threadId],
       );
 
       const [textResults, metadataResults, attachmentResults] =
