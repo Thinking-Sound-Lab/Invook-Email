@@ -174,7 +174,7 @@ The user can inspect, edit, or delete feedback-derived Memory exactly like mail-
 
 ## Labels
 
-One classifier may apply zero or more Invook-owned labels to a message: the built-in Newsletter definition and any custom definitions active before that message's analysis completes. Labels are independent and not mutually exclusive. Important comes only from Gmail's `IMPORTANT` system ID and never reaches the model. Others is derived when a successfully analyzed message has no Newsletter match and is not persisted. Opaque Gmail user-label IDs are ignored, and Invook never lists or fetches the Gmail user-label catalog.
+One classifier may apply zero or more Invook-owned labels to a message: the built-in Newsletter definition and any custom definitions active before that message's analysis completes. Labels are independent and not mutually exclusive. Important comes only from Gmail's `IMPORTANT` system ID and never reaches the model. Others is derived only when a successfully analyzed message has neither Gmail Important nor any applied Invook label, and is not persisted. Opaque Gmail user-label IDs are ignored, and Invook never lists or fetches the Gmail user-label catalog.
 
 Every applied relationship is message-level. AI decision, confidence, model ID, definition version, and explicit user override or suppression live in `message_label_decisions`; the visible relationship lives only in `message_labels`. A message is excluded from normal mailbox, search, agent, attachment, and draft-context results while analysis is pending or running. Decisions, memberships, completion state, and the mailbox event commit atomically. A bounded terminal model failure becomes visible with real Gmail state and an explicit failed state, without fabricated matches.
 

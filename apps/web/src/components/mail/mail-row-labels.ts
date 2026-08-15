@@ -12,18 +12,20 @@ export function listMailRowLabels(
     "gmailLabels" | "invookLabels" | "isOthers"
   >,
 ): MailRowLabel[] {
-  const labels: MailRowLabel[] = [
-    ...thread.gmailLabels.flatMap((label) =>
+  const importantLabels = thread.gmailLabels.flatMap((label) =>
       label.providerLabelId === "IMPORTANT"
         ? [{ id: label.id, kind: "gmail" as const, name: label.name }]
         : [],
-    ),
-    ...thread.invookLabels.map((label) => ({
+    );
+  const invookLabels = thread.invookLabels.map((label) => ({
       id: label.labelId,
       kind: "invook" as const,
       name: label.name,
-    })),
-    ...(thread.isOthers
+    }));
+  const labels: MailRowLabel[] = [
+    ...importantLabels,
+    ...invookLabels,
+    ...(thread.isOthers && importantLabels.length === 0 && invookLabels.length === 0
       ? [{ id: "others", kind: "derived" as const, name: "Others" }]
       : []),
   ];

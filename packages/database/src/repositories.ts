@@ -1115,7 +1115,13 @@ export async function getMailboxWorkspace(
               on other_label.id = other_membership.label_id
             where other_message.thread_id = "threads"."id"
               and other_message.label_analysis_state in ('complete', 'failed')
-              and other_label.system_key = 'newsletter'
+              and (
+                other_label.kind = 'invook'
+                or (
+                  other_label.kind = 'gmail'
+                  and other_label.provider_label_id = 'IMPORTANT'
+                )
+              )
           )`,
           hasLabelAnalysisFailure: sql<boolean>`exists (
             select 1 from ${messages} failed_message
@@ -1161,7 +1167,13 @@ export async function getMailboxWorkspace(
             on other_label.id = other_membership.label_id
           where other_message.thread_id = "threads"."id"
             and other_message.label_analysis_state in ('complete', 'failed')
-            and other_label.system_key = 'newsletter'
+            and (
+              other_label.kind = 'invook'
+              or (
+                other_label.kind = 'gmail'
+                and other_label.provider_label_id = 'IMPORTANT'
+              )
+            )
         )`,
         hasLabelAnalysisFailure: sql<boolean>`exists (
           select 1 from ${messages} failed_message
@@ -1396,7 +1408,13 @@ export async function getMailboxWorkspace(
           inner join ${labels} other_label
             on other_label.id = other_membership.label_id
           where other_membership.message_id = "messages"."id"
-            and other_label.system_key = 'newsletter'
+            and (
+              other_label.kind = 'invook'
+              or (
+                other_label.kind = 'gmail'
+                and other_label.provider_label_id = 'IMPORTANT'
+              )
+            )
         )`,
         bodyHtml: messages.bodyHtml,
         rawChecksumSha256: messages.rawChecksumSha256,

@@ -55,6 +55,7 @@ function indexedMessage(input: {
   ingestionMode: "initial" | "incremental";
   historyId: string;
   sentAt?: Date;
+  isImportant?: boolean;
 }): IndexedMessage {
   const sentAt =
     input.sentAt ??
@@ -71,7 +72,9 @@ function indexedMessage(input: {
     participants: ["Sender <sender@example.com>"],
     gmailLabels: [
       { providerLabelId: "INBOX", name: "Inbox" },
-      { providerLabelId: "IMPORTANT", name: "Important" },
+      ...(input.isImportant === false
+        ? []
+        : [{ providerLabelId: "IMPORTANT", name: "Important" }]),
     ],
     providerHistoryId: input.historyId,
     internalDate: sentAt,
@@ -514,7 +517,7 @@ test(
       );
       assert.equal(historyResult.applied, true);
       const [historyMessage] = await database
-        .select({ id: messages.id })
+        .select({ id: messages.id, threadId: messages.threadId })
         .from(messages)
         .where(eq(messages.providerMessageId, "history-message"));
       assert.ok(historyMessage);
@@ -537,14 +540,70 @@ test(
           decisions: historyReady.definitions.map((definition) => ({
             labelId: definition.id,
             definitionVersion: definition.definitionVersion,
-            matched: definition.id === travel.id,
+            matched: false,
             confidence: 85,
           })),
         },
         database,
       );
       const historyWorkspace = await getMailboxWorkspace(userId, {}, database);
-      assert.ok(historyWorkspace?.threads.some((thread) => thread.isOthers));
+      assert.equal(
+        historyWorkspace?.threads.find(
+          (thread) => thread.id === historyMessage.threadId,
+        )
+          ?.isOthers ?? false,
+        false,
+      );
+
+      const othersMessage = await upsertIndexedMessage(
+        indexedMessage({
+          userId,
+          accountId,
+          providerMessageId: "others-message",
+          providerThreadId: "others-thread",
+          subject: "No matching category",
+          ingestionMode: "incremental",
+          historyId: "104",
+          isImportant: false,
+        }),
+        database,
+      );
+      const othersCheckpoint = await queuedAnalysisCheckpoint(
+        database,
+        othersMessage.messageId,
+      );
+      const othersReady = await beginMessageLabelAnalysis(
+        { userId, accountId, checkpoint: othersCheckpoint },
+        database,
+      );
+      assert.equal(othersReady.status, "ready");
+      if (othersReady.status !== "ready") return;
+      await completeMessageLabelAnalysis(
+        {
+          userId,
+          accountId,
+          checkpoint: othersCheckpoint,
+          modelId: "test-classifier",
+          decisions: othersReady.definitions.map((definition) => ({
+            labelId: definition.id,
+            definitionVersion: definition.definitionVersion,
+            matched: false,
+            confidence: 88,
+          })),
+        },
+        database,
+      );
+      const othersWorkspace = await getMailboxWorkspace(
+        userId,
+        { selectedThreadId: othersMessage.threadId },
+        database,
+      );
+      assert.equal(
+        othersWorkspace?.threads.find((thread) => thread.id === othersMessage.threadId)
+          ?.isOthers,
+        true,
+      );
+      assert.equal(othersWorkspace?.selectedThread?.messages[0]?.isOthers, true);
 
       const staleMessage = await upsertIndexedMessage(
         indexedMessage({

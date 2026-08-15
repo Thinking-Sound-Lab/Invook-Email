@@ -71,3 +71,30 @@ test("mail row labels expose Others from the authoritative derived state", () =>
     { id: "others", kind: "derived", name: "Others" },
   ]);
 });
+
+test("mail row labels never combine Others with Important or an Invook label", () => {
+  const labels = listMailRowLabels({
+    gmailLabels: [
+      {
+        id: "gmail-important-label",
+        providerLabelId: "IMPORTANT",
+        name: "Important",
+        type: "system",
+      },
+    ],
+    invookLabels: [
+      {
+        labelId: "security-label",
+        name: "Security",
+        source: "ai",
+        confidence: 0.96,
+      },
+    ],
+    isOthers: true,
+  });
+
+  assert.deepEqual(labels, [
+    { id: "gmail-important-label", kind: "gmail", name: "Important" },
+    { id: "security-label", kind: "invook", name: "Security" },
+  ]);
+});
