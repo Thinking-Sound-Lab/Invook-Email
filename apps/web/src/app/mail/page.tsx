@@ -63,13 +63,6 @@ function normalizeSurface(value: string | undefined): MailSurface {
   return value && mailSurfaces.has(value as MailSurface) ? (value as MailSurface) : "mail";
 }
 
-function hasInvookLabel(
-  thread: MailThreadSummary,
-  systemKey: "important" | "travel" | "pitch" | "newsletter",
-): boolean {
-  return thread.invookLabels.some((label) => label.systemKey === systemKey);
-}
-
 export default async function MailPage({ searchParams }: MailPageProps) {
   await connection();
   const params = await searchParams;
@@ -113,23 +106,19 @@ export default async function MailPage({ searchParams }: MailPageProps) {
       </main>
     );
   }
-  const currentLabel = currentView.startsWith("label:")
-    ? workspace.labels.find((label) => label.id === currentView.slice("label:".length))
+  const currentLabelId = currentView.startsWith("label:")
+    ? currentView.slice("label:".length)
+    : null;
+  const currentLabel = currentLabelId
+    ? [...workspace.gmailUserLabels, ...workspace.invookLabels].find(
+        (label) => label.id === currentLabelId,
+      )
     : null;
 
   const mailboxThreads = workspace.threads as MailThreadSummary[];
   const selectedThread = workspace.selectedThread as SelectedThread | null;
   const searchResults =
     currentSurface === "search" && query ? await searchMailbox(query) : [];
-  const filteredThreads = mailboxThreads;
-  const importantThreads =
-    currentView === "all" && !query
-      ? filteredThreads.filter((thread) => hasInvookLabel(thread, "important"))
-      : [];
-  const remainingThreads =
-    currentView === "all" && !query
-      ? filteredThreads.filter((thread) => !hasInvookLabel(thread, "important"))
-      : filteredThreads;
 
   let centerPane: React.ReactNode;
   if (selectedThread) {
@@ -139,7 +128,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         currentView={currentView}
         mailboxCursor={mailboxCursor}
         aiConfigured={workspace.aiConfigured}
-        availableLabels={workspace.labels}
+        availableLabels={workspace.invookLabels}
       />
     );
   } else if (currentSurface === "compose") {
@@ -156,12 +145,10 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         account={workspace.account}
         currentView={currentView}
         title={currentLabel?.name}
-        importantThreads={importantThreads}
         mailboxCursor={mailboxCursor}
         pagination={workspace.pagination}
-        remainingThreads={remainingThreads}
+        threads={mailboxThreads}
         query={currentSurface === "search" ? query : undefined}
-        importantView={currentLabel?.systemKey === "important"}
       />
     );
   }
@@ -175,7 +162,8 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           currentView={currentView}
           currentSurface={currentSurface}
           memories={workspace.memories}
-          labels={workspace.labels}
+          gmailUserLabels={workspace.gmailUserLabels}
+          invookLabels={workspace.invookLabels}
           aiConfigured={workspace.aiConfigured}
           batchConfigured={workspace.batchConfigured}
         />

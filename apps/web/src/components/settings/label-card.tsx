@@ -1,6 +1,6 @@
 import { Delete02Icon, Tag01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { MailLabel } from "@invook/contracts";
+import type { InvookLabel } from "@invook/contracts";
 
 import {
   AlertDialog,
@@ -17,10 +17,10 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 
 export interface LabelCardProps {
-  label: MailLabel;
+  label: InvookLabel;
   batchConfigured: boolean;
   deleting: boolean;
-  onDelete: (label: MailLabel) => Promise<void>;
+  onDelete: (label: InvookLabel) => Promise<void>;
 }
 
 export function LabelCard({

@@ -2,12 +2,10 @@ import { createHash } from "node:crypto";
 
 import {
   MAIL_EMBEDDING_DIMENSIONS,
-  systemLabelDefinitions,
   type IndexingProgress,
   type LabelAnalysisState,
   type MailSyncProgress,
   type MailboxView,
-  type SystemLabelKey,
 } from "@invook/contracts";
 import {
   and,
@@ -181,22 +179,10 @@ function mailboxViewCondition(view: MailboxView) {
   switch (view) {
     case "all":
       return undefined;
-    case "travel":
-    case "important":
-    case "pitch":
-    case "newsletter":
-      return sql<boolean>`exists (
-        select 1
-        from ${messages}
-        inner join ${messageLabels} on ${messageLabels.messageId} = ${messages.id}
-        inner join ${labels} on ${labels.id} = ${messageLabels.labelId}
-        where ${messages.threadId} = ${threads.id}
-          and ${labels.kind} = 'invook'
-          and ${labels.systemKey} = ${view}
-      )`;
     case "starred":
     case "drafts":
     case "sent":
+    case "spam":
     case "trash": {
       const providerLabelId = view.toUpperCase();
       return sql<boolean>`exists (
@@ -552,19 +538,6 @@ export async function saveNewGmailConnection(
         ...input.watch,
         lastRenewedAt: input.authenticatedAt,
       });
-    await transaction.insert(labels).values(
-      systemLabelDefinitions.map((definition) => ({
-        userId: input.userId,
-        accountId: account.id,
-        kind: "invook" as const,
-        name: definition.name,
-        normalizedName: definition.name.toLowerCase(),
-        description: definition.description,
-        systemKey: definition.key,
-        definitionVersion: 1,
-        analysisState: "pending" as const,
-      })),
-    );
     await saveGmailCredential(transaction, input, account.id);
 
     await createInitialMailSyncRun(
@@ -1126,7 +1099,8 @@ export async function getMailboxWorkspace(
     rawMailboxThreads,
     [threadCount],
     memoryRows,
-    mailLabelRows,
+    gmailUserLabelRows,
+    invookLabelRows,
     [threadCountRow],
     analyzedCounts,
     selectedThreadRows,
@@ -1176,9 +1150,26 @@ export async function getMailboxWorkspace(
     database
       .select({
         id: labels.id,
+        providerLabelId: labels.providerLabelId,
+        name: labels.name,
+        type: labels.providerType,
+        color: labels.color,
+      })
+      .from(labels)
+      .where(
+        and(
+          eq(labels.userId, userId),
+          eq(labels.accountId, account.id),
+          eq(labels.kind, "gmail"),
+          eq(labels.providerType, "user"),
+        ),
+      )
+      .orderBy(asc(labels.name)),
+    database
+      .select({
+        id: labels.id,
         name: labels.name,
         description: labels.description,
-        systemKey: labels.systemKey,
         definitionVersion: labels.definitionVersion,
         analysisState: labels.analysisState,
         createdAt: labels.createdAt,
@@ -1244,32 +1235,29 @@ export async function getMailboxWorkspace(
       entry.value,
     ]),
   );
-  const systemLabelOrder = new Map(
-    systemLabelDefinitions.map((definition, index) => [definition.key, index]),
+  const gmailUserLabels = gmailUserLabelRows.flatMap((label) =>
+    label.providerLabelId && label.type === "user"
+      ? [{
+          id: label.id,
+          providerLabelId: label.providerLabelId,
+          name: label.name,
+          type: label.type,
+          color: label.color,
+        }]
+      : [],
   );
-  const serializedLabels = mailLabelRows
+  const invookLabels = invookLabelRows
     .map((label) => ({
       id: label.id,
       name: label.name,
       description: label.description,
-      systemKey: label.systemKey,
       definitionVersion: label.definitionVersion,
       analysisState: label.analysisState,
       analyzedThreadCount:
         analyzedCountByLabel.get(`${label.id}:${label.definitionVersion}`) ?? 0,
       totalThreadCount: threadCountRow?.value ?? 0,
     }))
-    .sort((left, right) => {
-      if (left.systemKey && right.systemKey) {
-        return (
-          (systemLabelOrder.get(left.systemKey) ?? 0) -
-          (systemLabelOrder.get(right.systemKey) ?? 0)
-        );
-      }
-      if (left.systemKey) return -1;
-      if (right.systemKey) return 1;
-      return left.name.localeCompare(right.name);
-    });
+    .sort((left, right) => left.name.localeCompare(right.name));
 
   const threadIds = Array.from(
     new Set([
@@ -1284,7 +1272,6 @@ export async function getMailboxWorkspace(
             threadId: messages.threadId,
             labelId: messageLabels.labelId,
             name: labels.name,
-            systemKey: labels.systemKey,
             source: messageLabels.source,
             confidence: messageLabelDecisions.confidence,
           })
@@ -1366,7 +1353,6 @@ export async function getMailboxWorkspace(
           {
             labelId: label.labelId,
             name: label.name,
-            systemKey: label.systemKey,
             source: label.source === "user" ? "user" as const : "ai" as const,
             confidence:
               label.confidence === null ? null : Number(label.confidence),
@@ -1387,7 +1373,8 @@ export async function getMailboxWorkspace(
     return {
       account,
       memories: serializedMemories,
-      labels: serializedLabels,
+      gmailUserLabels,
+      invookLabels,
       pagination,
       threads: mailboxThreadsWithLabels,
       selectedThread: null,
@@ -1513,7 +1500,8 @@ export async function getMailboxWorkspace(
   return {
     account,
     memories: serializedMemories,
-    labels: serializedLabels,
+    gmailUserLabels,
+    invookLabels,
     pagination,
     threads: mailboxThreadsWithLabels,
     selectedThread: {
@@ -2536,7 +2524,7 @@ function isUniqueViolation(error: unknown) {
   );
 }
 
-export async function createUserLabel(
+export async function createInvookLabel(
   input: { userId: string; name: string; description: string },
   database: Database = getDatabase(),
 ) {
@@ -2587,7 +2575,6 @@ export async function createUserLabel(
           name: input.name.trim().replace(/\s+/g, " "),
           normalizedName,
           description: input.description.trim().replace(/\s+/g, " "),
-          systemKey: null,
           definitionVersion: 1,
           analysisState: "pending",
         })
@@ -2619,7 +2606,6 @@ export async function createUserLabel(
         id: label.id,
         name: label.name,
         description: label.description,
-        systemKey: label.systemKey,
         definitionVersion: label.definitionVersion,
         analysisState: label.analysisState,
         analyzedThreadCount: 0,
@@ -2634,7 +2620,7 @@ export async function createUserLabel(
   }
 }
 
-export async function deleteUserLabel(
+export async function deleteInvookLabel(
   input: { userId: string; labelId: string },
   database: Database = getDatabase(),
 ) {
@@ -2642,9 +2628,6 @@ export async function deleteUserLabel(
     const [label] = await transaction
       .select({
         id: labels.id,
-        accountId: labels.accountId,
-        name: labels.name,
-        systemKey: labels.systemKey,
       })
       .from(labels)
       .where(
@@ -3073,7 +3056,6 @@ export async function setUserThreadLabel(
       .select({
         labelId: messageLabels.labelId,
         name: labels.name,
-        systemKey: labels.systemKey,
         source: messageLabels.source,
         confidence: messageLabelDecisions.confidence,
       })
@@ -3098,7 +3080,6 @@ export async function setUserThreadLabel(
           {
             labelId: appliedLabel.labelId,
             name: appliedLabel.name,
-            systemKey: appliedLabel.systemKey,
             source: appliedLabel.source === "user" ? "user" as const : "ai" as const,
             confidence:
               appliedLabel.confidence === null

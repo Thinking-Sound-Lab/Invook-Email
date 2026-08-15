@@ -26,7 +26,7 @@ Invook never ships dummy mailbox, contact, memory, label, or draft data. If Gmai
 
 ### Opinionated defaults, user authority
 
-Invook provides built-in Important, Travel, Pitch, and Newsletter labels. A user may add an account-owned label with an explicit description, which becomes the complete classification rule for a full indexed-mailbox scan. A user's thread-level label decision wins over later model runs.
+A user may add an account-owned Invook label with an explicit description, which becomes the complete classification rule for a full indexed-mailbox scan. Gmail user labels remain provider-owned replica state and are not analyzed as Invook labels. A user's thread-level Invook label decision wins over later model runs.
 
 User-written Memory is authoritative. Automatic inference must not silently overwrite it.
 
@@ -72,16 +72,16 @@ Historical search indexing uses durable 2,000-message provider batches. A signed
 The left sidebar contains:
 
 - Compose, Search, Settings, Automations;
-- All plus every built-in or user-created label owned by the connected account;
+- All plus every Gmail user-created label and Invook user-created label owned by the connected account;
 - mail views: Starred, Shared, Reminders, Scheduled, Drafts, Done, Sent, Trash.
 
-The center pane shows Important mail first, then a divider, then the remaining mail. Selecting a thread replaces the list with the real thread.
+The center pane shows the selected mailbox or label view in reverse chronological order. Selecting a thread replaces the list with the real thread.
 
 The right pane is the agent for Find and local Write. It reads only from the fully synchronized Invook replica and may create local drafts, but it has no Gmail mutation tools. Explicit product actions for archive, read state, star, Trash, Gmail labels, and Gmail Drafts write Gmail first and converge through provider history. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
 
 ### Label settings
 
-Settings lists each label, its classification description, real analysis progress, and a delete control. Every label, including a built-in label, can be deleted. Deletion also removes that label's automatic and manual thread decisions and analysis history. Creating a label requires both a name and description. If native Batch is configured and Gmail indexing is complete, creation queues a durable BullMQ backfill through the transactional PostgreSQL outbox that checks every indexed thread. If Batch is unavailable, the label remains in an honest pending state.
+Settings lists each user-created Invook label, its classification description, real analysis progress, and a delete control. Deletion also removes that label's automatic and manual thread decisions and analysis history. Creating a label requires both a name and description. If native Batch is configured and Gmail indexing is complete, creation queues a durable BullMQ backfill through the transactional PostgreSQL outbox that checks every indexed thread. If Batch is unavailable, the label remains in an honest pending state. Gmail user labels appear in mailbox navigation but are managed by Gmail and do not appear in Invook label settings.
 
 Creating a label is deliberately different from processing new mail: a new definition has no prior decisions, so it scans every indexed thread once. After that backfill, newly indexed mail invalidates and recomputes label decisions only for the affected threads.
 
@@ -174,12 +174,7 @@ The user can inspect, edit, or delete feedback-derived Memory exactly like mail-
 
 ## Labels
 
-Model classification may apply zero or more of:
-
-- **Important:** timely attention, reply, decision, or meaningful consequence;
-- **Travel:** bookings, itineraries, lodging, visas, check-in, or trip changes;
-- **Pitch:** sales, recruiting, partnership, fundraising, sponsorship, or service proposals;
-- **Newsletter:** recurring editorial, digest, product update, community update, or bulk marketing publication.
+Model classification may apply zero or more user-created Invook labels. Each label's user-authored description is its complete classification rule. Replicated Gmail system and user labels are provider-owned state and are never model-classified by Invook.
 
 Every applied relationship is message-level. AI confidence, model ID, definition version, and explicit user override or suppression live in `message_label_decisions`; the visible relationship lives only in `message_labels`. Thread display is aggregated from current messages.
 

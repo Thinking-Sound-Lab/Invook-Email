@@ -9,8 +9,8 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
+  InvookLabel,
   MailboxAccount,
-  MailLabel,
   MemoryEntry,
 } from "@invook/contracts";
 import { useState } from "react";
@@ -120,7 +120,7 @@ function BillingSettings() {
 export interface SettingsDialogProps {
   account: MailboxAccount;
   memories: MemoryEntry[];
-  labels: MailLabel[];
+  invookLabels: InvookLabel[];
   aiConfigured: boolean;
   batchConfigured: boolean;
   triggerClassName?: string;
@@ -129,7 +129,7 @@ export interface SettingsDialogProps {
 export function SettingsDialog({
   account,
   memories,
-  labels,
+  invookLabels,
   aiConfigured,
   batchConfigured,
   triggerClassName,
@@ -202,7 +202,10 @@ export function SettingsDialog({
             />
           </TabsContent>
           <TabsContent value="labels" className="min-h-0 overflow-y-auto">
-            <LabelSettings labels={labels} batchConfigured={batchConfigured} />
+            <LabelSettings
+              invookLabels={invookLabels}
+              batchConfigured={batchConfigured}
+            />
           </TabsContent>
           <TabsContent value="billing" className="min-h-0 overflow-y-auto">
             <BillingSettings />

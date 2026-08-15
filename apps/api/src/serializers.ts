@@ -48,7 +48,8 @@ export async function serializeWorkspace(
       },
     },
     memories: workspace.memories,
-    labels: workspace.labels,
+    gmailUserLabels: workspace.gmailUserLabels,
+    invookLabels: workspace.invookLabels,
     pagination: workspace.pagination,
     threads: workspace.threads.map((thread) => ({
       ...thread,

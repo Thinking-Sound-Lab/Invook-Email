@@ -1,8 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
 
 import {
-  createUserLabel,
-  deleteUserLabel,
+  createInvookLabel,
+  deleteInvookLabel,
   LabelConflictError,
 } from "@invook/database";
 
@@ -47,7 +47,7 @@ export const registerLabelRoutes: FastifyPluginAsync = async (api) => {
       }
 
       try {
-        const label = await createUserLabel({
+        const label = await createInvookLabel({
           userId: session.userId,
           name: normalize(name),
           description: normalize(description),
@@ -83,7 +83,7 @@ export const registerLabelRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      const deleted = await deleteUserLabel({
+      const deleted = await deleteInvookLabel({
         userId: session.userId,
         labelId: request.params.labelId,
       });

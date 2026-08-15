@@ -9,6 +9,10 @@ const migrationUrl = new URL(
   "../drizzle/0021_nervous_lucky_pierre.sql",
   import.meta.url,
 );
+const removeBuiltInLabelsMigrationUrl = new URL(
+  "../drizzle/0022_burly_magneto.sql",
+  import.meta.url,
+);
 const schemaUrl = new URL("./schema.ts", import.meta.url);
 const migrationsUrl = new URL("../drizzle/", import.meta.url);
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -77,6 +81,16 @@ test("the consolidated provider identities retain account-scoped uniqueness", as
   assert.match(
     migration,
     /CREATE UNIQUE INDEX "message_labels_message_label_idx" ON "message_labels" \("message_id", "label_id"\)/,
+  );
+});
+
+test("the built-in Invook labels are deleted before system_key is removed", async () => {
+  const migration = await readFile(removeBuiltInLabelsMigrationUrl, "utf8");
+
+  assertBefore(
+    migration,
+    `DELETE FROM "labels"\nWHERE "kind" = 'invook' AND "system_key" IS NOT NULL`,
+    'ALTER TABLE "labels" DROP COLUMN "system_key"',
   );
 });
 

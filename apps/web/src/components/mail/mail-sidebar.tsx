@@ -1,26 +1,24 @@
 import {
-  Airplane01Icon,
+  AiMagicIcon,
   Delete02Icon,
   FileEditIcon,
-  HonourStarIcon,
   InboxIcon,
   Logout01Icon,
   Mail01Icon,
-  Megaphone01Icon,
-  News01Icon,
   PencilEdit01Icon,
   Search02Icon,
   SentIcon,
+  SpamIcon,
   StarIcon,
   Tag01Icon,
   WorkflowSquare01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
+  GmailUserLabel,
+  InvookLabel,
   MailboxAccount,
-  MailLabel,
   MemoryEntry,
-  SystemLabelKey,
 } from "@invook/contracts";
 import Link from "next/link";
 
@@ -31,6 +29,7 @@ import { cn } from "@/lib/utils";
 import { AccountPipelineProgress } from "./account-pipeline-progress";
 import { initials } from "./mail-format";
 import { MailNavigationPending } from "./mail-navigation-pending";
+import { listSidebarLabels } from "./mail-sidebar-labels";
 import type { MailboxView, MailSurface } from "./types";
 
 const workspaceItems = [
@@ -44,17 +43,11 @@ const automationsItem = {
   surface: "automations",
 } as const;
 
-const labelIcons = {
-  important: HonourStarIcon,
-  travel: Airplane01Icon,
-  pitch: Megaphone01Icon,
-  newsletter: News01Icon,
-} satisfies Record<SystemLabelKey, typeof Tag01Icon>;
-
 const mailItems = [
   { label: "Starred", icon: StarIcon, view: "starred" },
   { label: "Drafts", icon: FileEditIcon, view: "drafts" },
   { label: "Sent", icon: SentIcon, view: "sent" },
+  { label: "Spam", icon: SpamIcon, view: "spam" },
   { label: "Trash", icon: Delete02Icon, view: "trash" },
 ] as const;
 
@@ -97,7 +90,8 @@ export interface MailSidebarProps {
   currentView: MailboxView;
   currentSurface: MailSurface;
   memories: MemoryEntry[];
-  labels: MailLabel[];
+  gmailUserLabels: GmailUserLabel[];
+  invookLabels: InvookLabel[];
   aiConfigured: boolean;
   batchConfigured: boolean;
 }
@@ -107,10 +101,13 @@ export function MailSidebar({
   currentView,
   currentSurface,
   memories,
-  labels,
+  gmailUserLabels,
+  invookLabels,
   aiConfigured,
   batchConfigured,
 }: MailSidebarProps) {
+  const labels = listSidebarLabels({ gmailUserLabels, invookLabels });
+
   return (
     <aside className="flex min-h-0 flex-col bg-sidebar px-2 py-3 lg:px-3" aria-label="Mailbox navigation">
       <div className="flex h-11 items-center gap-2.5 px-1.5 lg:px-2">
@@ -147,7 +144,7 @@ export function MailSidebar({
         <SettingsDialog
           account={account}
           memories={memories}
-          labels={labels}
+          invookLabels={invookLabels}
           aiConfigured={aiConfigured}
           batchConfigured={batchConfigured}
           triggerClassName={navItemClassName(false)}
@@ -177,7 +174,7 @@ export function MailSidebar({
               <NavLink
                 key={label.id}
                 label={label.name}
-                icon={label.systemKey ? labelIcons[label.systemKey] : Tag01Icon}
+                icon={label.kind === "gmail" ? Tag01Icon : AiMagicIcon}
                 active={currentSurface === "mail" && currentView === view}
                 href={`/mail?view=${view}`}
               />

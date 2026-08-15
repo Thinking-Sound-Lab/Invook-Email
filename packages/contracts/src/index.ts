@@ -33,84 +33,39 @@ export type AccountSyncStatusEvent = {
 
 export const mailboxViews = [
   "all",
-  "travel",
-  "important",
-  "pitch",
-  "newsletter",
   "starred",
   "drafts",
   "sent",
+  "spam",
   "trash",
 ] as const;
 
 export type MailboxView = (typeof mailboxViews)[number] | `label:${string}`;
 
-export const systemLabelKeys = [
-  "important",
-  "travel",
-  "pitch",
-  "newsletter",
-] as const;
-
-export type SystemLabelKey = (typeof systemLabelKeys)[number];
-
-export const systemLabelDefinitions = [
-  {
-    key: "important",
-    name: "Important",
-    description:
-      "Requires timely attention, a reply, a decision, or has meaningful financial, legal, security, or personal consequence. Routine bulk mail does not belong here.",
-  },
-  {
-    key: "travel",
-    name: "Travel",
-    description:
-      "Bookings, itineraries, tickets, lodging, visas, check-in, transport, or trip changes.",
-  },
-  {
-    key: "pitch",
-    name: "Pitch",
-    description:
-      "Sales, recruiting, partnership, fundraising, investment, sponsorship, or service proposals.",
-  },
-  {
-    key: "newsletter",
-    name: "Newsletter",
-    description:
-      "Recurring editorial, digest, product-update, community-update, or marketing publications sent in bulk.",
-  },
-] as const satisfies ReadonlyArray<{
-  key: SystemLabelKey;
-  name: string;
-  description: string;
-}>;
-
 export type LabelAnalysisState = "pending" | "running" | "complete" | "failed";
 
-export type MailLabel = {
+export type InvookLabel = {
   id: string;
   name: string;
   description: string;
-  systemKey: SystemLabelKey | null;
   definitionVersion: number;
   analysisState: LabelAnalysisState;
   analyzedThreadCount: number;
   totalThreadCount: number;
 };
 
-export type CreateMailLabelRequest = {
+export type CreateInvookLabelRequest = {
   name: string;
   description: string;
 };
 
-export type MailLabelResponse = {
-  label: MailLabel;
+export type InvookLabelResponse = {
+  label: InvookLabel;
 };
 
 export type InvookThreadLabel = {
   labelId: string;
   name: string;
-  systemKey: SystemLabelKey | null;
   source: "ai" | "user";
   confidence: number | null;
 };
@@ -214,6 +169,10 @@ export type GmailLabel = {
   name: string;
   type: "system" | "user";
   color: { textColor?: string; backgroundColor?: string } | null;
+};
+
+export type GmailUserLabel = Omit<GmailLabel, "type"> & {
+  type: "user";
 };
 
 export type GmailDraftResource = {
@@ -336,7 +295,8 @@ export type MailboxWorkspace = {
   batchConfigured: boolean;
   account: MailboxAccount;
   memories: MemoryEntry[];
-  labels: MailLabel[];
+  gmailUserLabels: GmailUserLabel[];
+  invookLabels: InvookLabel[];
   pagination: MailboxPagination;
   threads: MailboxThreadSummary[];
   selectedThread: MailboxSelectedThread | null;

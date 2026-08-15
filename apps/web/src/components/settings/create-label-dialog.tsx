@@ -1,6 +1,6 @@
 "use client";
 
-import type { CreateMailLabelRequest } from "@invook/contracts";
+import type { CreateInvookLabelRequest } from "@invook/contracts";
 import { useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,7 @@ import { apiErrorMessage } from "@/lib/http-error";
 
 export interface CreateLabelDialogProps {
   onClose: () => void;
-  onCreate: (request: CreateMailLabelRequest) => Promise<void>;
+  onCreate: (request: CreateInvookLabelRequest) => Promise<void>;
 }
 
 export function CreateLabelDialog({ onClose, onCreate }: CreateLabelDialogProps) {

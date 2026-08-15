@@ -15,10 +15,7 @@ import {
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
-import type {
-  LabelAnalysisState,
-  SystemLabelKey,
-} from "@invook/contracts";
+import type { LabelAnalysisState } from "@invook/contracts";
 
 import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 
@@ -178,7 +175,6 @@ export const labels = pgTable(
     name: text("name").notNull(),
     normalizedName: text("normalized_name").notNull(),
     description: text("description").notNull().default(""),
-    systemKey: text("system_key").$type<SystemLabelKey>(),
     definitionVersion: integer("definition_version").notNull().default(1),
     analysisState: text("analysis_state")
       .$type<LabelAnalysisState>()
@@ -206,9 +202,6 @@ export const labels = pgTable(
     uniqueIndex("labels_account_invook_name_idx")
       .on(table.accountId, table.normalizedName)
       .where(sql`${table.kind} = 'invook'`),
-    uniqueIndex("labels_account_system_key_idx")
-      .on(table.accountId, table.systemKey)
-      .where(sql`${table.kind} = 'invook' and ${table.systemKey} is not null`),
     index("labels_account_created_idx").on(table.accountId, table.createdAt),
     index("labels_account_kind_idx").on(table.accountId, table.kind, table.name),
     check("labels_kind_check", sql`${table.kind} in ('gmail', 'invook')`),
@@ -219,11 +212,7 @@ export const labels = pgTable(
     ),
     check(
       "labels_kind_contract_check",
-      sql`(${table.kind} = 'gmail' and ${table.providerLabelId} is not null and ${table.providerType} in ('system', 'user') and ${table.systemKey} is null) or (${table.kind} = 'invook' and ${table.providerLabelId} is null and ${table.providerType} is null and char_length(btrim(${table.description})) > 0)`,
-    ),
-    check(
-      "labels_system_key_check",
-      sql`${table.systemKey} is null or ${table.systemKey} in ('important', 'travel', 'pitch', 'newsletter')`,
+      sql`(${table.kind} = 'gmail' and ${table.providerLabelId} is not null and ${table.providerType} in ('system', 'user')) or (${table.kind} = 'invook' and ${table.providerLabelId} is null and ${table.providerType} is null and char_length(btrim(${table.description})) > 0)`,
     ),
     check("labels_definition_version_check", sql`${table.definitionVersion} > 0`),
     check(

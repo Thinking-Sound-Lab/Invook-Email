@@ -1,6 +1,6 @@
 # Invook
 
-Invook is an open-source, AI-native Gmail client. It keeps a lossless local Gmail mailbox replica, applies built-in and user-defined Invook labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
+Invook is an open-source, AI-native Gmail client. It keeps a lossless local Gmail mailbox replica, applies user-created Invook labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
 
 The application starts with one Google sign-in action. Until a real Gmail account is connected, it shows an honest setup or empty state and never manufactures mailbox data.
 
@@ -9,7 +9,7 @@ The application starts with one Google sign-in action. Until a real Gmail accoun
 1. Direct Google OAuth authenticates the user and grants Gmail access.
 2. On first connection, the callback validates the Google identity, captures H0, registers a Gmail watch, encrypts the provider credentials with AES-256-GCM, and transactionally records exactly one replica run plus its first BullMQ step. Returning sign-in refreshes only the browser session, profile, and encrypted credentials; it preserves durable replica/watch/run state and queues stored-cursor catch-up only when needed. Signing out clears only the browser session.
 3. A sequential page worker discovers every message in 500-result pages, including Spam and Trash, while configurable parallel per-message workers fetch exact raw MIME. Raw MIME and attachment bytes go to S3-compatible object storage with checksums; PostgreSQL stores complete headers, text/HTML, provider metadata, normalized labels and message memberships, Gmail Draft resources, watch state, pending/applied history cursors, and workflow checkpoints. Finalization replays history from H0, performs a final locked catch-up, and only then releases indexing, initial Memory, and Invook-label analysis concurrently.
-4. The selected native Batch provider checks every indexed thread against Invook's Important, Travel, Pitch, and Newsletter definitions. Settings can add a new label and description, which queues a full analysis of the already-indexed mailbox for that label. Applied relationships and explicit user overrides are persisted per message; thread display is calculated from current messages.
+4. Settings can add an Invook label and description, which queues the selected native Batch provider to analyze every already-indexed thread against that user-created definition. Applied relationships and explicit user overrides are persisted per message; thread display is calculated from current messages. Replicated Gmail labels remain provider-owned and are never sent through Invook label analysis.
 5. Initial Memory analysis sends all eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Later eligible owner-sent messages accumulate as targeted global and contact evidence without rescanning the original mailbox. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
    - **Preferences:** repeated behavior that applies across contacts and should shape every draft.
    - **Contacts:** repeated communication behavior for one normalized email address.

@@ -1,20 +1,22 @@
 import type {
-  CreateMailLabelRequest,
+  CreateInvookLabelRequest,
   DeletedResourceResponse,
+  InvookLabel,
+  InvookLabelResponse,
   InvookThreadLabel,
-  MailLabel,
-  MailLabelResponse,
   SetThreadLabelRequest,
   ThreadLabelsResponse,
 } from "@invook/contracts";
 import axios from "axios";
 
-export async function createMailLabel(input: CreateMailLabelRequest): Promise<MailLabel> {
-  const response = await axios.post<MailLabelResponse>("/v1/labels", input);
+export async function createInvookLabel(
+  input: CreateInvookLabelRequest,
+): Promise<InvookLabel> {
+  const response = await axios.post<InvookLabelResponse>("/v1/labels", input);
   return response.data.label;
 }
 
-export async function deleteMailLabel(labelId: string): Promise<void> {
+export async function deleteInvookLabel(labelId: string): Promise<void> {
   await axios.delete<DeletedResourceResponse>(`/v1/labels/${labelId}`);
 }
 
