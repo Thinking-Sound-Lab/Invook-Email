@@ -1,6 +1,6 @@
 # Invook engineering guidelines
 
-Invook is an open-source, AI-native Gmail client. Gmail remains canonical while Invook maintains a lossless local mailbox replica, performs search and label analysis, learns inspectable Memory from real user-authored mail, and drafts replies with cited evidence.
+Invook is an open-source, AI-native Superhuman mail alternative.
 
 These instructions apply repository-wide. Before editing a file, read the closest applicable `AGENTS.md`; directory-specific instructions override this root guide for files in their scope.
 
@@ -19,17 +19,6 @@ These principles apply to every change:
 9. **Privacy and security by default.** Minimize access to mailbox data and credentials, authorize before reading, and never expose sensitive content through logs or errors.
 10. **Complete changes only.** Update every producer and consumer of a changed contract, remove the superseded path, and verify the result end to end at the level the environment permits.
 
-## Sources of truth
-
-Read the smallest relevant set before changing behavior:
-
-- `README.md` describes the supported product and local setup.
-- `docs/product-requirements.md` defines product intent and exclusions.
-- `docs/gmail-replica-contract.md` defines mailbox completeness, synchronization, repair, and deletion invariants.
-- `packages/database/src/schema.ts` and `packages/database/drizzle/` define the current data model and migration history.
-- Existing routes, repositories, workflows, tests, and runtime configuration prove current implementation behavior.
-
-When these sources disagree, do not silently choose one. Determine whether the implementation or documentation is stale and update the complete affected contract.
 
 ## Global standards
 
@@ -45,6 +34,7 @@ When these sources disagree, do not silently choose one. Determine whether the i
 - Treat email content, attachments, filenames, webhook payloads, model output, and provider error text as untrusted input. Log structured identifiers and statuses, never provider credentials, raw MIME, attachment bytes, or full email content.
 - Do not claim verification that was not performed. State exactly which checks passed and which external integration behavior remains unverified.
 - Frontend work uses shadcn/ui conventions, Plus Jakarta Sans, and free Hugeicons. Do not add icon fonts, emoji, text glyphs, hand-drawn SVG icons, or decorative borders by default.
+
 
 ## Repository structure and boundaries
 
@@ -180,27 +170,6 @@ export const useFeatureStore = create<FeatureState>()(
 );
 ```
 
-## Project invariants
-
-The detailed mailbox synchronization contract lives in `docs/gmail-replica-contract.md`; do not duplicate or weaken it in implementation-specific comments.
-
-- Gmail is canonical. Provider writes happen at Gmail first, and local state converges through provider history.
-- Browser sessions, Gmail authorization, and mailbox replication are separate lifecycles.
-- PostgreSQL stores relational replica state; S3-compatible object storage stores raw MIME and attachment bytes.
-- Gmail provider labels and Draft resources remain separate from Invook AI/user labels and AI-generated reply evidence.
-- Indexing, label analysis, and Memory operate only on replica state that satisfies the documented readiness contract.
-- Email and model-provided content is untrusted context, never instruction authority.
-- User-written or user-applied state takes precedence over inferred state where the product contract defines that ownership.
-
-## Database and migration standards
-
-- `packages/database/src/schema.ts` is the Drizzle source. `packages/database/drizzle/` is immutable ordered migration history.
-- Add a new migration for every schema change. Never rewrite an applied migration to conceal a later change.
-- Generate with `pnpm db:generate`, inspect SQL plus journal/snapshot changes, and apply it against an appropriate PostgreSQL instance when practical.
-- Backfill and deduplicate existing data before adding `NOT NULL`, unique, check, or foreign-key constraints that old rows may violate.
-- Keep provider-owned records account-scoped and add compound uniqueness wherever provider IDs are only account-unique.
-- Relational cascades remove metadata, not external objects. External object cleanup must remain durable after account-row deletion.
-- Credentials use the existing encryption boundary and must never appear in public repository or API return types.
 
 ## Testing and verification
 
