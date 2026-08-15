@@ -120,6 +120,7 @@ export async function queryInvookMailbox(
   const conditions = [
     eq(messages.userId, input.userId),
     eq(messages.accountId, account.id),
+    inArray(messages.labelAnalysisState, ["complete", "failed"]),
   ];
   if (input.candidateMessageIds) {
     conditions.push(inArray(messages.id, input.candidateMessageIds));

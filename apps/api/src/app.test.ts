@@ -187,6 +187,17 @@ test("authentication runs before JSON body parsing", async () => {
   assert.equal(response.json().title, "Authentication required");
 });
 
+test("custom label edits require authentication", async () => {
+  const response = await api.inject({
+    method: "PATCH",
+    url: "/v1/labels/00000000-0000-4000-8000-000000000000",
+    payload: { name: "Receipts", description: "Purchase receipts" },
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().title, "Authentication required");
+});
+
 test("mailbox refresh requires an authenticated session", async () => {
   const response = await api.inject({
     method: "POST",
@@ -380,12 +391,7 @@ test("account sync progress events require an authenticated session", async () =
 
 test("Gmail provider writes require an authenticated session", async () => {
   const requests = [
-    { method: "POST", url: "/v1/gmail/labels" },
-    { method: "PATCH", url: "/v1/gmail/labels/not-a-uuid" },
-    { method: "DELETE", url: "/v1/gmail/labels/not-a-uuid" },
-    { method: "PATCH", url: "/v1/gmail/messages/not-a-uuid/labels" },
     { method: "POST", url: "/v1/gmail/messages/not-a-uuid/actions" },
-    { method: "PATCH", url: "/v1/gmail/threads/not-a-uuid/labels" },
     { method: "PUT", url: "/v1/gmail/drafts/not-a-uuid" },
     { method: "DELETE", url: "/v1/gmail/drafts/not-a-uuid" },
     { method: "POST", url: "/v1/gmail/compose-drafts" },
@@ -401,6 +407,33 @@ test("Gmail provider writes require an authenticated session", async () => {
     const response = await api.inject(request);
     assert.equal(response.statusCode, 401, `${request.method} ${request.url}`);
     assert.equal(response.json().title, "Authentication required");
+  }
+});
+
+test("obsolete Gmail label catalog and generic label mutation routes are absent", async () => {
+  const requests = [
+    { method: "POST", url: "/v1/gmail/labels" },
+    {
+      method: "PATCH",
+      url: "/v1/gmail/labels/00000000-0000-4000-8000-000000000000",
+    },
+    {
+      method: "DELETE",
+      url: "/v1/gmail/labels/00000000-0000-4000-8000-000000000000",
+    },
+    {
+      method: "PATCH",
+      url: "/v1/gmail/messages/00000000-0000-4000-8000-000000000000/labels",
+    },
+    {
+      method: "PATCH",
+      url: "/v1/gmail/threads/00000000-0000-4000-8000-000000000000/labels",
+    },
+  ] as const;
+
+  for (const request of requests) {
+    const response = await api.inject(request);
+    assert.equal(response.statusCode, 404, `${request.method} ${request.url}`);
   }
 });
 

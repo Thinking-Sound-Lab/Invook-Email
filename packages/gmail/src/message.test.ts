@@ -54,7 +54,7 @@ test("raw MIME parsing preserves headers, bodies, bytes, and Gmail metadata", as
     historyId: "4321",
     internalDate: "1786527000000",
     sizeEstimate: mime.byteLength,
-    labelIds: ["INBOX", "Label_7"],
+    labelIds: ["INBOX", "IMPORTANT", "Label_7", "CATEGORY_PROMOTIONS"],
     snippet: "Complete plain text body.",
     raw: mime.toString("base64url"),
   });
@@ -64,7 +64,7 @@ test("raw MIME parsing preserves headers, bodies, bytes, and Gmail metadata", as
   assert.equal(parsed.historyId, "4321");
   assert.equal(parsed.internalDate, "1786527000000");
   assert.equal(parsed.sizeEstimate, mime.byteLength);
-  assert.deepEqual(parsed.labelIds, ["INBOX", "Label_7"]);
+  assert.deepEqual(parsed.labelIds, ["INBOX", "IMPORTANT"]);
   assert.deepEqual(parsed.raw, mime);
   assert.equal(parsed.rawSize, mime.byteLength);
   assert.equal(

@@ -20,6 +20,8 @@ function thread(
         ? latestMessageAt.toISOString()
         : latestMessageAt,
     messageCount: 1,
+    isOthers: false,
+    hasLabelAnalysisFailure: false,
   };
 }
 

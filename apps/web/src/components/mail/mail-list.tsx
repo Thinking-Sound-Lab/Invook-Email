@@ -143,7 +143,7 @@ function MailRow({
         {labels.length > 0 ? (
           <div
             className="hidden min-w-0 max-w-[40%] shrink items-center gap-1 overflow-hidden lg:flex"
-            aria-label="User-created labels"
+            aria-label="Message labels"
           >
             {labels.map((label) => (
               <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />

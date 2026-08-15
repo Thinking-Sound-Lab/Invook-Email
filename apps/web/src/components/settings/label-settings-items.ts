@@ -1,26 +1,17 @@
-import type { GmailUserLabel, InvookLabel } from "@invook/contracts";
+import type { InvookLabel } from "@invook/contracts";
 
-export type LabelSettingsItem =
-  | { kind: "gmail"; label: GmailUserLabel }
-  | { kind: "invook"; label: InvookLabel };
+export interface LabelSettingsItem {
+  label: InvookLabel;
+  isDeletable: boolean;
+}
 
-export function listLabelSettingsItems(input: {
-  gmailUserLabels: GmailUserLabel[];
-  invookLabels: InvookLabel[];
-}): LabelSettingsItem[] {
-  const items: LabelSettingsItem[] = [
-    ...input.gmailUserLabels.map((label) => ({
-      kind: "gmail" as const,
+export function listLabelSettingsItems(
+  invookLabels: InvookLabel[],
+): LabelSettingsItem[] {
+  return invookLabels
+    .map((label) => ({
       label,
-    })),
-    ...input.invookLabels.map((label) => ({
-      kind: "invook" as const,
-      label,
-    })),
-  ];
-
-  return items.sort((left, right) => {
-    const nameComparison = left.label.name.localeCompare(right.label.name);
-    return nameComparison || left.kind.localeCompare(right.kind);
-  });
+      isDeletable: label.systemKey === null,
+    }))
+    .sort((left, right) => left.label.name.localeCompare(right.label.name));
 }

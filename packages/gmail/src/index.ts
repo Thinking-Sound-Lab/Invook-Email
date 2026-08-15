@@ -1,10 +1,7 @@
 export {
   createGmailDraft,
-  createGmailLabel,
   deleteGmailDraft,
-  deleteGmailLabel,
   getGmailDraft,
-  getGmailLabel,
   getGmailMessage,
   getGmailMessageState,
   getGmailProfile,
@@ -14,10 +11,8 @@ export {
   isGoogleReauthenticationRequired,
   listGmailDrafts,
   listGmailHistory,
-  listGmailLabels,
   listGmailMessages,
   modifyGmailMessageLabels,
-  modifyGmailThreadLabels,
   refreshGoogleAccessToken,
   sendGmailDraft,
   startGmailWatch,
@@ -25,7 +20,6 @@ export {
   trashGmailMessage,
   untrashGmailMessage,
   updateGmailDraft,
-  updateGmailLabel,
   type GmailDraft,
   type GmailDraftPage,
   type GmailDraftReference,
@@ -33,8 +27,6 @@ export {
   type GmailHistoryChange,
   type GmailHistoryPage,
   type GmailHistoryRecord,
-  type GmailLabel,
-  type GmailLabelInput,
   type GmailMessagePage,
   type GmailMessageReference,
   type GmailMessageState,
@@ -42,6 +34,14 @@ export {
   type GmailRawMessage,
   type GmailWatchResponse,
 } from "./client";
+export {
+  filterGmailSystemLabelIds,
+  GMAIL_SYSTEM_LABEL_IDS,
+  gmailSystemLabels,
+  isGmailSystemLabelId,
+  type GmailSystemLabel,
+  type GmailSystemLabelId,
+} from "./system-labels";
 export {
   composePlainTextGmailMessage,
   composePlainTextGmailReply,

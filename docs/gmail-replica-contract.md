@@ -6,11 +6,11 @@
 
 ## Scope and ownership
 
-For each connected Gmail account, Invook continuously replicates every message returned with Spam and Trash included, the Gmail label catalog and message-level memberships, Gmail Draft resources, complete parsed message metadata, exact raw MIME, and decoded attachment bytes.
+For each connected Gmail account, Invook continuously replicates every message returned with Spam and Trash included, recognized Gmail system-label memberships, Gmail Draft resources, complete parsed message metadata, exact raw MIME, and decoded attachment bytes.
 
-Gmail is canonical for Gmail-backed labels, read/unread, star, Inbox/archive, Trash, messages, and Gmail Draft resources. Invook writes provider-owned state to Gmail first and lets Gmail history converge PostgreSQL. It never creates an optimistic competing provider state.
+Gmail is canonical for Important, read/unread, star, Inbox/archive, Trash, messages, and Gmail Draft resources. Invook retains only the known system IDs `IMPORTANT`, `INBOX`, `SENT`, `DRAFT`, `TRASH`, `SPAM`, `STARRED`, and `UNREAD` from message and history data. Opaque Gmail user-label IDs are ignored, and Invook does not synchronize Gmail's user-label catalog. Provider-owned actions write Gmail first and let Gmail history converge PostgreSQL.
 
-The shared `labels` table distinguishes Gmail-backed and Invook-only labels with a checked discriminator. The shared `message_labels` table is the only visible applied-label relationship. Thread labels are calculated from current message memberships; applying a Gmail label from a thread operation affects the thread's current messages and does not establish inheritance for future mail. `message_label_decisions` stores AI decision metadata and explicit user override or suppression, never a second visible relationship.
+The shared `labels` table distinguishes recognized Gmail system labels from Invook-owned Newsletter and custom labels. The shared `message_labels` table is the only visible applied-label relationship. `message_label_decisions` stores AI decision metadata and explicit user override or suppression, never a second visible relationship. Important is copied only from Gmail's `IMPORTANT` membership. Others is derived when a successfully analyzed message has no Newsletter match and is not persisted as a label.
 
 The shared `drafts` table distinguishes Gmail resources from local Invook drafts. A Gmail draft retains provider identifiers and metadata. A local draft retains editable text, model provenance, feedback, and Memory evidence without becoming a Gmail resource until the user explicitly promotes it. `gmail_draft_write_operations` is the idempotency and ambiguous-result ledger for Gmail draft create, update, and send operations.
 
@@ -18,26 +18,20 @@ PostgreSQL stores normalized replica state, durable runs, workflow steps, and th
 
 ## Initial synchronization
 
-An account is unavailable to indexing, Memory, and AI-label workflows until this watch-first sequence completes:
+Embedding backfill and initial Memory wait for the watch-first sequence to complete. Per-message label analysis starts as soon as each canonical message is durably stored:
 
 1. Complete Gmail OAuth and capture history cursor H0.
 2. Register and persist the Gmail watch immediately.
 3. Create one durable initial `mail_sync_run`.
-4. Snapshot the Gmail label catalog and discover all message IDs, including Spam and Trash.
+4. Discover all message IDs, including Spam and Trash.
 5. Process each message in its own idempotent workflow job. Message concurrency is configured by `GMAIL_MESSAGE_CONCURRENCY` and defaults to five.
-6. Upload raw MIME and attachment bytes and persist relational message state.
+6. Upload raw MIME and attachment bytes, persist normalized message state, and create the `label.message.analyze` workflow step and `mail-label-submit` outbox record in the same transaction.
 7. Synchronize Gmail Draft resources.
 8. Under the account advisory lock, replay history from H0 and continue while a newer pending notification cursor exists.
 9. Atomically mark the replica ready at the final applied cursor.
-10. Only then publish embedding, Memory, and Invook-label derivation work.
+10. Only then publish embedding and initial Memory derivation work. There is no final label backfill.
 
-A connected account's stored messages remain usable while this sequence is in
-progress. Mailbox browsing, ordinary text and metadata search, attachment
-metadata, reply drafting, and provider-first Gmail actions operate only on
-specific messages or threads already committed to PostgreSQL. Missing rows stay
-unavailable, progress remains authoritative, and semantic indexing is not a
-prerequisite. Provider writes still converge through Gmail history; the final H0
-replay remains the only path that marks the replica ready.
+A connected account's stored messages become usable while this sequence is in progress after their required label analysis reaches `complete` or terminal `failed`. `pending` and `running` messages are excluded from normal mailbox, search, agent, attachment, and reply-draft results. A terminal failure is visible with its real Gmail-owned state and an explicit failure indicator, but no fabricated AI match. Missing rows stay unavailable, semantic indexing is not a prerequisite, and Gmail fetching continues independently with separately bounded `GMAIL_MESSAGE_CONCURRENCY` and `MAIL_LABEL_CONCURRENCY`. The final H0 replay remains the only path that marks the replica ready.
 
 A successful normal synchronization does not run a separate full-replica audit.
 
@@ -54,11 +48,11 @@ Gmail control work is serialized per account with a PostgreSQL advisory lock. A 
 History work is operation-specific:
 
 - A new or content-changed message downloads raw MIME once, parses it, stores objects, and upserts relational state.
-- A label-only change updates `message_labels` from minimal Gmail message state without downloading MIME.
-- An unknown provider label fetches only that label and retries the membership update.
+- A label-only change updates recognized Gmail system memberships from minimal message state without downloading MIME. Opaque Gmail user-label IDs are ignored.
 - A deletion creates a durable `gmail.objects.delete` workflow step containing an immutable provider/object-key manifest before deleting relational state.
 - A draft-related change lists draft references and refreshes or removes only the affected Gmail Draft resource.
-- A mailbox change event is emitted only after the corresponding transaction commits.
+- A content upsert creates the same durable per-message label-analysis step used by initial synchronization. Queue payloads contain identifiers and content/definition checkpoints only.
+- A message visibility event is emitted only in the transaction that commits label decisions and `complete`, or the explicit terminal `failed` state.
 
 Duplicate execution is safe through provider identifiers, expected-cursor checks, unique constraints, workflow idempotency keys, and transactional outbox publication. A crashed worker retries from durable state.
 
@@ -66,13 +60,19 @@ Duplicate execution is safe through provider identifiers, expected-cursor checks
 
 Watch renewal is a durable daily one-shot action. It persists the renewed watch, schedules its successor, and performs stored-cursor catch-up as a safety net. It does not poll or run a routine full-mailbox audit.
 
-If Gmail rejects an expired history cursor, Invook captures a fresh provider baseline, renews the watch, and creates an exceptional repair-type `mail_sync_run`. Repair uses the same paged discovery and per-message jobs as initial synchronization. Pub/Sub catch-up is serialized under the account lock and may advance the committed cursor while the snapshot proceeds, but keeps the replica in `repairing` and does not release indexing or analysis work. The finalizer still replays from the repair baseline, reconciles the full snapshot, and is the only repair path that marks the replica ready. A reconnect-required account follows the same durable repair-run path after successful OAuth.
+If Gmail rejects an expired history cursor, Invook captures a fresh provider baseline, renews the watch, and creates an exceptional repair-type `mail_sync_run`. Repair uses the same paged discovery, per-message storage, and per-message label-analysis jobs as initial synchronization. Pub/Sub catch-up is serialized under the account lock and may advance the committed cursor while the snapshot proceeds, but keeps the replica in `repairing`. The finalizer still replays from the repair baseline, reconciles the full snapshot, and is the only repair path that marks the replica ready. A reconnect-required account follows the same durable repair-run path after successful OAuth.
 
 Permanent credential rejection atomically marks the account `reconnect_required`, fails active Gmail work, and prevents already-published jobs from reactivating terminal state. Transient provider and transport failures retain bounded workflow retries.
 
 ## Provider writes
 
-Explicit user actions for read/unread, star, archive, Trash, Gmail-backed labels, and Gmail Draft edits call Gmail first. After a confirmed provider response they enqueue stored-cursor catch-up. Local Gmail-backed state changes only when history is applied.
+Explicit user actions for read/unread, star, archive, Trash, and Gmail Draft edits call Gmail first. After a confirmed provider response they enqueue stored-cursor catch-up. Local Gmail-owned state changes only when history is applied. Newsletter and custom Invook labels never call Gmail.
+
+## Per-message label analysis
+
+The `mail-label-submit` worker rereads the owned canonical stored message and the current Newsletter plus custom Invook definitions. One structured classifier call may return zero or more independent matches. It never receives raw MIME, HTML, attachments, provider payloads, Important, or Others. Before commit, PostgreSQL locks the message and verifies the content hash, analysis version, definition hash, and every definition version. Superseded work no-ops or creates a newer durable step; retries reuse the stable message/content/definition identity and cannot duplicate decisions or visible memberships.
+
+Creating or editing a custom label stores only the definition. It does not scan historical mail, and already-complete messages remain unchanged. A definition created before an in-flight message commits is included by safely superseding the stale work. Decisions, visible AI memberships, completion state, and the mailbox-change event commit atomically. Explicit user applications and suppressions win over AI output.
 
 Creating a local Invook draft does not create a Gmail draft. Explicit promotion, Gmail Draft editing, and sending retain provider-write idempotency and ambiguous-result evidence in `gmail_draft_write_operations`. AI evidence remains separate after promotion.
 

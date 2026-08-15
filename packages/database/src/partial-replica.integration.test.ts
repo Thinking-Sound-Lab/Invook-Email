@@ -11,9 +11,8 @@ import { queryInvookMailbox } from "./mailbox-query";
 import {
   enqueueGmailHistoryCatchup,
   getAiReplyDraftForGmailSave,
-  getGmailMessageLabelMutationContext,
+  getGmailMessageMutationContext,
   getGmailProviderWriteContext,
-  getGmailThreadLabelMutationContext,
 } from "./replica";
 import {
   createMessageContentHash,
@@ -133,9 +132,16 @@ async function withPartialReplicaFixture(
       snippet: "A stored message is immediately usable.",
       bodyText: "The synchronization keyword is present in committed mail.",
       embeddingContentHash: createMessageContentHash({
+        direction: "incoming",
+        sender: {
+          raw: "Distinctive Sender <partial-sender@example.com>",
+          email: "partial-sender@example.com",
+        },
+        recipients: ["owner@example.com"],
         subject: "Partial synchronization keyword",
         bodyText: "The synchronization keyword is present in committed mail.",
       }),
+      labelAnalysisState: "complete",
       sentAt,
     });
     await database.insert(labels).values({
@@ -337,42 +343,22 @@ test(
         null,
       );
 
-      const message = await getGmailMessageLabelMutationContext(
-        { userId, messageId, gmailLabelIds: [] },
+      const message = await getGmailMessageMutationContext(
+        { userId, messageId },
         database,
       );
       assert.equal(message?.accountId, accountId);
       assert.equal(message?.providerMessageId, `provider-message-${messageId}`);
       assert.equal(
-        await getGmailMessageLabelMutationContext(
-          { userId: otherUserId, messageId, gmailLabelIds: [] },
+        await getGmailMessageMutationContext(
+          { userId: otherUserId, messageId },
           database,
         ),
         null,
       );
       assert.equal(
-        await getGmailMessageLabelMutationContext(
-          { userId, messageId: uuidv4(), gmailLabelIds: [] },
-          database,
-        ),
-        null,
-      );
-
-      const thread = await getGmailThreadLabelMutationContext(
-        { userId, threadId, gmailLabelIds: [] },
-        database,
-      );
-      assert.equal(thread?.accountId, accountId);
-      assert.equal(
-        await getGmailThreadLabelMutationContext(
-          { userId: otherUserId, threadId, gmailLabelIds: [] },
-          database,
-        ),
-        null,
-      );
-      assert.equal(
-        await getGmailThreadLabelMutationContext(
-          { userId, threadId: uuidv4(), gmailLabelIds: [] },
+        await getGmailMessageMutationContext(
+          { userId, messageId: uuidv4() },
           database,
         ),
         null,

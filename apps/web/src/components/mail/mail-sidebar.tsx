@@ -10,12 +10,10 @@ import {
   SentIcon,
   SpamIcon,
   StarIcon,
-  Tag01Icon,
   WorkflowSquare01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
-  GmailUserLabel,
   InvookLabel,
   MailboxAccount,
   MemoryEntry,
@@ -89,10 +87,8 @@ export interface MailSidebarProps {
   currentView: MailboxView;
   currentSurface: MailSurface;
   memories: MemoryEntry[];
-  gmailUserLabels: GmailUserLabel[];
   invookLabels: InvookLabel[];
   aiConfigured: boolean;
-  batchConfigured: boolean;
 }
 
 export function MailSidebar({
@@ -100,12 +96,10 @@ export function MailSidebar({
   currentView,
   currentSurface,
   memories,
-  gmailUserLabels,
   invookLabels,
   aiConfigured,
-  batchConfigured,
 }: MailSidebarProps) {
-  const labels = listSidebarLabels({ gmailUserLabels, invookLabels });
+  const labels = listSidebarLabels(invookLabels);
 
   return (
     <aside className="flex min-h-0 flex-col bg-sidebar px-2 py-3 lg:px-3" aria-label="Mailbox navigation">
@@ -143,10 +137,8 @@ export function MailSidebar({
         <SettingsDialog
           account={account}
           memories={memories}
-          gmailUserLabels={gmailUserLabels}
           invookLabels={invookLabels}
           aiConfigured={aiConfigured}
-          batchConfigured={batchConfigured}
           triggerClassName={navItemClassName(false)}
         />
         <NavLink
@@ -174,7 +166,7 @@ export function MailSidebar({
               <NavLink
                 key={label.id}
                 label={label.name}
-                icon={label.kind === "gmail" ? Tag01Icon : AiMagicIcon}
+                icon={AiMagicIcon}
                 active={currentSurface === "mail" && currentView === view}
                 href={`/mail?view=${view}`}
               />

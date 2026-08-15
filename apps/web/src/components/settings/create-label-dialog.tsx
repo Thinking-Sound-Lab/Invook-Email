@@ -49,7 +49,7 @@ export function CreateLabelDialog({ onClose, onCreate }: CreateLabelDialogProps)
             <DialogTitle>Create a label</DialogTitle>
             <DialogDescription>
               Give the label a precise description. The AI uses that description as its
-              complete classification rule.
+              complete classification rule for mail that has not been analyzed yet.
             </DialogDescription>
           </DialogHeader>
           <div className="mt-5 space-y-4">

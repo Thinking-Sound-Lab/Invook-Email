@@ -20,10 +20,6 @@ export async function deleteInvookLabel(labelId: string): Promise<void> {
   await axios.delete<DeletedResourceResponse>(`/v1/labels/${labelId}`);
 }
 
-export async function deleteGmailUserLabel(gmailLabelId: string): Promise<void> {
-  await axios.delete<DeletedResourceResponse>(`/v1/gmail/labels/${gmailLabelId}`);
-}
-
 export interface SetThreadLabelInput extends SetThreadLabelRequest {
   threadId: string;
 }

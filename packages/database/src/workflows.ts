@@ -25,7 +25,6 @@ import {
   gmailWatchStates,
   gmailSyncItems,
   gmailSyncPages,
-  labels,
   mailSyncRuns,
   messages,
   queueOutbox,
@@ -272,11 +271,8 @@ export function queueNameForStepType(stepType: string): QueueName {
       return "mail-memory-events";
     case "memory.feedback":
       return "mail-memory-feedback";
-    case "label.backfill.submit":
+    case "label.message.analyze":
       return "mail-label-submit";
-    case "label.batch.retry":
-    case "label.batch.event":
-      return "mail-label-events";
     default:
       throw new Error(`Unsupported workflow step type: ${stepType}`);
   }
@@ -350,7 +346,6 @@ export function createPostSyncDerivationSteps(input: {
   userId: string;
   accountId: string;
   historyCursor: string;
-  labels: Array<{ id: string; definitionVersion: number }>;
 }): WorkflowStepInput[] {
   return [
     {
@@ -367,16 +362,6 @@ export function createPostSyncDerivationSteps(input: {
       payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
       idempotencyKey: `memory.extract:${input.accountId}:${MEMORY_SCHEMA_VERSION}:${input.historyCursor}`,
     },
-    ...input.labels.map((label) => ({
-      userId: input.userId,
-      accountId: input.accountId,
-      stepType: "label.backfill.submit",
-      payload: {
-        labelId: label.id,
-        definitionVersion: label.definitionVersion,
-      },
-      idempotencyKey: `label.backfill.submit:${label.id}:${label.definitionVersion}:${input.historyCursor}`,
-    })),
   ];
 }
 
@@ -1089,36 +1074,6 @@ export async function failWorkflowStep(
         sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.step.accountId, state: "failed" })})`,
       );
     }
-    if (input.step.stepType.startsWith("label.")) {
-      let labelId = input.step.payload.labelId;
-      let definitionVersion = input.step.payload.definitionVersion;
-      if (input.step.stepType === "label.batch.event") {
-        const submissionStepId = input.step.payload.submissionJobId;
-        if (typeof submissionStepId === "string") {
-          const [submission] = await transaction
-            .select({ result: workflowSteps.result })
-            .from(workflowSteps)
-            .where(eq(workflowSteps.id, submissionStepId))
-            .limit(1);
-          if (submission?.result) {
-            labelId = submission.result.labelId;
-            definitionVersion = submission.result.definitionVersion;
-          }
-        }
-      }
-      if (typeof labelId === "string" && typeof definitionVersion === "number") {
-        await transaction
-          .update(labels)
-          .set({ analysisState: "failed", updatedAt: new Date() })
-          .where(
-            and(
-              eq(labels.id, labelId),
-              eq(labels.accountId, input.step.accountId),
-              eq(labels.definitionVersion, definitionVersion),
-            ),
-          );
-      }
-    }
     return true;
   });
 }
@@ -1619,21 +1574,11 @@ export async function completeMailSyncRun(
       sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: run.accountId, state: "pending" })})`,
     );
 
-    const analysisLabels = await transaction
-      .select({
-        id: labels.id,
-        definitionVersion: labels.definitionVersion,
-      })
-      .from(labels)
-      .where(
-        and(eq(labels.accountId, run.accountId), eq(labels.kind, "invook")),
-      );
     await enqueueWorkflowStepsWithExecutor(
       createPostSyncDerivationSteps({
         userId: run.userId,
         accountId: run.accountId,
         historyCursor: input.finalHistoryCursor,
-        labels: analysisLabels,
       }),
       executor,
     );
@@ -1713,19 +1658,11 @@ export async function enqueuePostSyncWorkflowSteps(
       account.replicaState !== "ready" ||
       !account.historyCursor
     ) continue;
-    const analysisLabels = await database
-      .select({
-        id: labels.id,
-        definitionVersion: labels.definitionVersion,
-      })
-      .from(labels)
-      .where(and(eq(labels.accountId, account.id), eq(labels.kind, "invook")));
     const steps = await enqueueWorkflowStepsWithExecutor(
       createPostSyncDerivationSteps({
         userId: account.userId,
         accountId: account.id,
         historyCursor: account.historyCursor,
-        labels: analysisLabels,
       }),
       database,
     );

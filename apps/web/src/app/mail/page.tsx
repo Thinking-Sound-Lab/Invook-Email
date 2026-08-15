@@ -111,9 +111,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     ? currentView.slice("label:".length)
     : null;
   const currentLabel = currentLabelId
-    ? [...workspace.gmailUserLabels, ...workspace.invookLabels].find(
-        (label) => label.id === currentLabelId,
-      )
+    ? workspace.invookLabels.find((label) => label.id === currentLabelId)
     : null;
 
   const mailboxThreads = workspace.threads as MailThreadSummary[];
@@ -163,10 +161,8 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           currentView={currentView}
           currentSurface={currentSurface}
           memories={workspace.memories}
-          gmailUserLabels={workspace.gmailUserLabels}
           invookLabels={workspace.invookLabels}
           aiConfigured={workspace.aiConfigured}
-          batchConfigured={workspace.batchConfigured}
         />
         <div
           data-slot="mail-workspace-content"

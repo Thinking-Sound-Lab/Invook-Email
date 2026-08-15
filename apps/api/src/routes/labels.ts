@@ -4,6 +4,7 @@ import {
   createInvookLabel,
   deleteInvookLabel,
   LabelConflictError,
+  updateInvookLabel,
 } from "@invook/database";
 
 import { mutationAccessHooks, requireUuidParameter } from "../access";
@@ -62,6 +63,61 @@ export const registerLabelRoutes: FastifyPluginAsync = async (api) => {
           return;
         }
         await sendJson(reply, 201, { label });
+      } catch (error) {
+        if (error instanceof LabelConflictError) {
+          await sendProblem(request, reply, 409, error.message);
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  api.patch<{ Params: LabelParams; Body: unknown }>(
+    "/:labelId",
+    {
+      onRequest: [
+        ...mutationAccessHooks,
+        requireUuidParameter("labelId", "Label ID must be valid"),
+      ],
+    },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const body = request.body;
+      const name =
+        body && typeof body === "object" && "name" in body ? body.name : null;
+      const description =
+        body && typeof body === "object" && "description" in body
+          ? body.description
+          : null;
+      if (
+        typeof name !== "string" ||
+        !normalize(name) ||
+        typeof description !== "string" ||
+        !normalize(description)
+      ) {
+        await sendProblem(
+          request,
+          reply,
+          400,
+          "Label name and description are required",
+        );
+        return;
+      }
+
+      try {
+        const label = await updateInvookLabel({
+          userId: session.userId,
+          labelId: request.params.labelId,
+          name: normalize(name),
+          description: normalize(description),
+        });
+        if (!label) {
+          await sendProblem(request, reply, 404, "Custom label not found");
+          return;
+        }
+        await sendJson(reply, 200, { label });
       } catch (error) {
         if (error instanceof LabelConflictError) {
           await sendProblem(request, reply, 409, error.message);

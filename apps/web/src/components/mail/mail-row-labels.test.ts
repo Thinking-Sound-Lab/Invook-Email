@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { listMailRowLabels } from "./mail-row-labels";
 
-test("mail row labels include Gmail user labels and every applied Invook label", () => {
+test("mail row labels include Gmail Important and every applied Invook label", () => {
   const labels = listMailRowLabels({
     gmailLabels: [
       {
@@ -11,14 +11,12 @@ test("mail row labels include Gmail user labels and every applied Invook label",
         providerLabelId: "INBOX",
         name: "Inbox",
         type: "system",
-        color: null,
       },
       {
-        id: "gmail-user-label",
-        providerLabelId: "Label_1",
-        name: "Clients",
-        type: "user",
-        color: null,
+        id: "gmail-important-label",
+        providerLabelId: "IMPORTANT",
+        name: "Important",
+        type: "system",
       },
     ],
     invookLabels: [
@@ -35,16 +33,17 @@ test("mail row labels include Gmail user labels and every applied Invook label",
         confidence: null,
       },
     ],
+    isOthers: false,
   });
 
   assert.deepEqual(labels, [
     { id: "invook-ai-applied-label", kind: "invook", name: "Action needed" },
-    { id: "gmail-user-label", kind: "gmail", name: "Clients" },
     { id: "invook-user-applied-label", kind: "invook", name: "Follow up" },
+    { id: "gmail-important-label", kind: "gmail", name: "Important" },
   ]);
 });
 
-test("mail row labels exclude every Gmail system label", () => {
+test("mail row labels ignore non-Important Gmail system labels", () => {
   const labels = listMailRowLabels({
     gmailLabels: [
       {
@@ -52,11 +51,23 @@ test("mail row labels exclude every Gmail system label", () => {
         providerLabelId: "SPAM",
         name: "Spam",
         type: "system",
-        color: null,
       },
     ],
     invookLabels: [],
+    isOthers: false,
   });
 
   assert.deepEqual(labels, []);
+});
+
+test("mail row labels expose Others from the authoritative derived state", () => {
+  const labels = listMailRowLabels({
+    gmailLabels: [],
+    invookLabels: [],
+    isOthers: true,
+  });
+
+  assert.deepEqual(labels, [
+    { id: "others", kind: "derived", name: "Others" },
+  ]);
 });
