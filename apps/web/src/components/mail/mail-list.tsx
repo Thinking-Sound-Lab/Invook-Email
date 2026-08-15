@@ -95,7 +95,7 @@ function MailRow({
       href={mailboxHref(currentView, mailboxCursor, thread.id)}
       scroll={false}
       className={cn(
-        "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_auto] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors",
+        "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_4.5rem] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors lg:grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_7rem_4.5rem]",
         "hover:bg-accent/55 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         isUnread && "bg-card/45",
       )}
@@ -141,22 +141,21 @@ function MailRow({
         <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {formatMailText(thread.snippet) || "No message preview is available."}
         </p>
-        {labels.length > 0 ? (
-          <div
-            className="hidden min-w-0 max-w-[40%] shrink items-center gap-1 overflow-hidden lg:flex"
-            aria-label="Message labels"
-          >
-            {labels.map((label) => (
-              <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
-            ))}
-          </div>
-        ) : null}
         {isStarred ? (
           <HugeiconsIcon icon={StarIcon} size={13} className="shrink-0 text-warning" fill="currentColor" />
         ) : null}
       </div>
 
-      <time className="text-xs tabular-nums text-muted-foreground">
+      <div
+        className="hidden min-w-0 items-center gap-1 overflow-hidden lg:flex"
+        aria-label={labels.length > 0 ? "Message labels" : undefined}
+      >
+        {labels.map((label) => (
+          <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
+        ))}
+      </div>
+
+      <time className="w-full whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
         {formatMailDate(thread.latestMessageAt)}
       </time>
     </Link>
