@@ -319,6 +319,36 @@ async function insertMailboxChange(
   return event?.id ?? null;
 }
 
+export async function recordMailboxMessageRefresh(
+  input: { userId: string; accountId: string; threadId: string },
+  database: Database = getDatabase(),
+): Promise<boolean> {
+  return database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.userId, input.userId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .limit(1);
+    if (!account) return false;
+    await insertMailboxChange(transaction, {
+      userId: input.userId,
+      accountId: input.accountId,
+      changeType: "history_applied",
+      payload: {
+        changedThreadIds: [input.threadId],
+        reason: "message_refresh",
+      },
+    });
+    return true;
+  });
+}
+
 export async function replaceGmailLabelCatalog(
   input: {
     userId: string;

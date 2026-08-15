@@ -48,8 +48,10 @@ export {
 } from "./draft";
 export {
   extractEmailAddress,
+  GMAIL_MESSAGE_FUTURE_TOLERANCE_MS,
   isMemoryEligible,
   parseGmailMessage,
+  resolveGmailMessageDate,
   type ParsedGmailAttachment,
   type ParsedGmailHeader,
   type ParsedGmailMessage,

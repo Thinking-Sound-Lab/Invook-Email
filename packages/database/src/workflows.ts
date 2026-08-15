@@ -4,6 +4,7 @@ import {
   count,
   desc,
   eq,
+  gt,
   inArray,
   isNull,
   not,
@@ -26,6 +27,7 @@ import {
   gmailSyncPages,
   labels,
   mailSyncRuns,
+  messages,
   queueOutbox,
   workflowSteps,
 } from "./schema";
@@ -50,6 +52,7 @@ const gmailConnectedAccountStepTypes = [
   "gmail.sync.page",
   "gmail.sync.message",
   "gmail.sync.finalize",
+  "gmail.message.refresh",
   "gmail.history.catchup",
   "gmail.watch.renew",
 ] as const;
@@ -251,6 +254,7 @@ export function queueNameForStepType(stepType: string): QueueName {
     case "gmail.sync.message":
       return "gmail-messages";
     case "gmail.history.catchup":
+    case "gmail.message.refresh":
     case "gmail.watch.renew":
     case "gmail.account.cleanup":
     case "gmail.objects.delete":
@@ -664,6 +668,66 @@ export async function enqueueMissingMailSyncRuns(
     created += 1;
   }
   return created;
+}
+
+export function createGmailMessageDateRepairStep(input: {
+  userId: string;
+  accountId: string;
+  providerMessageId: string;
+  invalidSentAt: Date;
+}): WorkflowStepInput {
+  return {
+    userId: input.userId,
+    accountId: input.accountId,
+    stepType: "gmail.message.refresh",
+    payload: {
+      providerMessageId: input.providerMessageId,
+      reason: "implausible_date",
+    },
+    idempotencyKey: `gmail-message-date-repair:${input.accountId}:${input.providerMessageId}:${input.invalidSentAt.toISOString()}`,
+  };
+}
+
+export async function enqueueImplausibleGmailMessageDateRepairs(
+  input: { latestAllowedAt: Date },
+  database: Database = getDatabase(),
+): Promise<number> {
+  if (!Number.isFinite(input.latestAllowedAt.getTime())) {
+    throw new Error("The latest allowed Gmail message date is invalid.");
+  }
+  return database.transaction(async (transaction) => {
+    const candidates = await transaction
+      .select({
+        userId: messages.userId,
+        accountId: messages.accountId,
+        providerMessageId: messages.providerMessageId,
+        sentAt: messages.sentAt,
+      })
+      .from(messages)
+      .innerJoin(
+        connectedAccounts,
+        eq(connectedAccounts.id, messages.accountId),
+      )
+      .where(
+        and(
+          eq(connectedAccounts.status, "connected"),
+          gt(messages.sentAt, input.latestAllowedAt),
+        ),
+      )
+      .orderBy(desc(messages.sentAt))
+      .limit(1_000);
+
+    for (const candidate of candidates) {
+      await enqueueWorkflowStepWithExecutor(
+        createGmailMessageDateRepairStep({
+          ...candidate,
+          invalidSentAt: candidate.sentAt,
+        }),
+        transaction,
+      );
+    }
+    return candidates.length;
+  });
 }
 
 export async function publishOutboxBatch(

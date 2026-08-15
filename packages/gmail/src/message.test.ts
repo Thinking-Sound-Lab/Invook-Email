@@ -130,6 +130,53 @@ test("raw MIME parsing reports absent body variants honestly", async () => {
   assert.deepEqual(parsed.attachments, []);
 });
 
+test("invalid Gmail dates fall back to the first plausible receipt timestamp", async () => {
+  const malformedDateMime = Buffer.from(
+    [
+      "Received: by mx.google.com; Sat, 09 May 2026 20:22:48 -0700 (PDT)",
+      "X-Received: by mx.google.com; Sat, 09 May 2026 20:22:47 -0700 (PDT)",
+      "From: sender@example.com",
+      "To: receiver@example.com",
+      "Date: Sun, 12 Jan 2612 15:12:10 GMT",
+      "Subject: Invalid provider date",
+      "",
+      "The receipt timestamp is authoritative when provider dates are unusable.",
+    ].join("\r\n"),
+  );
+
+  const parsed = await parseGmailMessage({
+    id: "invalid-date-message",
+    threadId: "invalid-date-thread",
+    internalDate: "-1",
+    raw: malformedDateMime.toString("base64url"),
+  });
+
+  assert.equal(parsed.internalDate, "-1");
+  assert.equal(parsed.sentAt, "2026-05-10T03:22:48.000Z");
+});
+
+test("centuries-future message dates remain unavailable without receipt evidence", async () => {
+  const malformedDateMime = Buffer.from(
+    [
+      "From: sender@example.com",
+      "To: receiver@example.com",
+      "Date: Sun, 12 Jan 2612 15:12:10 GMT",
+      "Subject: Invalid provider date",
+      "",
+      "No trustworthy receipt timestamp is available.",
+    ].join("\r\n"),
+  );
+
+  const parsed = await parseGmailMessage({
+    id: "future-date-message",
+    threadId: "future-date-thread",
+    internalDate: "32504713930000",
+    raw: malformedDateMime.toString("base64url"),
+  });
+
+  assert.equal(parsed.sentAt, null);
+});
+
 test("raw MIME parsing rejects Gmail responses without MIME bytes", async () => {
   await assert.rejects(
     parseGmailMessage({

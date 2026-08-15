@@ -62,6 +62,8 @@ export type ParsedGmailMessage = {
   attachments: ParsedGmailAttachment[];
 };
 
+export const GMAIL_MESSAGE_FUTURE_TOLERANCE_MS = 24 * 60 * 60 * 1_000;
+
 function sha256(value: Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -115,18 +117,58 @@ function firstAddress(value: AddressObject | undefined): string {
   return value?.text ?? "";
 }
 
-function validIsoDate(value: Date | number | undefined): string | null {
+function validIsoDate(
+  value: Date | number | undefined,
+  latestAllowedAt: number,
+): string | null {
   if (value === undefined) return null;
   const date = value instanceof Date ? value : new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  const timestamp = date.getTime();
+  return Number.isFinite(timestamp) && timestamp <= latestAllowedAt
+    ? date.toISOString()
+    : null;
 }
 
-function sentAt(internalDate: string | undefined, headerDate: Date | undefined) {
+function receivedHeaderDate(
+  headers: ParsedGmailHeader[],
+  latestAllowedAt: number,
+): string | null {
+  const receivedHeaders = headers.filter(
+    (header) => header.name === "received" || header.name === "x-received",
+  );
+  for (const header of receivedHeaders) {
+    const separator = header.raw.lastIndexOf(";");
+    if (separator < 0) continue;
+    const receivedAt = validIsoDate(
+      new Date(header.raw.slice(separator + 1).trim()),
+      latestAllowedAt,
+    );
+    if (receivedAt) return receivedAt;
+  }
+  return null;
+}
+
+export function resolveGmailMessageDate(input: {
+  internalDate?: string | null;
+  headerDate?: Date;
+  headers: ParsedGmailHeader[];
+  now?: Date;
+}): string | null {
+  const now = input.now ?? new Date();
+  const nowTimestamp = now.getTime();
+  if (!Number.isFinite(nowTimestamp)) {
+    throw new Error("The Gmail message date reference is invalid.");
+  }
+  const latestAllowedAt = nowTimestamp + GMAIL_MESSAGE_FUTURE_TOLERANCE_MS;
+  const internalDate = input.internalDate;
   if (internalDate && /^\d+$/.test(internalDate)) {
-    const date = validIsoDate(Number(internalDate));
+    const date = validIsoDate(Number(internalDate), latestAllowedAt);
     if (date) return date;
   }
-  return validIsoDate(headerDate);
+  return (
+    receivedHeaderDate(input.headers, latestAllowedAt) ??
+    validIsoDate(input.headerDate, latestAllowedAt)
+  );
 }
 
 function referenceList(value: string | string[] | undefined): string[] {
@@ -157,6 +199,7 @@ export async function parseGmailMessage(
     skipHtmlToText: true,
     skipTextToHtml: true,
   });
+  const headers = parseHeaders(parsed.headerLines);
 
   return {
     providerMessageId: message.id,
@@ -170,7 +213,7 @@ export async function parseGmailMessage(
     raw,
     rawSize: raw.byteLength,
     rawChecksumSha256: sha256(raw),
-    headers: parseHeaders(parsed.headerLines),
+    headers,
     subject: parsed.subject ?? "",
     from: firstAddress(parsed.from),
     to: addresses(parsed.to),
@@ -182,7 +225,11 @@ export async function parseGmailMessage(
     references: referenceList(parsed.references),
     bodyText: parsed.text ?? null,
     bodyHtml: typeof parsed.html === "string" ? parsed.html : null,
-    sentAt: sentAt(message.internalDate, parsed.date),
+    sentAt: resolveGmailMessageDate({
+      internalDate: message.internalDate,
+      headerDate: parsed.date,
+      headers,
+    }),
     attachments: parsed.attachments.map((attachment, index) => {
       const mimePart = attachment as typeof attachment & { partId?: string };
       return {

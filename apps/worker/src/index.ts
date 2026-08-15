@@ -56,6 +56,7 @@ import {
   enqueueBatchEvent,
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
+  enqueueImplausibleGmailMessageDateRepairs,
   enqueuePendingGmailHistoryCatchups,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
@@ -116,6 +117,7 @@ import {
   prepareEmbeddingBatchSubmission,
   recordEmbeddingBatchInputFile,
   recordEmbeddingProviderBatch,
+  recordMailboxMessageRefresh,
   recordMailSyncPage,
   refreshPreparingEmbeddingBatchSubmission,
   startMailSyncRun,
@@ -135,6 +137,7 @@ import {
   getGmailMessage,
   getGmailMessageState,
   getGmailProfile,
+  GMAIL_MESSAGE_FUTURE_TOLERANCE_MS,
   GmailApiError,
   isMemoryEligible,
   listGmailDrafts,
@@ -268,17 +271,10 @@ async function prepareMessage(options: {
     extractEmailAddress(message.from) === accountEmail.toLowerCase()
       ? "outgoing"
       : "incoming";
-  const internalDateValue = options.message.internalDate
-    ? Number(options.message.internalDate)
-    : Number.NaN;
-  const internalDate = Number.isFinite(internalDateValue)
-    ? new Date(internalDateValue)
-    : options.message.sentAt
-      ? new Date(options.message.sentAt)
-      : null;
   const sentAt = options.message.sentAt
     ? new Date(options.message.sentAt)
-    : internalDate;
+    : null;
+  const internalDate = sentAt;
   if (
     !internalDate ||
     !sentAt ||
@@ -875,6 +871,56 @@ async function runGmailMessage(job: WorkflowStepJob) {
     runId,
     providerMessageId,
   };
+}
+
+async function runGmailMessageRefresh(job: WorkflowStepJob) {
+  if (!job.accountId) {
+    throw new Error("The Gmail message refresh job has no account.");
+  }
+  if (job.payload.reason !== "implausible_date") {
+    throw new Error("The Gmail message refresh reason is invalid.");
+  }
+  const providerMessageId = requiredString(
+    job.payload.providerMessageId,
+    "Gmail message ID",
+  );
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  let gmailMessage;
+  try {
+    gmailMessage = await getGmailMessage(
+      credential.accessToken,
+      providerMessageId,
+    );
+  } catch (error) {
+    if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+    const deleted = await deleteIndexedMessage({
+      accountId: account.id,
+      providerMessageId,
+    });
+    if (deleted.threadId) {
+      await recordMailboxMessageRefresh({
+        userId: account.userId,
+        accountId: account.id,
+        threadId: deleted.threadId,
+      });
+    }
+    return { status: "gone", providerMessageId };
+  }
+
+  const stored = await storeMessage({
+    accessToken: credential.accessToken,
+    userId: account.userId,
+    accountId: account.id,
+    accountEmail: account.email,
+    ingestionMode: "initial",
+    message: await parseGmailMessage(gmailMessage),
+  });
+  await recordMailboxMessageRefresh({
+    userId: account.userId,
+    accountId: account.id,
+    threadId: stored.threadId,
+  });
+  return { status: "complete", providerMessageId };
 }
 
 function gmailPubSubTopic(): string {
@@ -2827,6 +2873,9 @@ function processGmailControl(bullJob: WorkflowJob) {
       if (job.stepType === "gmail.history.catchup") {
         return runGmailHistoryCatchup(job);
       }
+      if (job.stepType === "gmail.message.refresh") {
+        return runGmailMessageRefresh(job);
+      }
       if (job.stepType === "gmail.watch.renew") return runGmailWatchRenewal(job);
       if (job.stepType === "gmail.objects.delete") return runGmailObjectDelete(job);
       if (job.stepType === "gmail.account.cleanup") {
@@ -3015,6 +3064,11 @@ async function run() {
   process.once("SIGTERM", requestStop);
 
   try {
+    await enqueueImplausibleGmailMessageDateRepairs({
+      latestAllowedAt: new Date(
+        Date.now() + GMAIL_MESSAGE_FUTURE_TOLERANCE_MS,
+      ),
+    });
     await enqueueMissingMailSyncRuns();
     await enqueuePendingGmailHistoryCatchups();
     await enqueueReadyMailSyncFinalizers();
