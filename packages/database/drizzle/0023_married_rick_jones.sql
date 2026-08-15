@@ -6,14 +6,12 @@ WHERE "step_type" IN ('label.backfill.submit', 'label.batch.retry', 'label.batch
   AND "status" IN ('queued', 'running', 'failed');--> statement-breakpoint
 DELETE FROM "queue_outbox" WHERE "queue_name" = 'mail-label-events';--> statement-breakpoint
 ALTER TABLE "labels" ADD COLUMN "system_key" text;--> statement-breakpoint
-ALTER TABLE "messages" ADD COLUMN "label_analysis_state" text DEFAULT 'pending' NOT NULL;--> statement-breakpoint
+ALTER TABLE "messages" ADD COLUMN "label_analysis_state" text DEFAULT 'complete' NOT NULL;--> statement-breakpoint
+ALTER TABLE "messages" ALTER COLUMN "label_analysis_state" SET DEFAULT 'pending';--> statement-breakpoint
 ALTER TABLE "messages" ADD COLUMN "label_analysis_version" integer DEFAULT 1 NOT NULL;--> statement-breakpoint
 ALTER TABLE "messages" ADD COLUMN "label_analysis_definition_hash" text;--> statement-breakpoint
 ALTER TABLE "messages" ADD COLUMN "label_analysis_error" text;--> statement-breakpoint
 ALTER TABLE "messages" ADD COLUMN "label_analyzed_at" timestamp with time zone;--> statement-breakpoint
-UPDATE "messages"
-SET "label_analysis_state" = 'complete',
-    "label_analyzed_at" = "updated_at";--> statement-breakpoint
 DELETE FROM "labels"
 WHERE "kind" = 'gmail'
   AND "provider_label_id" NOT IN ('IMPORTANT', 'INBOX', 'SENT', 'DRAFT', 'TRASH', 'SPAM', 'STARRED', 'UNREAD');--> statement-breakpoint
