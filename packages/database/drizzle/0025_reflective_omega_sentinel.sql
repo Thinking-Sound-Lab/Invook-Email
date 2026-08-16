@@ -1,0 +1,1 @@
+ALTER TABLE "connected_accounts" ADD COLUMN "image" text;

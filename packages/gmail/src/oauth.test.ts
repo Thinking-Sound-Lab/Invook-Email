@@ -35,11 +35,14 @@ async function signedGoogleToken(options?: {
   expiresInSeconds?: number;
   includeExpiration?: boolean;
   issuer?: string;
+  picture?: string;
 }) {
   const now = Math.floor(Date.now() / 1000);
   let token = new SignJWT({
     email: serviceAccountEmail,
     email_verified: options?.emailVerified ?? true,
+    name: "Gmail Test User",
+    picture: options?.picture ?? "https://images.example.test/gmail-user.png",
   })
     .setProtectedHeader({ alg: "RS256", kid: keyId })
     .setIssuer(options?.issuer ?? "https://accounts.google.com")
@@ -61,6 +64,17 @@ test("Google ID token verification returns authenticated OIDC claims", async () 
   assert.equal(claims.iss, "https://accounts.google.com");
   assert.equal(claims.aud, audience);
   assert.equal(typeof claims.exp, "number");
+  assert.equal(claims.name, "Gmail Test User");
+  assert.equal(claims.picture, "https://images.example.test/gmail-user.png");
+});
+
+test("Google ID token verification ignores an unsafe profile image URL", async () => {
+  const claims = await verifyGoogleIdToken(
+    await signedGoogleToken({ picture: "javascript:alert(1)" }),
+    audience,
+  );
+
+  assert.equal(claims.picture, null);
 });
 
 test("Google ID token verification rejects a different push audience", async () => {

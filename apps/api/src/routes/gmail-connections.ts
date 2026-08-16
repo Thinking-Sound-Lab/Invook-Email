@@ -224,6 +224,7 @@ async function handleGmailCallback(
       userId: session.userId,
       providerAccountId,
       email: gmailProfile.emailAddress,
+      image: authorization.identity.image,
       scopes: authorization.scopes,
       currentHistoryId: gmailProfile.historyId,
       tokenCiphertext,

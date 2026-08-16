@@ -37,6 +37,7 @@ export async function serializeWorkspace(
     account: {
       id: workspace.account.id,
       email: workspace.account.email,
+      image: workspace.account.image,
       status: workspace.account.status,
       syncState: {
         ...workspace.account.syncState,

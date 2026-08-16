@@ -145,6 +145,7 @@ export type SessionState =
 export type MailboxAccount = {
   id: string;
   email: string;
+  image: string | null;
   status: "connected" | "reconnect_required" | "disconnected";
   syncState: AccountSyncState;
   mailSyncProgress: MailSyncProgress;

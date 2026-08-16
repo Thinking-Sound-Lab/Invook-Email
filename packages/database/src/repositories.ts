@@ -359,6 +359,7 @@ type GmailAuthenticationInput = {
   userId: string;
   providerAccountId: string;
   email: string;
+  image: string | null;
   scopes: string[];
   currentHistoryId: string;
   tokenCiphertext: string;
@@ -468,6 +469,7 @@ async function saveGmailAccountAndCredential(
     .update(connectedAccounts)
     .set({
       email: input.email,
+      image: input.image,
       status: "connected",
       scopes: input.scopes,
       updatedAt: new Date(),
@@ -570,6 +572,7 @@ export async function saveNewGmailConnection(
         provider: "gmail",
         providerAccountId: input.providerAccountId,
         email: input.email,
+        image: input.image,
         status: "connected",
         scopes: input.scopes,
         memoryAcknowledgedAt: input.authenticatedAt,
@@ -1085,6 +1088,7 @@ export async function getMailboxWorkspace(
     .select({
       id: connectedAccounts.id,
       email: connectedAccounts.email,
+      image: connectedAccounts.image,
       status: connectedAccounts.status,
       syncState: connectedAccounts.syncState,
       lastSyncedAt: connectedAccounts.lastSyncedAt,

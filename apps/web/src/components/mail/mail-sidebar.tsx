@@ -4,7 +4,6 @@ import {
   FileEditIcon,
   InboxIcon,
   Mail01Icon,
-  MailAccount01Icon,
   PencilEdit01Icon,
   PlusSignIcon,
   Search02Icon,
@@ -117,6 +116,11 @@ export function MailSidebar({
   batchConfigured,
 }: MailSidebarProps) {
   const labels = listSidebarLabels({ gmailUserLabels, invookLabels });
+  const connectedAccountImage =
+    account.image ??
+    (account.email.toLowerCase() === user.email.toLowerCase()
+      ? user.image
+      : null);
 
   return (
     <aside className="flex min-h-0 flex-col bg-sidebar px-2 py-3 lg:px-3" aria-label="Mailbox navigation">
@@ -209,14 +213,15 @@ export function MailSidebar({
           Inboxes
         </p>
         <nav className="space-y-0.5" aria-label="Connected inboxes">
-          <div className="flex h-9 items-center gap-2.5 rounded-md bg-sidebar-accent px-2.5 text-sm font-medium text-sidebar-foreground">
-            <span className="grid size-[18px] shrink-0 place-items-center rounded bg-sidebar-foreground/8">
-              <HugeiconsIcon
-                icon={MailAccount01Icon}
-                size={14}
-                strokeWidth={1.65}
-              />
-            </span>
+          <div className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent/70">
+            <Avatar size="sm" className="size-5 border-0 after:border-0">
+              {connectedAccountImage ? (
+                <AvatarImage src={connectedAccountImage} alt="" />
+              ) : null}
+              <AvatarFallback className="bg-sidebar-accent text-[9px] font-semibold text-sidebar-foreground">
+                {initials(account.email)}
+              </AvatarFallback>
+            </Avatar>
             <span className="hidden min-w-0 flex-1 truncate lg:block">
               {account.email}
             </span>
@@ -231,7 +236,10 @@ export function MailSidebar({
             <button
               type="submit"
               aria-label="Add Gmail account"
-              className={cn(navItemClassName(false), "font-normal")}
+              className={cn(
+                navItemClassName(false),
+                "h-8 gap-2 px-2 text-[13px] font-normal",
+              )}
             >
               <HugeiconsIcon
                 icon={PlusSignIcon}

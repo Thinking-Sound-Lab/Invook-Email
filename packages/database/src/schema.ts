@@ -132,6 +132,7 @@ export const connectedAccounts = pgTable(
     provider: text("provider").$type<"gmail">().notNull().default("gmail"),
     providerAccountId: text("provider_account_id").notNull(),
     email: text("email").notNull(),
+    image: text("image"),
     status: text("status")
       .$type<"connected" | "reconnect_required" | "disconnected">()
       .notNull()
