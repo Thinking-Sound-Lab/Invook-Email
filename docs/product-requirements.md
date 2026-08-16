@@ -299,5 +299,4 @@ The Memory-first slice is successful when:
 After the Memory loop is measured with real use:
 
 1. evaluate broader factual retrieval independently of Memory extraction;
-2. add sending, scheduling, reminders, and safe automations;
-3. choose an open-source license and add contribution governance.
+2. add sending, scheduling, reminders, and safe automations.

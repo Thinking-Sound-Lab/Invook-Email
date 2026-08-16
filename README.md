@@ -184,4 +184,11 @@ docker compose -f docker/compose.yml config --quiet
 - [Product requirements](./docs/product-requirements.md)
 - [Gmail mailbox replica contract](./docs/gmail-replica-contract.md)
 
-The project license has not been selected yet. Do not assume reuse rights until a license is added.
+## Community and License
+
+- [Contributing guide](./.github/CONTRIBUTING.md)
+- [Code of Conduct](./.github/CODE_OF_CONDUCT.md)
+- [Security Policy](./.github/SECURITY.md)
+
+Invook is licensed under the [Apache License 2.0](./LICENSE). See
+[NOTICE](./NOTICE) for attribution information.

@@ -2,6 +2,7 @@
   "name": "invook",
   "version": "0.2.0",
   "private": true,
+  "license": "Apache-2.0",
   "packageManager": "pnpm@11.10.0",
   "description": "An open-source, AI-native Gmail client that drafts with learned Memory.",
   "scripts": {
