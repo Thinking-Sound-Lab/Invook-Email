@@ -28,10 +28,16 @@ git checkout -b fix/short-description
 corepack enable
 pnpm install --frozen-lockfile
 cp .env.example .env.local
+openssl rand -base64 32
+openssl rand -base64 32
 ```
 
-Fill only the local environment values you need. Never commit `.env.local` or
-real secrets. Start the complete local stack with:
+Put the two different generated values in `BETTER_AUTH_SECRET` and
+`TOKEN_ENCRYPTION_KEY`, respectively. Fill every other blank value required by
+the services you intend to run; authentication requires the Better Auth Google
+client values, while a complete Gmail connection also requires the Gmail OAuth
+and Pub/Sub values documented in the README. Never commit `.env.local` or real
+credentials. Start the complete local stack with:
 
 ```bash
 make dev
