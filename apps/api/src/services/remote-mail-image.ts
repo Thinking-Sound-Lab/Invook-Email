@@ -10,6 +10,7 @@ import axios, {
 import ipaddr from "ipaddr.js";
 
 const MAXIMUM_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAXIMUM_IMAGE_FETCH_DURATION_MILLISECONDS = 10_000;
 const MAXIMUM_REDIRECTS = 3;
 const SUPPORTED_IMAGE_TYPES = new Set([
   "image/apng",
@@ -31,6 +32,7 @@ export class UnsafeRemoteMailImageUrlError extends Error {}
 export class RemoteMailImageUnavailableError extends Error {}
 
 interface RemoteMailImageDependencies {
+  createFetchSignal?: () => AbortSignal;
   resolve?: ResolveAddresses;
   request?: (
     url: string,
@@ -146,6 +148,9 @@ export async function fetchRemoteMailImage(
     dependencies.request ??
     ((url: string, configuration: AxiosRequestConfig) =>
       axios.get<ArrayBuffer>(url, configuration));
+  const fetchSignal =
+    dependencies.createFetchSignal?.() ??
+    AbortSignal.timeout(MAXIMUM_IMAGE_FETCH_DURATION_MILLISECONDS);
   let currentUrl = new URL(normalizedSource);
 
   for (let redirectCount = 0; redirectCount <= MAXIMUM_REDIRECTS; redirectCount += 1) {
@@ -162,6 +167,7 @@ export async function fetchRemoteMailImage(
         maxContentLength: MAXIMUM_IMAGE_BYTES,
         maxRedirects: 0,
         responseType: "arraybuffer",
+        signal: fetchSignal,
         validateStatus: () => true,
       });
     } catch {

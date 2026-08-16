@@ -5,6 +5,7 @@ import {
   fetchRemoteMailImage,
   isPublicNetworkAddress,
   normalizeRemoteMailImageUrl,
+  RemoteMailImageUnavailableError,
   UnsafeRemoteMailImageUrlError,
 } from "./remote-mail-image";
 
@@ -57,4 +58,23 @@ test("remote image proxy rejects non-public network addresses", async () => {
       }),
     UnsafeRemoteMailImageUrlError,
   );
+});
+
+test("remote image proxy applies a fetch deadline signal", async () => {
+  let isFetchSignalAborted: boolean | undefined;
+
+  await assert.rejects(
+    () =>
+      fetchRemoteMailImage("https://images.example.com/banner.png", {
+        createFetchSignal: () => AbortSignal.abort(),
+        request: async (_url, configuration) => {
+          isFetchSignalAborted = configuration.signal?.aborted;
+          throw new Error("request aborted");
+        },
+        resolve: async () => [{ address: "8.8.8.8", family: 4 }],
+      }),
+    RemoteMailImageUnavailableError,
+  );
+
+  assert.equal(isFetchSignalAborted, true);
 });

@@ -98,7 +98,7 @@ test("email HTML preserves self-contained images", () => {
 test("email HTML proxies remote CSS images without changing data images", () => {
   const document = buildEmailHtmlDocument(
     `
-      <style>.hero { background-image: url("https://example.com/hero.png"); }</style>
+      <style class="mail-theme">.hero { background-image: url("https://example.com/hero.png"); }</style>
       <div style="background: url(data:image/png;base64,iVBORw0KGgo=), url('//example.com/tile.png'); content: image-set('https://example.com/retina.png' 2x)"></div>
     `,
     "message-5",
@@ -107,6 +107,7 @@ test("email HTML proxies remote CSS images without changing data images", () => 
 
   assert.doesNotMatch(document, /url\(["']?https?:\/\//);
   assert.doesNotMatch(document, /url\(["']?\/\//);
+  assert.match(document, /<style class="mail-theme">/);
   assert.match(document, /source=https%3A%2F%2Fexample\.com%2Fhero\.png/);
   assert.match(document, /source=https%3A%2F%2Fexample\.com%2Ftile\.png/);
   assert.match(document, /source=https%3A%2F%2Fexample\.com%2Fretina\.png/);

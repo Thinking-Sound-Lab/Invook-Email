@@ -269,9 +269,9 @@ function sanitizeEmailHtml(
     },
   });
   return sanitizedBodyHtml.replace(
-    /<style>([\s\S]*?)<\/style>/gi,
-    (_match, stylesheet: string) =>
-      `<style>${rewriteCssRemoteImages(
+    /<style\b([^>]*)>([\s\S]*?)<\/style>/gi,
+    (_match, attributes: string, stylesheet: string) =>
+      `<style${attributes}>${rewriteCssRemoteImages(
         stylesheet,
         messageId,
         capability,
