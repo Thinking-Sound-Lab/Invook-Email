@@ -372,6 +372,7 @@ type NewGmailConnectionInput = GmailAuthenticationInput & {
     topicName: string;
     historyId: string;
     expirationAt: Date;
+    renewedAt: Date;
   };
 };
 
@@ -478,6 +479,56 @@ async function saveGmailAccountAndCredential(
   await saveGmailCredential(transaction, input, accountId);
 }
 
+async function saveStartedGmailWatch(
+  transaction: DatabaseTransaction,
+  input: {
+    userId: string;
+    accountId: string;
+    watch: NewGmailConnectionInput["watch"];
+  },
+): Promise<void> {
+  const [savedWatch] = await transaction
+    .insert(gmailWatchStates)
+    .values({
+      accountId: input.accountId,
+      topicName: input.watch.topicName,
+      historyId: input.watch.historyId,
+      expirationAt: input.watch.expirationAt,
+      lastRenewedAt: input.watch.renewedAt,
+    })
+    .onConflictDoUpdate({
+      target: gmailWatchStates.accountId,
+      set: {
+        topicName: input.watch.topicName,
+        historyId: input.watch.historyId,
+        expirationAt: input.watch.expirationAt,
+        status: "active",
+        lastRenewedAt: input.watch.renewedAt,
+        lastError: null,
+        updatedAt: input.watch.renewedAt,
+      },
+      setWhere: or(
+        lt(gmailWatchStates.expirationAt, input.watch.expirationAt),
+        and(
+          eq(gmailWatchStates.expirationAt, input.watch.expirationAt),
+          lte(gmailWatchStates.lastRenewedAt, input.watch.renewedAt),
+        ),
+      ),
+    })
+    .returning({ accountId: gmailWatchStates.accountId });
+  if (!savedWatch) return;
+
+  await enqueueDailyGmailWatchRenewal(
+    {
+      userId: input.userId,
+      accountId: input.accountId,
+      renewedAt: input.watch.renewedAt,
+      expectedExpirationAt: input.watch.expirationAt,
+    },
+    transaction as unknown as Database,
+  );
+}
+
 async function saveReturningGmailAuthentication(
   transaction: DatabaseTransaction,
   input: GmailAuthenticationInput,
@@ -562,6 +613,11 @@ export async function saveNewGmailConnection(
         input,
         existingAccount,
       );
+      await saveStartedGmailWatch(transaction, {
+        userId: input.userId,
+        accountId: account.id,
+        watch: input.watch,
+      });
       return { ...account, created: false };
     }
 
@@ -590,13 +646,6 @@ export async function saveNewGmailConnection(
         historyCursor: null,
         state: "pending",
       });
-    await transaction
-      .insert(gmailWatchStates)
-      .values({
-        accountId: account.id,
-        ...input.watch,
-        lastRenewedAt: input.authenticatedAt,
-      });
     await saveGmailCredential(transaction, input, account.id);
 
     await createInitialMailSyncRun(
@@ -607,15 +656,11 @@ export async function saveNewGmailConnection(
       },
       transaction as unknown as Database,
     );
-    await enqueueDailyGmailWatchRenewal(
-      {
-        userId: input.userId,
-        accountId: account.id,
-        renewedAt: input.authenticatedAt,
-        expectedExpirationAt: input.watch.expirationAt,
-      },
-      transaction as unknown as Database,
-    );
+    await saveStartedGmailWatch(transaction, {
+      userId: input.userId,
+      accountId: account.id,
+      watch: input.watch,
+    });
 
     return { ...account, created: true };
   });

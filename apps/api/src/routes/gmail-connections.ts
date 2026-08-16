@@ -245,6 +245,7 @@ async function handleGmailCallback(
       if (!Number.isFinite(watchExpiration)) {
         throw new Error("Gmail returned an invalid watch expiration.");
       }
+      const watchRenewedAt = new Date();
       account = await saveNewGmailConnection({
         ...authentication,
         initialHistoryId: gmailProfile.historyId,
@@ -252,6 +253,7 @@ async function handleGmailCallback(
           topicName,
           historyId: watch.historyId,
           expirationAt: new Date(watchExpiration),
+          renewedAt: watchRenewedAt,
         },
       });
     }
