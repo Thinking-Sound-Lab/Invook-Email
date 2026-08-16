@@ -4,6 +4,7 @@ import {
   count,
   desc,
   eq,
+  gt,
   inArray,
   isNull,
   not,
@@ -24,8 +25,8 @@ import {
   gmailWatchStates,
   gmailSyncItems,
   gmailSyncPages,
-  labels,
   mailSyncRuns,
+  messages,
   queueOutbox,
   workflowSteps,
 } from "./schema";
@@ -50,6 +51,7 @@ const gmailConnectedAccountStepTypes = [
   "gmail.sync.page",
   "gmail.sync.message",
   "gmail.sync.finalize",
+  "gmail.message.refresh",
   "gmail.history.catchup",
   "gmail.watch.renew",
 ] as const;
@@ -251,6 +253,7 @@ export function queueNameForStepType(stepType: string): QueueName {
     case "gmail.sync.message":
       return "gmail-messages";
     case "gmail.history.catchup":
+    case "gmail.message.refresh":
     case "gmail.watch.renew":
     case "gmail.account.cleanup":
     case "gmail.objects.delete":
@@ -268,11 +271,9 @@ export function queueNameForStepType(stepType: string): QueueName {
       return "mail-memory-events";
     case "memory.feedback":
       return "mail-memory-feedback";
-    case "label.backfill.submit":
+    case "label.message.analyze":
+    case "label.message.apply":
       return "mail-label-submit";
-    case "label.batch.retry":
-    case "label.batch.event":
-      return "mail-label-events";
     default:
       throw new Error(`Unsupported workflow step type: ${stepType}`);
   }
@@ -346,7 +347,6 @@ export function createPostSyncDerivationSteps(input: {
   userId: string;
   accountId: string;
   historyCursor: string;
-  labels: Array<{ id: string; definitionVersion: number }>;
 }): WorkflowStepInput[] {
   return [
     {
@@ -363,16 +363,6 @@ export function createPostSyncDerivationSteps(input: {
       payload: { schemaVersion: MEMORY_SCHEMA_VERSION },
       idempotencyKey: `memory.extract:${input.accountId}:${MEMORY_SCHEMA_VERSION}:${input.historyCursor}`,
     },
-    ...input.labels.map((label) => ({
-      userId: input.userId,
-      accountId: input.accountId,
-      stepType: "label.backfill.submit",
-      payload: {
-        labelId: label.id,
-        definitionVersion: label.definitionVersion,
-      },
-      idempotencyKey: `label.backfill.submit:${label.id}:${label.definitionVersion}:${input.historyCursor}`,
-    })),
   ];
 }
 
@@ -519,6 +509,79 @@ export async function getMailSyncRunContext(
   return run ?? null;
 }
 
+export async function getActiveRepairMailSyncRunContext(
+  accountId: string,
+  database: Database = getDatabase(),
+) {
+  const [run] = await database
+    .select({
+      id: mailSyncRuns.id,
+      startingHistoryCursor: mailSyncRuns.startingHistoryCursor,
+      status: mailSyncRuns.status,
+    })
+    .from(mailSyncRuns)
+    .where(
+      and(
+        eq(mailSyncRuns.accountId, accountId),
+        eq(mailSyncRuns.runType, "repair"),
+        inArray(mailSyncRuns.status, ["queued", "running"]),
+      ),
+    )
+    .orderBy(desc(mailSyncRuns.createdAt))
+    .limit(1);
+  return run ?? null;
+}
+
+export async function enqueuePendingGmailHistoryCatchups(
+  database: Database = getDatabase(),
+): Promise<number> {
+  const accounts = await database
+    .select({
+      id: connectedAccounts.id,
+      userId: connectedAccounts.userId,
+      pendingHistoryCursor: gmailReplicaStates.pendingHistoryCursor,
+      replicaState: gmailReplicaStates.state,
+    })
+    .from(connectedAccounts)
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
+    .where(
+      and(
+        eq(connectedAccounts.status, "connected"),
+        inArray(gmailReplicaStates.state, ["ready", "repairing"]),
+        not(isNull(gmailReplicaStates.pendingHistoryCursor)),
+      ),
+    );
+
+  let enqueued = 0;
+  for (const account of accounts) {
+    if (!account.pendingHistoryCursor) continue;
+    const repairRun =
+      account.replicaState === "repairing"
+        ? await getActiveRepairMailSyncRunContext(account.id, database)
+        : null;
+    if (account.replicaState === "repairing" && !repairRun) continue;
+    const activation = repairRun?.id ?? "ready";
+    await enqueueWorkflowStep(
+      {
+        userId: account.userId,
+        accountId: account.id,
+        stepType: "gmail.history.catchup",
+        payload: {
+          reason: "pending_reconciliation",
+          pendingHistoryCursor: account.pendingHistoryCursor,
+        },
+        idempotencyKey: `gmail-history-pending-reconciliation:${account.id}:${activation}:${account.pendingHistoryCursor}`,
+      },
+      database,
+    );
+    enqueued += 1;
+  }
+  return enqueued;
+}
+
 export async function getMailSyncRunProviderMessageIds(
   input: { runId: string; accountId: string },
   database: Database = getDatabase(),
@@ -591,6 +654,66 @@ export async function enqueueMissingMailSyncRuns(
     created += 1;
   }
   return created;
+}
+
+export function createGmailMessageDateRepairStep(input: {
+  userId: string;
+  accountId: string;
+  providerMessageId: string;
+  invalidSentAt: Date;
+}): WorkflowStepInput {
+  return {
+    userId: input.userId,
+    accountId: input.accountId,
+    stepType: "gmail.message.refresh",
+    payload: {
+      providerMessageId: input.providerMessageId,
+      reason: "implausible_date",
+    },
+    idempotencyKey: `gmail-message-date-repair:${input.accountId}:${input.providerMessageId}:${input.invalidSentAt.toISOString()}`,
+  };
+}
+
+export async function enqueueImplausibleGmailMessageDateRepairs(
+  input: { latestAllowedAt: Date },
+  database: Database = getDatabase(),
+): Promise<number> {
+  if (!Number.isFinite(input.latestAllowedAt.getTime())) {
+    throw new Error("The latest allowed Gmail message date is invalid.");
+  }
+  return database.transaction(async (transaction) => {
+    const candidates = await transaction
+      .select({
+        userId: messages.userId,
+        accountId: messages.accountId,
+        providerMessageId: messages.providerMessageId,
+        sentAt: messages.sentAt,
+      })
+      .from(messages)
+      .innerJoin(
+        connectedAccounts,
+        eq(connectedAccounts.id, messages.accountId),
+      )
+      .where(
+        and(
+          eq(connectedAccounts.status, "connected"),
+          gt(messages.sentAt, input.latestAllowedAt),
+        ),
+      )
+      .orderBy(desc(messages.sentAt))
+      .limit(1_000);
+
+    for (const candidate of candidates) {
+      await enqueueWorkflowStepWithExecutor(
+        createGmailMessageDateRepairStep({
+          ...candidate,
+          invalidSentAt: candidate.sentAt,
+        }),
+        transaction,
+      );
+    }
+    return candidates.length;
+  });
 }
 
 export async function publishOutboxBatch(
@@ -951,36 +1074,6 @@ export async function failWorkflowStep(
       await transaction.execute(
         sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.step.accountId, state: "failed" })})`,
       );
-    }
-    if (input.step.stepType.startsWith("label.")) {
-      let labelId = input.step.payload.labelId;
-      let definitionVersion = input.step.payload.definitionVersion;
-      if (input.step.stepType === "label.batch.event") {
-        const submissionStepId = input.step.payload.submissionJobId;
-        if (typeof submissionStepId === "string") {
-          const [submission] = await transaction
-            .select({ result: workflowSteps.result })
-            .from(workflowSteps)
-            .where(eq(workflowSteps.id, submissionStepId))
-            .limit(1);
-          if (submission?.result) {
-            labelId = submission.result.labelId;
-            definitionVersion = submission.result.definitionVersion;
-          }
-        }
-      }
-      if (typeof labelId === "string" && typeof definitionVersion === "number") {
-        await transaction
-          .update(labels)
-          .set({ analysisState: "failed", updatedAt: new Date() })
-          .where(
-            and(
-              eq(labels.id, labelId),
-              eq(labels.accountId, input.step.accountId),
-              eq(labels.definitionVersion, definitionVersion),
-            ),
-          );
-      }
     }
     return true;
   });
@@ -1482,21 +1575,11 @@ export async function completeMailSyncRun(
       sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: run.accountId, state: "pending" })})`,
     );
 
-    const analysisLabels = await transaction
-      .select({
-        id: labels.id,
-        definitionVersion: labels.definitionVersion,
-      })
-      .from(labels)
-      .where(
-        and(eq(labels.accountId, run.accountId), eq(labels.kind, "invook")),
-      );
     await enqueueWorkflowStepsWithExecutor(
       createPostSyncDerivationSteps({
         userId: run.userId,
         accountId: run.accountId,
         historyCursor: input.finalHistoryCursor,
-        labels: analysisLabels,
       }),
       executor,
     );
@@ -1576,19 +1659,11 @@ export async function enqueuePostSyncWorkflowSteps(
       account.replicaState !== "ready" ||
       !account.historyCursor
     ) continue;
-    const analysisLabels = await database
-      .select({
-        id: labels.id,
-        definitionVersion: labels.definitionVersion,
-      })
-      .from(labels)
-      .where(and(eq(labels.accountId, account.id), eq(labels.kind, "invook")));
     const steps = await enqueueWorkflowStepsWithExecutor(
       createPostSyncDerivationSteps({
         userId: account.userId,
         accountId: account.id,
         historyCursor: account.historyCursor,
-        labels: analysisLabels,
       }),
       database,
     );

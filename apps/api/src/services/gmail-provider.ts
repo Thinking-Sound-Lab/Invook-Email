@@ -33,8 +33,16 @@ export type GmailProviderAccess = {
 };
 
 export type GmailProviderAccessResult =
-  | { status: "not_found" | "replica_not_ready"; access: null }
+  | { status: "not_found"; access: null }
   | { status: "ready"; access: GmailProviderAccess };
+
+export interface GmailProviderAccessDependencies {
+  getWriteContext: typeof getGmailProviderWriteContext;
+}
+
+const defaultDependencies: GmailProviderAccessDependencies = {
+  getWriteContext: getGmailProviderWriteContext,
+};
 
 async function refreshCredentialIfRequired(
   accountId: string,
@@ -84,12 +92,10 @@ async function refreshCredentialIfRequired(
 
 export async function getGmailProviderAccess(
   userId: string,
+  dependencies: GmailProviderAccessDependencies = defaultDependencies,
 ): Promise<GmailProviderAccessResult> {
-  const context = await getGmailProviderWriteContext(userId);
+  const context = await dependencies.getWriteContext(userId);
   if (!context) return { status: "not_found", access: null };
-  if (context.replicaState !== "ready") {
-    return { status: "replica_not_ready", access: null };
-  }
 
   const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY?.trim();
   if (!encryptionKey) {

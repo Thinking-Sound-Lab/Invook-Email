@@ -11,6 +11,7 @@ import { getAiModel } from "./model";
 export * from "./memory-batch";
 export * from "./embedding";
 export * from "./mail-agent";
+export * from "./message-label-classifier";
 export * from "./model";
 
 const feedbackMemorySchema = z.object({

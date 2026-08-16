@@ -3,35 +3,33 @@ import test from "node:test";
 
 import { listLabelSettingsItems } from "./label-settings-items";
 
-test("label settings include Gmail user labels and Invook labels", () => {
-  const items = listLabelSettingsItems({
-    gmailUserLabels: [{
-      id: "gmail-label",
-      providerLabelId: "Label_1",
-      name: "Clients",
-      type: "user",
-      color: null,
-    }],
-    invookLabels: [{
-      id: "invook-label",
+test("label settings list only Invook labels and protect built-ins", () => {
+  const items = listLabelSettingsItems([
+    {
+      id: "custom-label",
       name: "Action needed",
       description: "Requires a reply",
+      systemKey: null,
       definitionVersion: 1,
-      analysisState: "complete",
-      analyzedThreadCount: 2,
-      totalThreadCount: 2,
-    }],
-  });
+    },
+    {
+      id: "newsletter-label",
+      name: "Newsletter",
+      description: "Recurring editorial mail",
+      systemKey: "newsletter",
+      definitionVersion: 1,
+    },
+  ]);
 
   assert.deepEqual(
     items.map((item) => ({
       id: item.label.id,
-      kind: item.kind,
+      isDeletable: item.isDeletable,
       name: item.label.name,
     })),
     [
-      { id: "invook-label", kind: "invook", name: "Action needed" },
-      { id: "gmail-label", kind: "gmail", name: "Clients" },
+      { id: "custom-label", isDeletable: true, name: "Action needed" },
+      { id: "newsletter-label", isDeletable: false, name: "Newsletter" },
     ],
   );
 });

@@ -36,8 +36,7 @@ export type QueueName =
   | "mail-memory-submit"
   | "mail-memory-events"
   | "mail-memory-feedback"
-  | "mail-label-submit"
-  | "mail-label-events";
+  | "mail-label-submit";
 
 export type MailboxMessage = {
   userId: string;
@@ -47,7 +46,7 @@ export type MailboxMessage = {
   subject: string;
   snippet: string;
   participants: string[];
-  gmailLabelIds: string[];
+  gmailLabels: Array<{ providerLabelId: string; name: string }>;
   providerHistoryId: string | null;
   internalDate: Date;
   sizeEstimate: number | null;

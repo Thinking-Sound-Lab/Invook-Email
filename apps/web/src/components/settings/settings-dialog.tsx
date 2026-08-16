@@ -9,7 +9,6 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
-  GmailUserLabel,
   InvookLabel,
   MailboxAccount,
   MemoryEntry,
@@ -121,20 +120,16 @@ function BillingSettings() {
 export interface SettingsDialogProps {
   account: MailboxAccount;
   memories: MemoryEntry[];
-  gmailUserLabels: GmailUserLabel[];
   invookLabels: InvookLabel[];
   aiConfigured: boolean;
-  batchConfigured: boolean;
   triggerClassName?: string;
 }
 
 export function SettingsDialog({
   account,
   memories,
-  gmailUserLabels,
   invookLabels,
   aiConfigured,
-  batchConfigured,
   triggerClassName,
 }: SettingsDialogProps) {
   const [isOpen, setIsOpen] = useState(false);
@@ -212,11 +207,7 @@ export function SettingsDialog({
             />
           </TabsContent>
           <TabsContent value="labels" className="min-h-0 overflow-y-auto">
-            <LabelSettings
-              gmailUserLabels={gmailUserLabels}
-              invookLabels={invookLabels}
-              batchConfigured={batchConfigured}
-            />
+            <LabelSettings invookLabels={invookLabels} />
           </TabsContent>
           <TabsContent value="billing" className="min-h-0 overflow-y-auto">
             <BillingSettings />

@@ -14,6 +14,11 @@ import {
   recordGmailPushNotification,
 } from "./replica";
 import {
+  createRepairMailSyncRun,
+  enqueuePendingGmailHistoryCatchups,
+  getActiveRepairMailSyncRunContext,
+} from "./workflows";
+import {
   connectedAccounts,
   gmailReplicaStates,
   profiles,
@@ -203,6 +208,107 @@ test(
       assert.equal(secondApplied.applied, true);
       assert.equal(secondApplied.pendingHistoryCursor, null);
       assert.equal(secondApplied.continuationStepId, null);
+    } finally {
+      await database.delete(profiles).where(eq(profiles.id, userId));
+      await client.end();
+    }
+  },
+);
+
+test(
+  "repair notifications are reactivated and applied without marking the replica ready",
+  { skip: !testDatabaseUrl },
+  async () => {
+    if (!testDatabaseUrl) return;
+    const client = postgres(testDatabaseUrl, { max: 1, prepare: false });
+    const database = drizzle(client, { schema });
+    const userId = uuidv4();
+    const accountId = uuidv4();
+    const emailAddress = `${accountId}@example.com`;
+    try {
+      await database.insert(profiles).values({ id: userId });
+      await database.insert(connectedAccounts).values({
+        id: accountId,
+        userId,
+        providerAccountId: `provider-${accountId}`,
+        email: emailAddress,
+        memoryAcknowledgedAt: new Date(),
+      });
+      await database.insert(gmailReplicaStates).values({
+        accountId,
+        initialHistoryId: "100",
+        state: "repairing",
+      });
+      const runId = await createRepairMailSyncRun(
+        {
+          userId,
+          accountId,
+          startingHistoryCursor: "200",
+        },
+        database,
+      );
+      assert.deepEqual(
+        await getActiveRepairMailSyncRunContext(accountId, database),
+        {
+          id: runId,
+          startingHistoryCursor: "200",
+          status: "queued",
+        },
+      );
+
+      await recordGmailPushNotification(
+        { emailAddress, notificationHistoryId: "250" },
+        database,
+      );
+      assert.equal(await enqueuePendingGmailHistoryCatchups(database), 1);
+
+      const [recoveryStep] = await database
+        .select({
+          id: workflowSteps.id,
+          input: workflowSteps.input,
+        })
+        .from(workflowSteps)
+        .where(
+          eq(
+            workflowSteps.idempotencyKey,
+            `gmail-history-pending-reconciliation:${accountId}:${runId}:250`,
+          ),
+        );
+      assert.ok(recoveryStep?.id);
+      assert.deepEqual(recoveryStep.input, {
+        reason: "pending_reconciliation",
+        pendingHistoryCursor: "250",
+      });
+
+      const applied = await applyGmailHistoryBatch(
+        {
+          userId,
+          accountId,
+          expectedCursor: "100",
+          nextCursor: "260",
+          messages: [],
+          labelChanges: [],
+          deletedMessageIds: [],
+          stateAfterApply: "repairing",
+        },
+        database,
+      );
+      assert.equal(applied.applied, true);
+      assert.equal(applied.pendingHistoryCursor, null);
+
+      const [replica] = await database
+        .select({
+          state: gmailReplicaStates.state,
+          historyCursor: gmailReplicaStates.historyCursor,
+          pendingHistoryCursor: gmailReplicaStates.pendingHistoryCursor,
+        })
+        .from(gmailReplicaStates)
+        .where(eq(gmailReplicaStates.accountId, accountId));
+      assert.deepEqual(replica, {
+        state: "repairing",
+        historyCursor: "260",
+        pendingHistoryCursor: null,
+      });
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));
       await client.end();
