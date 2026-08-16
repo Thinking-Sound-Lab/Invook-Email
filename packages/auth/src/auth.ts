@@ -1,4 +1,4 @@
-import { betterAuth } from "better-auth";
+import { betterAuth, type Account } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { v4 as uuidv4 } from "uuid";
 
@@ -13,11 +13,7 @@ import {
 
 export const GOOGLE_IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
 
-const GOOGLE_IDENTITY_TOKEN_SCOPES = new Set([
-  ...GOOGLE_IDENTITY_SCOPES,
-  "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile",
-]);
+const GOOGLE_IDENTITY_ACCOUNT_SCOPE = GOOGLE_IDENTITY_SCOPES.join(",");
 
 export interface InvookAuthConfiguration {
   appUrl: string;
@@ -32,14 +28,18 @@ function requireConfigurationValue(value: string, name: string): string {
   return normalizedValue;
 }
 
-export function assertIdentityOnlyGoogleScope(scope: string | null | undefined): void {
-  if (!scope) return;
-  const unexpectedScope = scope
-    .split(/[\s,]+/)
-    .find((value) => value && !GOOGLE_IDENTITY_TOKEN_SCOPES.has(value));
-  if (unexpectedScope) {
-    throw new Error("Global Google authentication returned a non-identity scope.");
-  }
+export function stripGlobalGoogleAccountTokens(
+  account: Partial<Account> & Record<string, unknown>,
+): Partial<Account> & Record<string, unknown> {
+  return {
+    ...account,
+    accessToken: null,
+    refreshToken: null,
+    idToken: null,
+    accessTokenExpiresAt: null,
+    refreshTokenExpiresAt: null,
+    scope: GOOGLE_IDENTITY_ACCOUNT_SCOPE,
+  };
 }
 
 export function createInvookAuth(
@@ -129,12 +129,12 @@ export function createInvookAuth(
       account: {
         create: {
           before: async (account) => {
-            assertIdentityOnlyGoogleScope(account.scope);
+            return { data: stripGlobalGoogleAccountTokens(account) };
           },
         },
         update: {
           before: async (account) => {
-            assertIdentityOnlyGoogleScope(account.scope);
+            return { data: stripGlobalGoogleAccountTokens(account) };
           },
         },
       },

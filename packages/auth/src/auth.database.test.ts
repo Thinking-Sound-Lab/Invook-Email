@@ -49,9 +49,20 @@ test(
         accountId: providerAccountId,
         providerId: "google",
         userId,
-        scope: "openid email profile",
+        accessToken: "combined-provider-access-token",
+        refreshToken: "combined-provider-refresh-token",
+        idToken: "combined-provider-id-token",
+        accessTokenExpiresAt: new Date("2030-01-01T00:00:00.000Z"),
+        refreshTokenExpiresAt: new Date("2030-01-02T00:00:00.000Z"),
+        scope: "openid https://www.googleapis.com/auth/gmail.modify",
       });
       assert.equal(account.userId, userId);
+      assert.equal(account.accessToken, null);
+      assert.equal(account.refreshToken, null);
+      assert.equal(account.idToken, null);
+      assert.equal(account.accessTokenExpiresAt, null);
+      assert.equal(account.refreshTokenExpiresAt, null);
+      assert.equal(account.scope, "openid,email,profile");
       assert.equal(
         (await adapter.findOAuthUser(email, providerAccountId, "google"))?.user.id,
         userId,

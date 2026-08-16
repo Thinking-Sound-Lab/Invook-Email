@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { assertIdentityOnlyGoogleScope, GOOGLE_IDENTITY_SCOPES } from "./auth";
+import { GOOGLE_IDENTITY_SCOPES, stripGlobalGoogleAccountTokens } from "./auth";
 
 test("global Google authentication requests identity scopes only", () => {
   assert.deepEqual(GOOGLE_IDENTITY_SCOPES, ["openid", "email", "profile"]);
@@ -11,17 +11,26 @@ test("global Google authentication requests identity scopes only", () => {
   );
 });
 
-test("global Google authentication rejects non-identity token scopes", () => {
-  assert.doesNotThrow(() =>
-    assertIdentityOnlyGoogleScope(
-      "openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/userinfo.profile",
-    ),
-  );
-  assert.throws(
-    () =>
-      assertIdentityOnlyGoogleScope(
-        "openid https://www.googleapis.com/auth/gmail.modify",
-      ),
-    /non-identity scope/,
-  );
+test("global Google authentication does not persist provider tokens or combined grants", () => {
+  const account = stripGlobalGoogleAccountTokens({
+    accountId: "google-account-id",
+    providerId: "google",
+    userId: "user-id",
+    accessToken: "provider-access-token",
+    refreshToken: "provider-refresh-token",
+    idToken: "provider-id-token",
+    accessTokenExpiresAt: new Date("2030-01-01T00:00:00.000Z"),
+    refreshTokenExpiresAt: new Date("2030-01-02T00:00:00.000Z"),
+    scope: "openid https://www.googleapis.com/auth/gmail.modify",
+  });
+
+  assert.equal(account.accountId, "google-account-id");
+  assert.equal(account.providerId, "google");
+  assert.equal(account.userId, "user-id");
+  assert.equal(account.accessToken, null);
+  assert.equal(account.refreshToken, null);
+  assert.equal(account.idToken, null);
+  assert.equal(account.accessTokenExpiresAt, null);
+  assert.equal(account.refreshTokenExpiresAt, null);
+  assert.equal(account.scope, "openid,email,profile");
 });

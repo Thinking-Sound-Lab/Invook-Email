@@ -1,7 +1,7 @@
 export {
-  assertIdentityOnlyGoogleScope,
   createInvookAuth,
   GOOGLE_IDENTITY_SCOPES,
+  stripGlobalGoogleAccountTokens,
   type InvookAuth,
   type InvookAuthConfiguration,
 } from "./auth";
