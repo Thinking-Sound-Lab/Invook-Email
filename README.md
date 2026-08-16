@@ -44,7 +44,8 @@ See [Configuration](#configuration) before signing in or connecting Gmail.
 2. A signed-in user separately connects a Gmail mailbox. The Fastify API validates the mailbox, encrypts its credentials, registers a Gmail watch, and creates durable synchronization work.
 3. Workers copy Gmail data into PostgreSQL and store raw MIME and attachments in S3-compatible object storage.
 4. PostgreSQL owns workflow state and publishes work through a transactional outbox. BullMQ and Redis execute and retry that work.
-5. AI jobs classify labels, index search content, learn Memory, and create drafts. The Next.js app reads the resulting local replica through the API.
+5. The API serves sender-hosted mail images through a signed, SSRF-checked proxy and durably caches the first successful fetch so later views do not contact the sender again.
+6. AI jobs classify labels, index search content, learn Memory, and create drafts. The Next.js app reads the resulting local replica through the API.
 
 Provider-owned changes are written to Gmail first and then converge locally through Gmail history.
 

@@ -18,6 +18,11 @@ export type StoredObject = {
   etag: string | null;
 };
 
+export type StoredObjectContent = {
+  body: Buffer;
+  contentType: string | null;
+};
+
 export class ObjectStorageObjectNotFoundError extends Error {
   constructor(options: { cause?: unknown } = {}) {
     super("The stored object was not found.", options);
@@ -132,20 +137,31 @@ export class S3ObjectStorage {
     };
   }
 
-  async getObject(key: string): Promise<Buffer> {
+  async getObjectContent(key: string): Promise<StoredObjectContent> {
     try {
       const response = await this.request<ArrayBuffer>({
         method: "GET",
         key,
         responseType: "arraybuffer",
       });
-      return Buffer.from(response.data);
+      const contentType = response.headers["content-type"];
+      return {
+        body: Buffer.from(response.data),
+        contentType:
+          typeof contentType === "string"
+            ? contentType.split(";", 1)[0].trim().toLowerCase()
+            : null,
+      };
     } catch (error) {
       if (axios.isAxiosError(error) && error.response?.status === 404) {
         throw new ObjectStorageObjectNotFoundError({ cause: error });
       }
       throw error;
     }
+  }
+
+  async getObject(key: string): Promise<Buffer> {
+    return (await this.getObjectContent(key)).body;
   }
 
   async deleteObject(key: string): Promise<void> {

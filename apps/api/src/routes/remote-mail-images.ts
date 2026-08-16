@@ -12,12 +12,15 @@ import {
   verifyRemoteMailImageCapability,
 } from "../services/remote-mail-image-capability";
 import {
-  fetchRemoteMailImage,
   normalizeRemoteMailImageUrl,
   RemoteMailImageUnavailableError,
   type RemoteMailImage,
   UnsafeRemoteMailImageUrlError,
 } from "../services/remote-mail-image";
+import {
+  getRemoteMailImage,
+  RemoteMailImageCacheUnavailableError,
+} from "../services/remote-mail-image-cache";
 
 const MAXIMUM_SOURCE_LENGTH = 8_192;
 const MAXIMUM_CAPABILITY_LENGTH = 2_048;
@@ -28,7 +31,7 @@ export interface RemoteMailImageRouteDependencies {
     userId: string;
     messageId: string;
   }) => Promise<{ bodyHtml: string | null } | null>;
-  fetchImage?: (source: string) => Promise<RemoteMailImage>;
+  getImage?: (source: string) => Promise<RemoteMailImage>;
 }
 
 function unquoteCssUrl(value: string): string {
@@ -98,7 +101,7 @@ export function registerRemoteMailImageRoutes(
 ): FastifyPluginAsync {
   const getMessageBody =
     dependencies.getMessageBody ?? getMailboxMessageBodyForUser;
-  const fetchImage = dependencies.fetchImage ?? fetchRemoteMailImage;
+  const getImage = dependencies.getImage ?? getRemoteMailImage;
   const capabilitySecret =
     dependencies.capabilitySecret ?? process.env.BETTER_AUTH_SECRET?.trim() ?? "";
 
@@ -205,7 +208,7 @@ export function registerRemoteMailImageRoutes(
 
         let image: RemoteMailImage;
         try {
-          image = await fetchImage(source);
+          image = await getImage(source);
         } catch (error) {
           if (error instanceof UnsafeRemoteMailImageUrlError) {
             await sendProblem(request, reply, 404, "Remote image not found");
@@ -215,12 +218,21 @@ export function registerRemoteMailImageRoutes(
             await sendProblem(request, reply, 502, "Remote image is unavailable");
             return;
           }
+          if (error instanceof RemoteMailImageCacheUnavailableError) {
+            await sendProblem(
+              request,
+              reply,
+              503,
+              "Remote image cache is unavailable",
+            );
+            return;
+          }
           throw error;
         }
 
         reply
           .type(image.contentType)
-          .header("cache-control", "private, max-age=86400")
+          .header("cache-control", "private, max-age=31536000, immutable")
           .header("content-length", String(image.bytes.byteLength))
           .header("cross-origin-resource-policy", "cross-origin");
         await reply.send(image.bytes);

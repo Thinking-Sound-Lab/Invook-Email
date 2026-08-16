@@ -56,11 +56,10 @@ export function getDatabase(): Database {
   return connection.database;
 }
 
-export async function withGmailAccountControlLock<T>(
-  accountId: string,
+async function withDatabaseControlLock<T>(
+  lockName: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const lockName = `gmail-control:${accountId}`;
   getDatabase();
   const client = databaseState.invookDatabaseConnection?.client;
   if (!client) throw new Error("The database connection is unavailable.");
@@ -79,6 +78,20 @@ export async function withGmailAccountControlLock<T>(
       connection.release();
     }
   }
+}
+
+export function withGmailAccountControlLock<T>(
+  accountId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withDatabaseControlLock(`gmail-control:${accountId}`, operation);
+}
+
+export function withRemoteMailImageCacheLock<T>(
+  cacheKey: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withDatabaseControlLock(`remote-mail-image:${cacheKey}`, operation);
 }
 
 async function listenForDatabaseNotifications(

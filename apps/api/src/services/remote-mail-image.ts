@@ -1,5 +1,5 @@
 import type { LookupAddress as DnsLookupAddress } from "node:dns";
-import { lookup } from "node:dns/promises";
+import { Resolver } from "node:dns/promises";
 
 import axios, {
   type AddressFamily,
@@ -32,6 +32,7 @@ export class UnsafeRemoteMailImageUrlError extends Error {}
 export class RemoteMailImageUnavailableError extends Error {}
 
 interface RemoteMailImageDependencies {
+  cancelResolution?: () => void;
   createFetchSignal?: () => AbortSignal;
   resolve?: ResolveAddresses;
   request?: (
@@ -44,6 +45,71 @@ type ResolveAddresses = (
   hostname: string,
   options: { all: true; verbatim: true },
 ) => Promise<DnsLookupAddress[]>;
+
+function createAddressResolver(): {
+  cancel: () => void;
+  resolve: ResolveAddresses;
+} {
+  const resolver = new Resolver();
+  return {
+    cancel: () => resolver.cancel(),
+    resolve: async (hostname) => {
+      const [ipv4Result, ipv6Result] = await Promise.allSettled([
+        resolver.resolve4(hostname),
+        resolver.resolve6(hostname),
+      ]);
+      const addresses: DnsLookupAddress[] = [];
+      if (ipv4Result.status === "fulfilled") {
+        addresses.push(
+          ...ipv4Result.value.map((address) => ({ address, family: 4 as const })),
+        );
+      }
+      if (ipv6Result.status === "fulfilled") {
+        addresses.push(
+          ...ipv6Result.value.map((address) => ({ address, family: 6 as const })),
+        );
+      }
+      if (addresses.length === 0) {
+        throw new RemoteMailImageUnavailableError();
+      }
+      return addresses;
+    },
+  };
+}
+
+function resolveAddressesBeforeDeadline(
+  hostname: string,
+  resolve: ResolveAddresses,
+  cancelResolution: () => void,
+  signal: AbortSignal,
+): Promise<DnsLookupAddress[]> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let isSettled = false;
+    const handleAbort = (): void => {
+      try {
+        cancelResolution();
+      } finally {
+        settle(() => rejectPromise(new RemoteMailImageUnavailableError()));
+      }
+    };
+    const settle = (operation: () => void): void => {
+      if (isSettled) return;
+      isSettled = true;
+      signal.removeEventListener("abort", handleAbort);
+      operation();
+    };
+
+    signal.addEventListener("abort", handleAbort, { once: true });
+    if (signal.aborted) {
+      handleAbort();
+      return;
+    }
+    void resolve(hostname, { all: true, verbatim: true }).then(
+      (addresses) => settle(() => resolvePromise(addresses)),
+      () => settle(() => rejectPromise(new RemoteMailImageUnavailableError())),
+    );
+  });
+}
 
 export function normalizeRemoteMailImageUrl(value: string): string | null {
   try {
@@ -65,9 +131,15 @@ export function isPublicNetworkAddress(value: string): boolean {
   return ipaddr.process(value).range() === "unicast";
 }
 
+export function isSupportedRemoteMailImageContentType(value: string): boolean {
+  return SUPPORTED_IMAGE_TYPES.has(value.trim().toLowerCase());
+}
+
 async function resolvePublicAddresses(
   url: URL,
   resolve: ResolveAddresses,
+  cancelResolution: () => void,
+  signal: AbortSignal,
 ): Promise<Array<{ address: string; family: 4 | 6 }>> {
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (ipaddr.isValid(hostname)) {
@@ -84,7 +156,12 @@ async function resolvePublicAddresses(
 
   let addresses: DnsLookupAddress[];
   try {
-    addresses = await resolve(hostname, { all: true, verbatim: true });
+    addresses = await resolveAddressesBeforeDeadline(
+      hostname,
+      resolve,
+      cancelResolution,
+      signal,
+    );
   } catch {
     throw new RemoteMailImageUnavailableError();
   }
@@ -141,9 +218,11 @@ export async function fetchRemoteMailImage(
   const normalizedSource = normalizeRemoteMailImageUrl(source);
   if (!normalizedSource) throw new UnsafeRemoteMailImageUrlError();
 
-  const resolve: ResolveAddresses =
-    dependencies.resolve ??
-    ((hostname, options) => lookup(hostname, options));
+  const addressResolver = dependencies.resolve ? null : createAddressResolver();
+  const resolve = dependencies.resolve ?? addressResolver?.resolve;
+  if (!resolve) throw new RemoteMailImageUnavailableError();
+  const cancelResolution =
+    dependencies.cancelResolution ?? addressResolver?.cancel ?? (() => undefined);
   const request =
     dependencies.request ??
     ((url: string, configuration: AxiosRequestConfig) =>
@@ -154,7 +233,12 @@ export async function fetchRemoteMailImage(
   let currentUrl = new URL(normalizedSource);
 
   for (let redirectCount = 0; redirectCount <= MAXIMUM_REDIRECTS; redirectCount += 1) {
-    const addresses = await resolvePublicAddresses(currentUrl, resolve);
+    const addresses = await resolvePublicAddresses(
+      currentUrl,
+      resolve,
+      cancelResolution,
+      fetchSignal,
+    );
     let response: AxiosResponse<ArrayBuffer>;
     try {
       response = await request(currentUrl.toString(), {
@@ -194,7 +278,7 @@ export async function fetchRemoteMailImage(
       .split(";", 1)[0]
       .trim()
       .toLowerCase();
-    if (!SUPPORTED_IMAGE_TYPES.has(contentType)) {
+    if (!isSupportedRemoteMailImageContentType(contentType)) {
       throw new RemoteMailImageUnavailableError();
     }
     const bytes = Buffer.from(response.data);

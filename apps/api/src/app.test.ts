@@ -128,7 +128,7 @@ before(async () => {
                 '<img src="https://images.example.com/banner.png?delivery=abc&amp;user=123"><div style="background-image:url(\'https://images.example.com/tile.webp\');content:image-set(\'https://images.example.com/retina.avif\' 2x)"></div>',
             }
           : null,
-      fetchImage: async (source) => {
+      getImage: async (source) => {
         remoteImageFetchCount += 1;
         assert.match(source, /^https:\/\/images\.example\.com\//);
         return { bytes: remoteImageBytes, contentType: "image/png" };
@@ -502,7 +502,10 @@ test("remote mail images authorize the owned message and exact stored source", a
   assert.equal(response.statusCode, 200);
   assert.deepEqual(response.rawPayload, remoteImageBytes);
   assert.equal(response.headers["content-type"], "image/png");
-  assert.equal(response.headers["cache-control"], "private, max-age=86400");
+  assert.equal(
+    response.headers["cache-control"],
+    "private, max-age=31536000, immutable",
+  );
   assert.equal(response.headers["cross-origin-resource-policy"], "cross-origin");
 
   const imageSetSource = new URLSearchParams({

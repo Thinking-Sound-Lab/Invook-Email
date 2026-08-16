@@ -62,11 +62,12 @@ test("remote image proxy rejects non-public network addresses", async () => {
 
 test("remote image proxy applies a fetch deadline signal", async () => {
   let isFetchSignalAborted: boolean | undefined;
+  const fetchController = new AbortController();
 
   await assert.rejects(
     () =>
       fetchRemoteMailImage("https://images.example.com/banner.png", {
-        createFetchSignal: () => AbortSignal.abort(),
+        createFetchSignal: () => fetchController.signal,
         request: async (_url, configuration) => {
           isFetchSignalAborted = configuration.signal?.aborted;
           throw new Error("request aborted");
@@ -76,5 +77,27 @@ test("remote image proxy applies a fetch deadline signal", async () => {
     RemoteMailImageUnavailableError,
   );
 
-  assert.equal(isFetchSignalAborted, true);
+  assert.equal(isFetchSignalAborted, false);
+});
+
+test("remote image proxy cancels DNS resolution at the fetch deadline", async () => {
+  const fetchController = new AbortController();
+  let wasResolutionCancelled = false;
+
+  await assert.rejects(
+    () =>
+      fetchRemoteMailImage("https://images.example.com/banner.png", {
+        cancelResolution: () => {
+          wasResolutionCancelled = true;
+        },
+        createFetchSignal: () => fetchController.signal,
+        resolve: async () => {
+          queueMicrotask(() => fetchController.abort());
+          return new Promise(() => undefined);
+        },
+      }),
+    RemoteMailImageUnavailableError,
+  );
+
+  assert.equal(wasResolutionCancelled, true);
 });
