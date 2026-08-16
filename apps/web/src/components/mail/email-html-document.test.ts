@@ -19,7 +19,7 @@ test("email HTML preserves sender presentation while removing active content", (
         <img src="https://example.com/banner.jpg" onerror="alert('unsafe')">
       </body>
     </html>
-  `, "message-1");
+  `, "message-1", "signed-capability");
 
   assert.match(
     document,
@@ -30,7 +30,10 @@ test("email HTML preserves sender presentation while removing active content", (
     /<table><tr><td class="headline" style="font-weight:bold">Hello<\/td><\/tr><\/table>/,
   );
   assert.match(document, /href="https:\/\/example\.com\/path"/);
-  assert.match(document, /src="https:\/\/example\.com\/banner\.jpg"/);
+  assert.match(
+    document,
+    /src="\/v1\/messages\/message-1\/remote-image\?capability=signed-capability&amp;source=https%3A%2F%2Fexample\.com%2Fbanner\.jpg"/,
+  );
   assert.doesNotMatch(document, /Duplicated subject/);
   assert.equal(document.match(/<script/g)?.length, 1);
   assert.doesNotMatch(document, /<form|<input|<iframe|onerror=/);
@@ -41,6 +44,7 @@ test("email HTML loads remote images while blocking active capabilities", () => 
   const document = buildEmailHtmlDocument(
     '<a href="javascript:alert(1)">Unsafe</a><img src="https://example.com/banner.jpg">',
     "message-2",
+    "signed-capability",
   );
 
   assert.match(document, /default-src 'none'/);
@@ -48,7 +52,11 @@ test("email HTML loads remote images while blocking active capabilities", () => 
   assert.match(document, /form-action 'none'/);
   assert.match(document, /script-src 'nonce-invook-email-size'/);
   assert.match(document, /<meta name="referrer" content="no-referrer">/);
-  assert.match(document, /src="https:\/\/example\.com\/banner\.jpg"/);
+  assert.match(
+    document,
+    /src="\/v1\/messages\/message-2\/remote-image\?capability=signed-capability&amp;source=https%3A%2F%2Fexample\.com%2Fbanner\.jpg"/,
+  );
+  assert.doesNotMatch(document, /src="https:\/\//);
   assert.doesNotMatch(document, /display: none !important/);
   assert.doesNotMatch(document, /javascript:/);
 });
@@ -71,6 +79,7 @@ test("email HTML removes one-pixel tracking images without removing visible imag
       <img src="https://example.com/banner.jpg" width="600" height="240">
     `,
     "message-3",
+    "signed-capability",
   );
 
   assert.doesNotMatch(document, /tracker\.gif/);
@@ -86,6 +95,48 @@ test("email HTML preserves self-contained images", () => {
   assert.match(document, /data:image\/png;base64,iVBORw0KGgo=/);
 });
 
+test("email HTML proxies remote CSS images without changing data images", () => {
+  const document = buildEmailHtmlDocument(
+    `
+      <style>.hero { background-image: url("https://example.com/hero.png"); }</style>
+      <div style="background: url(data:image/png;base64,iVBORw0KGgo=), url('//example.com/tile.png'); content: image-set('https://example.com/retina.png' 2x)"></div>
+    `,
+    "message-5",
+    "signed-capability",
+  );
+
+  assert.doesNotMatch(document, /url\(["']?https?:\/\//);
+  assert.doesNotMatch(document, /url\(["']?\/\//);
+  assert.match(document, /source=https%3A%2F%2Fexample\.com%2Fhero\.png/);
+  assert.match(document, /source=https%3A%2F%2Fexample\.com%2Ftile\.png/);
+  assert.match(document, /source=https%3A%2F%2Fexample\.com%2Fretina\.png/);
+  assert.match(document, /data:image\/png;base64,iVBORw0KGgo=/);
+});
+
+test("email HTML never falls back to a direct remote image URL", () => {
+  const document = buildEmailHtmlDocument(
+    `
+      <img src="https://user@example.com/private.png">
+      <img src="http://example.com:8080/private.png">
+    `,
+    "message-6",
+  );
+
+  assert.doesNotMatch(document, /src="https?:\/\//);
+  assert.equal(document.match(/src="data:,"/g)?.length, 2);
+});
+
+test("email HTML withholds remote images until a capability is available", () => {
+  const document = buildEmailHtmlDocument(
+    '<img src="https://example.com/banner.png"><div style="background:url(https://example.com/tile.png)"></div>',
+    "message-7",
+  );
+
+  assert.doesNotMatch(document, /example\.com/);
+  assert.match(document, /src="data:,"/);
+  assert.match(document, /background:url\(&quot;data:,&quot;\)/);
+});
+
 test("email HTML preserves sender color rules and legacy color attributes", () => {
   const document = buildEmailHtmlDocument(
     `
@@ -95,7 +146,7 @@ test("email HTML preserves sender color rules and legacy color attributes", () =
       </style>
       <table bgcolor="#ffffff"><tr><td><font color="#525151">Hello</font></td></tr></table>
     `,
-    "message-5",
+    "message-8",
   );
 
   assert.match(document, /p \{ color: #222222; \}/);

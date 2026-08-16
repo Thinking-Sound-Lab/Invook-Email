@@ -1,4 +1,5 @@
 import sanitizeHtml from "sanitize-html";
+import valueParser from "postcss-value-parser";
 
 const EMAIL_HTML_TAGS = [
   "a",
@@ -96,8 +97,93 @@ function isTrackingPixel(attributes: Record<string, string>): boolean {
   return width !== null && height !== null && width <= 1 && height <= 1;
 }
 
-function sanitizeEmailHtml(bodyHtml: string): string {
-  return sanitizeHtml(bodyHtml, {
+function normalizeRemoteImageUrl(value: string): string | null {
+  try {
+    const trimmed = value.trim();
+    const url = new URL(trimmed.startsWith("//") ? `https:${trimmed}` : trimmed);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    if (url.username || url.password) return null;
+    const defaultPort = url.protocol === "https:" ? "443" : "80";
+    if (url.port && url.port !== defaultPort) return null;
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function remoteImageProxyPath(
+  messageId: string,
+  source: string,
+  capability: string,
+): string {
+  const query = new URLSearchParams({ capability, source });
+  return `/v1/messages/${encodeURIComponent(messageId)}/remote-image?${query.toString()}`;
+}
+
+function unquoteCssUrl(value: string): string {
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function rewriteCssRemoteImages(
+  css: string,
+  messageId: string,
+  capability: string | null,
+): string {
+  const parsed = valueParser(css);
+  parsed.walk((node) => {
+    if (
+      node.type === "function" &&
+      ["image-set", "-webkit-image-set"].includes(node.value.toLowerCase())
+    ) {
+      for (const imageSetNode of node.nodes) {
+        if (imageSetNode.type !== "string") continue;
+        const source = normalizeRemoteImageUrl(imageSetNode.value);
+        if (source && capability) {
+          imageSetNode.value = remoteImageProxyPath(
+            messageId,
+            source,
+            capability,
+          );
+        } else if (source || /^(?:https?:)?\/\//i.test(imageSetNode.value)) {
+          imageSetNode.value = "data:,";
+        }
+      }
+      return undefined;
+    }
+    if (node.type !== "function" || node.value.toLowerCase() !== "url") {
+      return undefined;
+    }
+    const originalSource = unquoteCssUrl(valueParser.stringify(node.nodes));
+    const source = normalizeRemoteImageUrl(originalSource);
+    if (!source || !capability) {
+      if (!/^data:/i.test(originalSource) && !originalSource.startsWith("#")) {
+        node.nodes = valueParser('"data:,"').nodes;
+      }
+      return false;
+    }
+    node.nodes = valueParser(
+      JSON.stringify(remoteImageProxyPath(messageId, source, capability)),
+    ).nodes;
+    return false;
+  });
+  return parsed.toString();
+}
+
+function sanitizeEmailHtml(
+  bodyHtml: string,
+  messageId: string,
+  capability: string | null,
+): string {
+  const sanitizedBodyHtml = sanitizeHtml(bodyHtml, {
     allowedTags: [...EMAIL_HTML_TAGS],
     allowedAttributes: {
       "*": [
@@ -146,8 +232,51 @@ function sanitizeEmailHtml(bodyHtml: string): string {
           target: "_blank",
         },
       }),
+      img: (_tagName, attributes) => {
+        const originalSource = attributes.src ?? "";
+        const source = normalizeRemoteImageUrl(originalSource);
+        if (!source) {
+          return {
+            tagName: "img",
+            attribs: /^(?:https?:)?\/\//i.test(originalSource.trim())
+              ? { ...attributes, src: "data:," }
+              : attributes,
+          };
+        }
+        return {
+          tagName: "img",
+          attribs: {
+            ...attributes,
+            src: capability
+              ? remoteImageProxyPath(messageId, source, capability)
+              : "data:,",
+          },
+        };
+      },
+      "*": (tagName, attributes) => ({
+        tagName,
+        attribs: attributes.style
+          ? {
+              ...attributes,
+              style: rewriteCssRemoteImages(
+                attributes.style,
+                messageId,
+                capability,
+              ),
+            }
+          : attributes,
+      }),
     },
   });
+  return sanitizedBodyHtml.replace(
+    /<style>([\s\S]*?)<\/style>/gi,
+    (_match, stylesheet: string) =>
+      `<style>${rewriteCssRemoteImages(
+        stylesheet,
+        messageId,
+        capability,
+      )}</style>`,
+  );
 }
 
 function serializeFrameId(frameId: string): string {
@@ -185,7 +314,7 @@ function serializeEmailHtmlDocument(
       :root { color-scheme: light only; }
       *, *::before, *::after { box-sizing: border-box; }
       html, body { margin: 0; min-width: 0; padding: 0; width: 100%; background: transparent; color: #202124; }
-      html { overflow-x: auto; overflow-y: hidden; }
+      html { overflow: auto; }
       body { overflow-wrap: anywhere; font-family: "Plus Jakarta Sans", Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.5; }
       #invook-email-root { display: flow-root; min-width: 0; width: 100%; background: #fff; }
       img { border: 0; height: auto; max-width: 100%; }
@@ -225,6 +354,10 @@ function serializeEmailHtmlDocument(
 export function buildEmailHtmlDocument(
   bodyHtml: string,
   frameId: string,
+  remoteImageCapability: string | null = null,
 ): string {
-  return serializeEmailHtmlDocument(sanitizeEmailHtml(bodyHtml), frameId);
+  return serializeEmailHtmlDocument(
+    sanitizeEmailHtml(bodyHtml, frameId, remoteImageCapability),
+    frameId,
+  );
 }

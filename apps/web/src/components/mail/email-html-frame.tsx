@@ -5,6 +5,14 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 const MINIMUM_FRAME_HEIGHT = 160;
+const MAXIMUM_FRAME_HEIGHT = 12_000;
+
+export function clampEmailFrameHeight(height: number): number {
+  return Math.min(
+    MAXIMUM_FRAME_HEIGHT,
+    Math.max(MINIMUM_FRAME_HEIGHT, Math.ceil(height)),
+  );
+}
 
 export interface EmailHtmlFrameProps {
   className?: string;
@@ -47,7 +55,7 @@ export function EmailHtmlFrame({
         return;
       }
 
-      setHeight(Math.max(MINIMUM_FRAME_HEIGHT, Math.ceil(event.data.height)));
+      setHeight(clampEmailFrameHeight(event.data.height));
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);

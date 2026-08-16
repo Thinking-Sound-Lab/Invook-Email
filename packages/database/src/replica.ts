@@ -98,6 +98,24 @@ export async function getGmailMessageMutationContext(
   return message ?? null;
 }
 
+export async function getMailboxMessageBodyForUser(
+  input: { userId: string; messageId: string },
+  database: Database = getDatabase(),
+): Promise<{ bodyHtml: string | null } | null> {
+  const [message] = await database
+    .select({ bodyHtml: messages.bodyHtml })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.id, input.messageId),
+        eq(messages.userId, input.userId),
+        inArray(messages.labelAnalysisState, ["complete", "failed"]),
+      ),
+    )
+    .limit(1);
+  return message ?? null;
+}
+
 export async function getGmailDraftResourceForUser(
   input: { userId: string; gmailDraftId: string },
   database: Database = getDatabase(),

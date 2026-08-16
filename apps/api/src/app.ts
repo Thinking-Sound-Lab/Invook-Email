@@ -24,6 +24,10 @@ import { registerGooglePubSubRoutes } from "./routes/google-pubsub";
 import { registerMailboxEventRoutes } from "./routes/mailbox-events";
 import { registerMailboxRoutes } from "./routes/mailbox";
 import { registerMemoryRoutes } from "./routes/memories";
+import {
+  registerRemoteMailImageRoutes,
+  type RemoteMailImageRouteDependencies,
+} from "./routes/remote-mail-images";
 import { registerSessionRoutes } from "./routes/session";
 import { registerThreadLabelRoutes } from "./routes/thread-labels";
 import { InvalidJsonBodyError, sendProblem } from "./responses";
@@ -42,6 +46,7 @@ function isInvalidBodyError(error: unknown): boolean {
 export async function buildApi(options: {
   attachmentRoutes?: AttachmentRouteDependencies;
   auth?: AuthService;
+  remoteMailImageRoutes?: RemoteMailImageRouteDependencies;
 } = {}) {
   const api = Fastify({
     bodyLimit: MAXIMUM_REQUEST_BODY_BYTES,
@@ -90,6 +95,7 @@ export async function buildApi(options: {
   await api.register(registerAccountSyncEventRoutes);
   await api.register(registerMailboxEventRoutes);
   await api.register(registerMailboxRoutes);
+  await api.register(registerRemoteMailImageRoutes(options.remoteMailImageRoutes));
   await api.register(registerMemoryRoutes, { prefix: "/v1/memories" });
   await api.register(registerLabelRoutes, { prefix: "/v1/labels" });
   await api.register(registerThreadLabelRoutes, { prefix: "/v1/threads" });

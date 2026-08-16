@@ -174,6 +174,10 @@ export type DeletedResourceResponse = {
   deleted: true;
 };
 
+export type RemoteMailImageCapabilityResponse = {
+  capability: string;
+};
+
 export type SessionState =
   | { authenticated: false; gmailConnected: false }
   | { authenticated: true; gmailConnected: boolean };

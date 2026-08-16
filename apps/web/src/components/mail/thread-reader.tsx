@@ -12,6 +12,7 @@ import Link from "next/link";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { getRemoteMailImageCapability } from "@/lib/api";
 
 import {
   displayName,
@@ -38,7 +39,7 @@ export interface ThreadReaderProps {
   availableLabels: InvookLabel[];
 }
 
-export function ThreadReader({
+export async function ThreadReader({
   thread,
   currentView,
   mailboxCursor,
@@ -46,6 +47,11 @@ export function ThreadReader({
   aiConfigured,
   availableLabels,
 }: ThreadReaderProps) {
+  const remoteImageCapabilities = await Promise.all(
+    thread.messages.map((message) =>
+      message.bodyHtml ? getRemoteMailImageCapability(message.id) : null,
+    ),
+  );
   const mailboxQuery = new URLSearchParams({ view: currentView });
   if (mailboxCursor) mailboxQuery.set("cursor", mailboxCursor);
   const failedMessageCount = thread.messages.filter(
@@ -125,14 +131,18 @@ export function ThreadReader({
           ) : null}
 
           <div className="mt-7 space-y-14">
-            {thread.messages.map((message) => {
+            {thread.messages.map((message, messageIndex) => {
               const senderName = displayName(
                 message.sender.raw || message.sender.email,
               );
               const senderLabel =
                 message.direction === "outgoing" ? "You" : senderName;
               const emailHtmlDocument = message.bodyHtml
-                ? buildEmailHtmlDocument(message.bodyHtml, message.id)
+                ? buildEmailHtmlDocument(
+                    message.bodyHtml,
+                    message.id,
+                    remoteImageCapabilities[messageIndex] ?? null,
+                  )
                 : null;
               return (
                 <article
