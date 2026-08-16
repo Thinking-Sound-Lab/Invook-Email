@@ -114,7 +114,6 @@ export async function buildApi(options: {
       method: request.method,
       path: request.url.split("?", 1)[0],
       name: normalizedError.name,
-      message: normalizedError.message,
     });
     if (!reply.raw.headersSent) {
       await sendProblem(request, reply, 500, "Internal server error");

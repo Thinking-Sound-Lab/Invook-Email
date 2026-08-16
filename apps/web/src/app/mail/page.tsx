@@ -6,6 +6,7 @@ import { validate as validateUuid } from "uuid";
 
 import { mailboxViews } from "@invook/contracts";
 
+import { AccountPipelineStripe } from "@/components/mail/account-pipeline-stripe";
 import { AgentPanel } from "@/components/mail/agent-panel";
 import { ComposeSurface } from "@/components/mail/compose-surface";
 import { MailList } from "@/components/mail/mail-list";
@@ -111,9 +112,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     ? currentView.slice("label:".length)
     : null;
   const currentLabel = currentLabelId
-    ? [...workspace.gmailUserLabels, ...workspace.invookLabels].find(
-        (label) => label.id === currentLabelId,
-      )
+    ? workspace.invookLabels.find((label) => label.id === currentLabelId)
     : null;
 
   const mailboxThreads = workspace.threads as MailThreadSummary[];
@@ -143,11 +142,12 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   } else {
     centerPane = (
       <MailList
-        account={workspace.account}
+        key={currentView}
+        accountEmail={workspace.account.email}
         currentView={currentView}
+        initialOlderCursor={workspace.pagination.olderCursor}
+        mailSyncState={workspace.account.syncState.mailSync}
         title={currentLabel?.name}
-        mailboxCursor={mailboxCursor}
-        pagination={workspace.pagination}
         threads={mailboxThreads}
         query={currentSurface === "search" ? query : undefined}
       />
@@ -155,19 +155,18 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   }
 
   return (
-    <main className="h-dvh overflow-hidden bg-background">
+    <main className="flex h-dvh flex-col overflow-hidden bg-background">
       <MailboxEventSubscriber />
-      <div className="grid h-full grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
+      <div className="grid min-h-0 flex-1 grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
         <MailSidebar
           user={workspace.user}
           account={workspace.account}
           currentView={currentView}
           currentSurface={currentSurface}
           memories={workspace.memories}
-          gmailUserLabels={workspace.gmailUserLabels}
           invookLabels={workspace.invookLabels}
+          sidebarCounts={workspace.sidebarCounts}
           aiConfigured={workspace.aiConfigured}
-          batchConfigured={workspace.batchConfigured}
         />
         <div
           data-slot="mail-workspace-content"
@@ -182,6 +181,14 @@ export default async function MailPage({ searchParams }: MailPageProps) {
           aiConfigured={workspace.aiConfigured}
         />
       </div>
+      <AccountPipelineStripe
+        accountEmail={workspace.account.email}
+        initialProgress={{
+          mailSync: workspace.account.mailSyncProgress,
+          indexing: workspace.account.indexingProgress,
+          memory: workspace.account.syncState.memory,
+        }}
+      />
     </main>
   );
 }

@@ -43,14 +43,23 @@ test(
     const firstMessageId = uuidv4();
     const secondMessageId = uuidv4();
     const firstContentHash = createMessageContentHash({
+      direction: "incoming",
+      sender: { raw: "sender@example.com", email: "sender@example.com" },
+      recipients: ["owner@example.com"],
       subject: "First",
       bodyText: "First body",
     });
     const secondContentHash = createMessageContentHash({
+      direction: "incoming",
+      sender: { raw: "sender@example.com", email: "sender@example.com" },
+      recipients: ["owner@example.com"],
       subject: "Second",
       bodyText: "Second body",
     });
     const supersededSecondContentHash = createMessageContentHash({
+      direction: "incoming",
+      sender: { raw: "sender@example.com", email: "sender@example.com" },
+      recipients: ["owner@example.com"],
       subject: "Second updated",
       bodyText: "Second body updated",
     });

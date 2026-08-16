@@ -3,6 +3,7 @@ import {
   Delete02Icon,
   FileEditIcon,
   InboxIcon,
+  LabelImportantIcon,
   Mail01Icon,
   PencilEdit01Icon,
   PlusSignIcon,
@@ -10,15 +11,14 @@ import {
   SentIcon,
   SpamIcon,
   StarIcon,
-  Tag01Icon,
   Tick02Icon,
   WorkflowSquare01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
-  GmailUserLabel,
   InvookLabel,
   MailboxAccount,
+  MailboxSidebarCounts,
   MemoryEntry,
   SignedInUser,
 } from "@invook/contracts";
@@ -33,7 +33,6 @@ import {
 } from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
-import { AccountPipelineProgress } from "./account-pipeline-progress";
 import { initials } from "./mail-format";
 import { MailNavigationPending } from "./mail-navigation-pending";
 import { listSidebarLabels } from "./mail-sidebar-labels";
@@ -50,6 +49,8 @@ const automationsItem = {
   surface: "automations",
 } as const;
 
+const sidebarCountFormatter = new Intl.NumberFormat("en-US");
+
 const mailItems = [
   { label: "Starred", icon: StarIcon, view: "starred" },
   { label: "Drafts", icon: FileEditIcon, view: "drafts" },
@@ -63,11 +64,12 @@ interface NavLinkProps {
   icon: typeof Mail01Icon;
   active: boolean;
   href: string;
+  count?: number;
 }
 
 function navItemClassName(active: boolean): string {
   return cn(
-    "group flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-sm font-medium text-sidebar-foreground/58 transition-colors",
+    "group flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-[13px] font-medium text-sidebar-foreground/58 transition-colors",
     "hover:bg-sidebar-accent/70 hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
     active && "bg-sidebar-accent text-sidebar-foreground",
   );
@@ -78,6 +80,7 @@ function NavLink({
   icon,
   active,
   href,
+  count,
 }: NavLinkProps) {
   return (
     <Link
@@ -86,7 +89,12 @@ function NavLink({
       className={navItemClassName(active)}
     >
       <HugeiconsIcon icon={icon} size={15} strokeWidth={1.65} className="shrink-0" />
-      <span className="hidden truncate lg:block">{label}</span>
+      <span className="hidden min-w-0 flex-1 truncate lg:block">{label}</span>
+      {count === undefined ? null : (
+        <span className="hidden shrink-0 text-[11px] font-normal tabular-nums text-sidebar-foreground/38 lg:block">
+          {sidebarCountFormatter.format(count)}
+        </span>
+      )}
       <MailNavigationPending />
     </Link>
   );
@@ -98,10 +106,9 @@ export interface MailSidebarProps {
   currentView: MailboxView;
   currentSurface: MailSurface;
   memories: MemoryEntry[];
-  gmailUserLabels: GmailUserLabel[];
   invookLabels: InvookLabel[];
+  sidebarCounts: MailboxSidebarCounts;
   aiConfigured: boolean;
-  batchConfigured: boolean;
 }
 
 export function MailSidebar({
@@ -110,12 +117,11 @@ export function MailSidebar({
   currentView,
   currentSurface,
   memories,
-  gmailUserLabels,
   invookLabels,
+  sidebarCounts,
   aiConfigured,
-  batchConfigured,
 }: MailSidebarProps) {
-  const labels = listSidebarLabels({ gmailUserLabels, invookLabels });
+  const labels = listSidebarLabels(invookLabels);
   const connectedAccountImage =
     account.image ??
     (account.email.toLowerCase() === user.email.toLowerCase()
@@ -155,10 +161,8 @@ export function MailSidebar({
         <SettingsDialog
           account={account}
           memories={memories}
-          gmailUserLabels={gmailUserLabels}
           invookLabels={invookLabels}
           aiConfigured={aiConfigured}
-          batchConfigured={batchConfigured}
           triggerClassName={navItemClassName(false)}
         />
         <NavLink
@@ -175,10 +179,11 @@ export function MailSidebar({
         </p>
         <nav className="space-y-0.5" aria-label="Labels">
           <NavLink
-            label="All"
-            icon={InboxIcon}
-            active={currentSurface === "mail" && currentView === "all"}
-            href="/mail?view=all"
+            label="Important"
+            icon={LabelImportantIcon}
+            active={currentSurface === "mail" && currentView === "important"}
+            href="/mail?view=important"
+            count={sidebarCounts.views.important}
           />
           {labels.map((label) => {
             const view = `label:${label.id}` as const;
@@ -186,9 +191,10 @@ export function MailSidebar({
               <NavLink
                 key={label.id}
                 label={label.name}
-                icon={label.kind === "gmail" ? Tag01Icon : AiMagicIcon}
+                icon={AiMagicIcon}
                 active={currentSurface === "mail" && currentView === view}
                 href={`/mail?view=${view}`}
+                count={sidebarCounts.labels[label.id] ?? 0}
               />
             );
           })}
@@ -198,6 +204,13 @@ export function MailSidebar({
           Mail
         </p>
         <nav className="space-y-0.5" aria-label="Mail">
+          <NavLink
+            label="All"
+            icon={InboxIcon}
+            active={currentSurface === "mail" && currentView === "all"}
+            href="/mail?view=all"
+            count={sidebarCounts.views.all}
+          />
           {mailItems.map((item) => (
             <NavLink
               key={item.label}
@@ -205,6 +218,7 @@ export function MailSidebar({
               icon={item.icon}
               active={currentSurface === "mail" && currentView === item.view}
               href={`/mail?view=${item.view}`}
+              count={sidebarCounts.views[item.view]}
             />
           ))}
         </nav>
@@ -252,14 +266,6 @@ export function MailSidebar({
           </form>
         </nav>
       </div>
-
-      <AccountPipelineProgress
-        initialProgress={{
-          mailSync: account.mailSyncProgress,
-          indexing: account.indexingProgress,
-          memory: account.syncState.memory,
-        }}
-      />
     </aside>
   );
 }

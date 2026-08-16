@@ -67,31 +67,26 @@ test("ready-replica derivations fan out to independent BullMQ queues", () => {
     userId: "11111111-1111-4111-8111-111111111111",
     accountId: "22222222-2222-4222-8222-222222222222",
     historyCursor: "987654321",
-    labels: [
-      { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", definitionVersion: 2 },
-      { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", definitionVersion: 1 },
-    ],
   });
 
   assert.deepEqual(
     steps.map((step) => step.stepType),
-    [
-      "embedding.backfill",
-      "memory.extract",
-      "label.backfill.submit",
-      "label.backfill.submit",
-    ],
+    ["embedding.backfill", "memory.extract"],
   );
   assert.deepEqual(
     new Set(steps.map((step) => queueNameForStepType(step.stepType))),
-    new Set(["mail-indexing-batch", "mail-memory-submit", "mail-label-submit"]),
+    new Set(["mail-indexing-batch", "mail-memory-submit"]),
   );
   assert.equal(
     queueNameForStepType("memory.incremental"),
     "mail-memory-submit",
   );
   assert.equal(
-    queueNameForStepType("label.batch.event"),
-    "mail-label-events",
+    queueNameForStepType("label.message.analyze"),
+    "mail-label-submit",
+  );
+  assert.equal(
+    queueNameForStepType("label.message.apply"),
+    "mail-label-submit",
   );
 });

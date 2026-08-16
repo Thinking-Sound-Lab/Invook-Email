@@ -22,10 +22,6 @@ export async function getGmailProviderAccessForRequest(
       await sendProblem(request, reply, 404, "Connected Gmail account not found");
       return null;
     }
-    if (result.status === "replica_not_ready") {
-      await sendProblem(request, reply, 409, "Gmail mailbox replica is not ready");
-      return null;
-    }
     return result.access;
   } catch (error) {
     if (error instanceof GmailProviderConfigurationError) {

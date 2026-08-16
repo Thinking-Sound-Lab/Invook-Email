@@ -11,17 +11,115 @@ import {
   gmailReplicaStates,
   gmailSyncItems,
   mailSyncRuns,
+  messages,
   profiles,
+  queueOutbox,
+  threads,
   workflowSteps,
 } from "./schema";
 import * as schema from "./schema";
 import {
+  enqueueImplausibleGmailMessageDateRepairs,
   failWorkflowStep,
   markGmailAccountReconnectRequired,
   markWorkflowStepRunning,
 } from "./workflows";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+
+test(
+  "implausible stored dates enqueue one durable provider refresh",
+  { skip: !testDatabaseUrl },
+  async () => {
+    if (!testDatabaseUrl) return;
+    const client = postgres(testDatabaseUrl, { max: 1, prepare: false });
+    const database = drizzle(client, { schema });
+    const userId = uuidv4();
+    const accountId = uuidv4();
+    const threadId = uuidv4();
+    const messageId = uuidv4();
+    const providerMessageId = `provider-${messageId}`;
+    const invalidSentAt = new Date("2612-01-12T15:12:10.000Z");
+    try {
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
+      await database.insert(connectedAccounts).values({
+        id: accountId,
+        userId,
+        providerAccountId: `provider-${accountId}`,
+        email: `${accountId}@example.com`,
+        memoryAcknowledgedAt: new Date(),
+      });
+      await database.insert(threads).values({
+        id: threadId,
+        userId,
+        accountId,
+        providerThreadId: `provider-${threadId}`,
+        subject: "Invalid date",
+        snippet: "Invalid date",
+        participants: ["sender@example.com"],
+        latestMessageAt: invalidSentAt,
+      });
+      await database.insert(messages).values({
+        id: messageId,
+        userId,
+        accountId,
+        threadId,
+        providerMessageId,
+        direction: "incoming",
+        sender: { raw: "sender@example.com", email: "sender@example.com" },
+        recipients: [`${accountId}@example.com`],
+        internalDate: new Date("1969-12-31T23:59:59.999Z"),
+        subject: "Invalid date",
+        snippet: "Invalid date",
+        bodyText: "Stored provider content",
+        embeddingContentHash: "a".repeat(64),
+        sentAt: invalidSentAt,
+      });
+
+      const input = {
+        latestAllowedAt: new Date("2026-08-16T00:00:00.000Z"),
+      };
+      assert.equal(
+        await enqueueImplausibleGmailMessageDateRepairs(input, database),
+        1,
+      );
+      assert.equal(
+        await enqueueImplausibleGmailMessageDateRepairs(input, database),
+        1,
+      );
+
+      const steps = await database
+        .select({
+          id: workflowSteps.id,
+          stepType: workflowSteps.stepType,
+          input: workflowSteps.input,
+          idempotencyKey: workflowSteps.idempotencyKey,
+        })
+        .from(workflowSteps)
+        .where(eq(workflowSteps.accountId, accountId));
+      assert.deepEqual(steps, [
+        {
+          id: steps[0]?.id,
+          stepType: "gmail.message.refresh",
+          input: { providerMessageId, reason: "implausible_date" },
+          idempotencyKey: `gmail-message-date-repair:${accountId}:${providerMessageId}:${invalidSentAt.toISOString()}`,
+        },
+      ]);
+      const outbox = await database
+        .select({ queueName: queueOutbox.queueName })
+        .from(queueOutbox)
+        .where(eq(queueOutbox.workflowStepId, steps[0]?.id ?? ""));
+      assert.deepEqual(outbox, [{ queueName: "gmail-control" }]);
+    } finally {
+      await database.delete(profiles).where(eq(profiles.id, userId));
+      await client.end();
+    }
+  },
+);
 
 test(
   "terminal stalled sync fails the run, remaining items, and published workflow steps",

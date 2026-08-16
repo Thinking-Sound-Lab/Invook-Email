@@ -15,7 +15,10 @@ import {
   uuid,
   vector,
 } from "drizzle-orm/pg-core";
-import type { LabelAnalysisState } from "@invook/contracts";
+import type {
+  InvookSystemLabelKey,
+  MessageLabelAnalysisState,
+} from "@invook/contracts";
 
 import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 
@@ -277,17 +280,9 @@ export const labels = pgTable(
     name: text("name").notNull(),
     normalizedName: text("normalized_name").notNull(),
     description: text("description").notNull().default(""),
+    systemKey: text("system_key").$type<InvookSystemLabelKey>(),
     definitionVersion: integer("definition_version").notNull().default(1),
-    analysisState: text("analysis_state")
-      .$type<LabelAnalysisState>()
-      .notNull()
-      .default("pending"),
-    lastAnalyzedAt: timestampWithTimezone("last_analyzed_at"),
-    providerType: text("provider_type").$type<"system" | "user">(),
-    messageListVisibility: text("message_list_visibility"),
-    labelListVisibility: text("label_list_visibility"),
-    color: jsonb("color").$type<{ textColor?: string; backgroundColor?: string }>(),
-    providerMetadata: jsonb("provider_metadata").$type<JsonObject>().notNull().default({}),
+    providerType: text("provider_type").$type<"system">(),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -304,6 +299,9 @@ export const labels = pgTable(
     uniqueIndex("labels_account_invook_name_idx")
       .on(table.accountId, table.normalizedName)
       .where(sql`${table.kind} = 'invook'`),
+    uniqueIndex("labels_account_system_key_idx")
+      .on(table.accountId, table.systemKey)
+      .where(sql`${table.systemKey} is not null`),
     index("labels_account_created_idx").on(table.accountId, table.createdAt),
     index("labels_account_kind_idx").on(table.accountId, table.kind, table.name),
     check("labels_kind_check", sql`${table.kind} in ('gmail', 'invook')`),
@@ -314,13 +312,13 @@ export const labels = pgTable(
     ),
     check(
       "labels_kind_contract_check",
-      sql`(${table.kind} = 'gmail' and ${table.providerLabelId} is not null and ${table.providerType} in ('system', 'user')) or (${table.kind} = 'invook' and ${table.providerLabelId} is null and ${table.providerType} is null and char_length(btrim(${table.description})) > 0)`,
+      sql`(${table.kind} = 'gmail' and ${table.providerLabelId} is not null and ${table.providerType} = 'system' and ${table.systemKey} is null) or (${table.kind} = 'invook' and ${table.providerLabelId} is null and ${table.providerType} is null and char_length(btrim(${table.description})) > 0)`,
+    ),
+    check(
+      "labels_system_key_check",
+      sql`${table.systemKey} is null or ${table.systemKey} = 'newsletter'`,
     ),
     check("labels_definition_version_check", sql`${table.definitionVersion} > 0`),
-    check(
-      "labels_analysis_state_check",
-      sql`${table.analysisState} in ('pending', 'running', 'complete', 'failed')`,
-    ),
   ],
 );
 
@@ -388,6 +386,14 @@ export const messages = pgTable(
     snippet: text("snippet").notNull().default(""),
     bodyText: text("body_text").notNull().default(""),
     embeddingContentHash: text("embedding_content_hash").notNull(),
+    labelAnalysisState: text("label_analysis_state")
+      .$type<MessageLabelAnalysisState>()
+      .notNull()
+      .default("pending"),
+    labelAnalysisVersion: integer("label_analysis_version").notNull().default(1),
+    labelAnalysisDefinitionHash: text("label_analysis_definition_hash"),
+    labelAnalysisError: text("label_analysis_error"),
+    labelAnalyzedAt: timestampWithTimezone("label_analyzed_at"),
     bodyHtml: text("body_html"),
     rawObjectKey: text("raw_object_key"),
     rawChecksumSha256: text("raw_checksum_sha256"),
@@ -417,6 +423,11 @@ export const messages = pgTable(
     ),
     index("messages_thread_sent_idx").on(table.threadId, table.sentAt),
     index("messages_account_provider_idx").on(table.accountId, table.providerMessageId),
+    index("messages_account_label_analysis_idx").on(
+      table.accountId,
+      table.labelAnalysisState,
+      table.sentAt,
+    ),
     index("messages_search_idx").using("gin", table.searchDocument),
     index("messages_metadata_search_idx").using(
       "gin",
@@ -439,6 +450,18 @@ export const messages = pgTable(
     check(
       "messages_embedding_content_hash_check",
       sql`${table.embeddingContentHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "messages_label_analysis_state_check",
+      sql`${table.labelAnalysisState} in ('pending', 'running', 'complete', 'failed')`,
+    ),
+    check(
+      "messages_label_analysis_version_check",
+      sql`${table.labelAnalysisVersion} > 0`,
+    ),
+    check(
+      "messages_label_analysis_definition_hash_check",
+      sql`${table.labelAnalysisDefinitionHash} is null or ${table.labelAnalysisDefinitionHash} ~ '^[0-9a-f]{64}$'`,
     ),
   ],
 );
@@ -1094,7 +1117,6 @@ export const queueOutbox = pgTable(
         | "mail-memory-events"
         | "mail-memory-feedback"
         | "mail-label-submit"
-        | "mail-label-events"
       >()
       .notNull(),
     publishAttempts: integer("publish_attempts").notNull().default(0),
@@ -1114,7 +1136,7 @@ export const queueOutbox = pgTable(
     check("queue_outbox_publish_attempts_check", sql`${table.publishAttempts} >= 0`),
     check(
       "queue_outbox_queue_name_check",
-      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit', 'mail-label-events')`,
+      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit')`,
     ),
   ],
 );

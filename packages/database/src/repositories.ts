@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import {
   MAIL_EMBEDDING_DIMENSIONS,
   type IndexingProgress,
-  type LabelAnalysisState,
+  type LabelHistoryWindowDays,
   type MailSyncProgress,
   type MailboxView,
+  type StaticMailboxView,
 } from "@invook/contracts";
 import {
   and,
@@ -40,6 +41,13 @@ import {
   deriveIndexingProgress,
   type IndexingPrerequisiteState,
 } from "./embedding-indexing";
+import {
+  enqueueHistoricalMessageLabelAnalysis,
+  enqueueMessageLabelAnalysisWithExecutor,
+  ensureBuiltInInvookLabels,
+  refreshVisibleThread,
+  visibleMessageLabelAnalysisStates,
+} from "./message-label-analysis";
 import { enqueueDailyGmailWatchRenewal } from "./gmail-watch";
 import { deriveMailSyncProgress } from "./mail-sync-progress";
 import {
@@ -92,24 +100,31 @@ const initialSyncState: AccountSyncState = {
 
 const mailboxPageSize = 100;
 
-export class GmailLabelCatalogMismatchError extends Error {
-  readonly accountId: string;
-  readonly providerMessageId: string;
-  readonly missingProviderLabelIds: string[];
+const gmailProviderLabelByMailboxView = {
+  important: "IMPORTANT",
+  starred: "STARRED",
+  drafts: "DRAFT",
+  sent: "SENT",
+  spam: "SPAM",
+  trash: "TRASH",
+} as const satisfies Record<Exclude<StaticMailboxView, "all">, string>;
 
-  constructor(input: {
-    accountId: string;
-    providerMessageId: string;
-    missingProviderLabelIds: string[];
-  }) {
-    super(
-      `Gmail label catalog is missing membership for message ${input.providerMessageId}.`,
-    );
-    this.name = "GmailLabelCatalogMismatchError";
-    this.accountId = input.accountId;
-    this.providerMessageId = input.providerMessageId;
-    this.missingProviderLabelIds = input.missingProviderLabelIds;
-  }
+const countedGmailProviderLabelIds = Object.values(
+  gmailProviderLabelByMailboxView,
+);
+
+const visibleMessageCondition = inArray(
+  messages.labelAnalysisState,
+  visibleMessageLabelAnalysisStates,
+);
+
+function visibleThreadCondition() {
+  return sql<boolean>`exists (
+    select 1
+    from ${messages} visible_message
+    where visible_message.thread_id = ${threads.id}
+      and visible_message.label_analysis_state in ('complete', 'failed')
+  )`;
 }
 
 export class InactiveMailSyncRunError extends Error {
@@ -174,17 +189,19 @@ function mailboxViewCondition(view: MailboxView) {
       inner join ${messageLabels} on ${messageLabels.messageId} = ${messages.id}
       where ${messages.threadId} = ${threads.id}
         and ${messageLabels.labelId} = ${labelId}::uuid
+        and ${messages.labelAnalysisState} in ('complete', 'failed')
     )`;
   }
   switch (view) {
     case "all":
       return undefined;
+    case "important":
     case "starred":
     case "drafts":
     case "sent":
     case "spam":
     case "trash": {
-      const providerLabelId = view.toUpperCase();
+      const providerLabelId = gmailProviderLabelByMailboxView[view];
       return sql<boolean>`exists (
         select 1
         from ${messages}
@@ -195,8 +212,30 @@ function mailboxViewCondition(view: MailboxView) {
         where ${messages.threadId} = ${threads.id}
           and ${labels.kind} = 'gmail'
           and ${labels.providerLabelId} = ${providerLabelId}
+          and ${messages.labelAnalysisState} in ('complete', 'failed')
       )`;
     }
+  }
+}
+
+function mailboxViewForProviderLabelId(
+  providerLabelId: string | null,
+): Exclude<StaticMailboxView, "all"> | null {
+  switch (providerLabelId) {
+    case "IMPORTANT":
+      return "important";
+    case "STARRED":
+      return "starred";
+    case "DRAFT":
+      return "drafts";
+    case "SENT":
+      return "sent";
+    case "SPAM":
+      return "spam";
+    case "TRASH":
+      return "trash";
+    default:
+      return null;
   }
 }
 
@@ -638,6 +677,11 @@ export async function saveNewGmailConnection(
 
     if (!account) throw new Error("The Gmail connection could not be saved.");
 
+    await ensureBuiltInInvookLabels(
+      { userId: input.userId, accountId: account.id },
+      transaction,
+    );
+
     await transaction
       .insert(gmailReplicaStates)
       .values({
@@ -805,15 +849,14 @@ export async function searchMailbox(
     .from(messages)
     .innerJoin(threads, eq(threads.id, messages.threadId))
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(messages.userId, input.userId),
+        eq(threads.userId, input.userId),
+        eq(connectedAccounts.userId, input.userId),
+        eq(threads.accountId, connectedAccounts.id),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
+        visibleMessageCondition,
         or(fullTextMatch, metadataMatch),
       ),
     )
@@ -840,15 +883,16 @@ export async function searchMailbox(
     .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
     .innerJoin(threads, eq(threads.id, messages.threadId))
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(messageAttachments.userId, input.userId),
+        eq(messages.userId, input.userId),
+        eq(threads.userId, input.userId),
+        eq(connectedAccounts.userId, input.userId),
+        eq(messageAttachments.accountId, connectedAccounts.id),
+        eq(threads.accountId, connectedAccounts.id),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
+        visibleMessageCondition,
         sql`${messageAttachments.filenameSearchDocument} @@ ${tsQuery}`,
       ),
     )
@@ -878,7 +922,12 @@ export async function searchMailbox(
         .where(
           and(
             eq(messageEmbeddings.userId, input.userId),
+            eq(messages.userId, input.userId),
+            eq(threads.userId, input.userId),
+            eq(connectedAccounts.userId, input.userId),
+            eq(threads.accountId, connectedAccounts.id),
             eq(connectedAccounts.status, "connected"),
+            visibleMessageCondition,
             eq(gmailReplicaStates.state, "ready"),
             eq(messageEmbeddings.modelId, input.embedding.modelId),
             eq(messageEmbeddings.dimensions, input.embedding.dimensions),
@@ -990,16 +1039,13 @@ export async function getMailboxThreadForAgent(
     })
     .from(threads)
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(threads.id, threadId),
         eq(threads.userId, userId),
+        eq(connectedAccounts.userId, userId),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
+        visibleThreadCondition(),
       ),
     )
     .limit(1);
@@ -1015,7 +1061,13 @@ export async function getMailboxThreadForAgent(
       sentAt: messages.sentAt,
     })
     .from(messages)
-    .where(and(eq(messages.threadId, thread.id), eq(messages.userId, userId)))
+    .where(
+      and(
+        eq(messages.threadId, thread.id),
+        eq(messages.userId, userId),
+        visibleMessageCondition,
+      ),
+    )
     .orderBy(asc(messages.sentAt));
   const messageIds = threadMessages.map((message) => message.id);
   const attachmentRows =
@@ -1066,17 +1118,17 @@ export async function listMailboxThreadAttachments(
     .innerJoin(messages, eq(messages.id, messageAttachments.messageId))
     .innerJoin(threads, eq(threads.id, messages.threadId))
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, messages.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(messageAttachments.userId, userId),
+        eq(messages.userId, userId),
         eq(threads.id, threadId),
         eq(threads.userId, userId),
+        eq(connectedAccounts.userId, userId),
+        eq(messageAttachments.accountId, connectedAccounts.id),
+        eq(threads.accountId, connectedAccounts.id),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
+        visibleMessageCondition,
       ),
     )
     .orderBy(asc(messageAttachments.filename));
@@ -1113,6 +1165,7 @@ export async function getMailboxAttachmentDownloadForUser(
         eq(messageAttachments.id, input.attachmentId),
         eq(messageAttachments.userId, input.userId),
         eq(messages.userId, input.userId),
+        visibleMessageCondition,
       ),
     )
     .limit(1);
@@ -1161,6 +1214,7 @@ export async function getMailboxWorkspace(
   const mailboxScope = and(
     eq(threads.userId, userId),
     eq(threads.accountId, account.id),
+    visibleThreadCondition(),
     viewCondition,
   );
   const cursorSortTime = cursor
@@ -1189,6 +1243,31 @@ export async function getMailboxWorkspace(
           participants: threads.participants,
           latestMessageAt: threads.latestMessageAt,
           messageCount: threads.messageCount,
+          isOthers: sql<boolean>`exists (
+            select 1 from ${messages} completed_message
+            where completed_message.thread_id = "threads"."id"
+              and completed_message.label_analysis_state = 'complete'
+          ) and not exists (
+            select 1 from ${messages} other_message
+            inner join ${messageLabels} other_membership
+              on other_membership.message_id = other_message.id
+            inner join ${labels} other_label
+              on other_label.id = other_membership.label_id
+            where other_message.thread_id = "threads"."id"
+              and other_message.label_analysis_state in ('complete', 'failed')
+              and (
+                other_label.kind = 'invook'
+                or (
+                  other_label.kind = 'gmail'
+                  and other_label.provider_label_id = 'IMPORTANT'
+                )
+              )
+          )`,
+          hasLabelAnalysisFailure: sql<boolean>`exists (
+            select 1 from ${messages} failed_message
+            where failed_message.thread_id = "threads"."id"
+              and failed_message.label_analysis_state = 'failed'
+          )`,
         })
         .from(threads)
         .where(
@@ -1196,6 +1275,7 @@ export async function getMailboxWorkspace(
             eq(threads.id, selectedThreadId),
             eq(threads.userId, userId),
             eq(threads.accountId, account.id),
+            visibleThreadCondition(),
           ),
         )
         .limit(1)
@@ -1204,11 +1284,10 @@ export async function getMailboxWorkspace(
     rawMailboxThreads,
     [threadCount],
     memoryRows,
-    gmailUserLabelRows,
     invookLabelRows,
-    [threadCountRow],
-    analyzedCounts,
     selectedThreadRows,
+    [allThreadCount],
+    mailboxLabelCountRows,
   ] = await Promise.all([
     database
       .select({
@@ -1218,6 +1297,31 @@ export async function getMailboxWorkspace(
         participants: threads.participants,
         latestMessageAt: threads.latestMessageAt,
         messageCount: threads.messageCount,
+        isOthers: sql<boolean>`exists (
+          select 1 from ${messages} completed_message
+          where completed_message.thread_id = "threads"."id"
+            and completed_message.label_analysis_state = 'complete'
+        ) and not exists (
+          select 1 from ${messages} other_message
+          inner join ${messageLabels} other_membership
+            on other_membership.message_id = other_message.id
+          inner join ${labels} other_label
+            on other_label.id = other_membership.label_id
+          where other_message.thread_id = "threads"."id"
+            and other_message.label_analysis_state in ('complete', 'failed')
+            and (
+              other_label.kind = 'invook'
+              or (
+                other_label.kind = 'gmail'
+                and other_label.provider_label_id = 'IMPORTANT'
+              )
+            )
+        )`,
+        hasLabelAnalysisFailure: sql<boolean>`exists (
+          select 1 from ${messages} failed_message
+          where failed_message.thread_id = "threads"."id"
+            and failed_message.label_analysis_state = 'failed'
+        )`,
       })
       .from(threads)
       .where(and(mailboxScope, cursorCondition))
@@ -1255,28 +1359,10 @@ export async function getMailboxWorkspace(
     database
       .select({
         id: labels.id,
-        providerLabelId: labels.providerLabelId,
-        name: labels.name,
-        type: labels.providerType,
-        color: labels.color,
-      })
-      .from(labels)
-      .where(
-        and(
-          eq(labels.userId, userId),
-          eq(labels.accountId, account.id),
-          eq(labels.kind, "gmail"),
-          eq(labels.providerType, "user"),
-        ),
-      )
-      .orderBy(asc(labels.name)),
-    database
-      .select({
-        id: labels.id,
         name: labels.name,
         description: labels.description,
+        systemKey: labels.systemKey,
         definitionVersion: labels.definitionVersion,
-        analysisState: labels.analysisState,
         createdAt: labels.createdAt,
       })
       .from(labels)
@@ -1288,29 +1374,42 @@ export async function getMailboxWorkspace(
         ),
       )
       .orderBy(asc(labels.createdAt), asc(labels.name)),
+    selectedThreadPromise,
     database
-      .select({ value: count(threads.id) })
-      .from(threads)
-      .where(and(eq(threads.userId, userId), eq(threads.accountId, account.id))),
-    database
-      .select({
-        labelId: messageLabelDecisions.labelId,
-        definitionVersion: messageLabelDecisions.definitionVersion,
-        value: countDistinct(messages.threadId),
-      })
-      .from(messageLabelDecisions)
-      .innerJoin(messages, eq(messages.id, messageLabelDecisions.messageId))
+      .select({ value: countDistinct(messages.threadId) })
+      .from(messages)
       .where(
         and(
-          eq(messageLabelDecisions.userId, userId),
-          eq(messageLabelDecisions.accountId, account.id),
+          eq(messages.userId, userId),
+          eq(messages.accountId, account.id),
+          visibleMessageCondition,
+        ),
+      ),
+    database
+      .select({
+        kind: labels.kind,
+        labelId: labels.id,
+        providerLabelId: labels.providerLabelId,
+        value: countDistinct(messages.threadId),
+      })
+      .from(messages)
+      .innerJoin(messageLabels, eq(messageLabels.messageId, messages.id))
+      .innerJoin(labels, eq(labels.id, messageLabels.labelId))
+      .where(
+        and(
+          eq(messages.userId, userId),
+          eq(messages.accountId, account.id),
+          visibleMessageCondition,
+          or(
+            eq(labels.kind, "invook"),
+            and(
+              eq(labels.kind, "gmail"),
+              inArray(labels.providerLabelId, countedGmailProviderLabelIds),
+            ),
+          ),
         ),
       )
-      .groupBy(
-        messageLabelDecisions.labelId,
-        messageLabelDecisions.definitionVersion,
-      ),
-    selectedThreadPromise,
+      .groupBy(labels.kind, labels.id, labels.providerLabelId),
   ]);
   const [selectedThread] = selectedThreadRows;
   const hasExtraPage = rawMailboxThreads.length > mailboxPageSize;
@@ -1334,35 +1433,45 @@ export async function getMailboxWorkspace(
     totalThreadCount: threadCount?.value ?? 0,
   };
 
-  const analyzedCountByLabel = new Map(
-    analyzedCounts.map((entry) => [
-      `${entry.labelId}:${entry.definitionVersion}`,
-      entry.value,
-    ]),
-  );
-  const gmailUserLabels = gmailUserLabelRows.flatMap((label) =>
-    label.providerLabelId && label.type === "user"
-      ? [{
-          id: label.id,
-          providerLabelId: label.providerLabelId,
-          name: label.name,
-          type: label.type,
-          color: label.color,
-        }]
-      : [],
-  );
   const invookLabels = invookLabelRows
     .map((label) => ({
       id: label.id,
       name: label.name,
       description: label.description,
+      systemKey: label.systemKey,
       definitionVersion: label.definitionVersion,
-      analysisState: label.analysisState,
-      analyzedThreadCount:
-        analyzedCountByLabel.get(`${label.id}:${label.definitionVersion}`) ?? 0,
-      totalThreadCount: threadCountRow?.value ?? 0,
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
+
+  const sidebarViewCounts: Record<StaticMailboxView, number> = {
+    all: allThreadCount?.value ?? 0,
+    important: 0,
+    starred: 0,
+    drafts: 0,
+    sent: 0,
+    spam: 0,
+    trash: 0,
+  };
+  const countedInvookLabels = new Map<string, number>();
+  for (const countRow of mailboxLabelCountRows) {
+    if (countRow.kind === "invook") {
+      countedInvookLabels.set(countRow.labelId, countRow.value);
+      continue;
+    }
+    const countedView = mailboxViewForProviderLabelId(
+      countRow.providerLabelId,
+    );
+    if (countedView) sidebarViewCounts[countedView] = countRow.value;
+  }
+  const sidebarCounts = {
+    views: sidebarViewCounts,
+    labels: Object.fromEntries(
+      invookLabels.map((label) => [
+        label.id,
+        countedInvookLabels.get(label.id) ?? 0,
+      ]),
+    ),
+  };
 
   const threadIds = Array.from(
     new Set([
@@ -1394,6 +1503,7 @@ export async function getMailboxWorkspace(
             and(
               inArray(messages.threadId, threadIds),
               eq(labels.kind, "invook"),
+              visibleMessageCondition,
             ),
           ),
         database
@@ -1403,7 +1513,6 @@ export async function getMailboxWorkspace(
             providerLabelId: labels.providerLabelId,
             name: labels.name,
             type: labels.providerType,
-            color: labels.color,
           })
           .from(messages)
           .innerJoin(
@@ -1415,6 +1524,8 @@ export async function getMailboxWorkspace(
             and(
               inArray(messages.threadId, threadIds),
               eq(labels.kind, "gmail"),
+              eq(labels.providerType, "system"),
+              visibleMessageCondition,
             ),
           ),
       ])
@@ -1441,13 +1552,12 @@ export async function getMailboxWorkspace(
   const attachLabels = <T extends { id: string }>(thread: T) => ({
     ...thread,
     gmailLabels: (gmailLabelsByThread.get(thread.id) ?? []).flatMap((label) =>
-      label.providerLabelId && label.type
+      label.providerLabelId && label.type === "system"
         ? [{
             id: label.id,
             providerLabelId: label.providerLabelId,
             name: label.name,
             type: label.type,
-            color: label.color,
           }]
         : [],
     ),
@@ -1478,8 +1588,8 @@ export async function getMailboxWorkspace(
     return {
       account,
       memories: serializedMemories,
-      gmailUserLabels,
       invookLabels,
+      sidebarCounts,
       pagination,
       threads: mailboxThreadsWithLabels,
       selectedThread: null,
@@ -1500,13 +1610,33 @@ export async function getMailboxWorkspace(
         recipients: messages.recipients,
         subject: messages.subject,
         bodyText: messages.bodyText,
+        labelAnalysisState: messages.labelAnalysisState,
+        isOthers: sql<boolean>`${messages.labelAnalysisState} = 'complete' and not exists (
+          select 1 from ${messageLabels} other_membership
+          inner join ${labels} other_label
+            on other_label.id = other_membership.label_id
+          where other_membership.message_id = "messages"."id"
+            and (
+              other_label.kind = 'invook'
+              or (
+                other_label.kind = 'gmail'
+                and other_label.provider_label_id = 'IMPORTANT'
+              )
+            )
+        )`,
         bodyHtml: messages.bodyHtml,
         rawChecksumSha256: messages.rawChecksumSha256,
         rawContentLength: messages.rawContentLength,
         sentAt: messages.sentAt,
       })
       .from(messages)
-      .where(and(eq(messages.userId, userId), eq(messages.threadId, selectedThread.id)))
+      .where(
+        and(
+          eq(messages.userId, userId),
+          eq(messages.threadId, selectedThread.id),
+          visibleMessageCondition,
+        ),
+      )
       .orderBy(asc(messages.sentAt)),
     database
       .select({
@@ -1539,12 +1669,14 @@ export async function getMailboxWorkspace(
         updatedAt: drafts.updatedAt,
       })
       .from(drafts)
+      .innerJoin(messages, eq(messages.id, drafts.messageId))
       .where(
         and(
           eq(drafts.accountId, account.id),
           eq(drafts.kind, "gmail"),
           eq(drafts.providerThreadId, selectedThread.providerThreadId),
           isNotNull(drafts.providerMessageId),
+          visibleMessageCondition,
         ),
       )
       .orderBy(desc(drafts.updatedAt)),
@@ -1576,7 +1708,6 @@ export async function getMailboxWorkspace(
             providerLabelId: labels.providerLabelId,
             name: labels.name,
             type: labels.providerType,
-            color: labels.color,
           })
           .from(messageLabels)
           .innerJoin(labels, eq(labels.id, messageLabels.labelId))
@@ -1605,8 +1736,8 @@ export async function getMailboxWorkspace(
   return {
     account,
     memories: serializedMemories,
-    gmailUserLabels,
     invookLabels,
+    sidebarCounts,
     pagination,
     threads: mailboxThreadsWithLabels,
     selectedThread: {
@@ -1623,13 +1754,12 @@ export async function getMailboxWorkspace(
         }),
         gmailLabels: (gmailLabelsByMessage.get(message.id) ?? []).flatMap(
           (label) =>
-            label.providerLabelId && label.type
+            label.providerLabelId && label.type === "system"
               ? [{
                   id: label.id,
                   providerLabelId: label.providerLabelId,
                   name: label.name,
                   type: label.type,
-                  color: label.color,
                 }]
               : [],
         ),
@@ -1891,89 +2021,6 @@ export async function setAccountSyncState(
   });
 }
 
-async function invalidateThreadAnalysis(
-  transaction: DatabaseTransaction,
-  accountId: string,
-  threadId: string,
-) {
-  const threadMessages = await transaction
-    .select({ id: messages.id })
-    .from(messages)
-    .where(eq(messages.threadId, threadId));
-  const messageIds = threadMessages.map((message) => message.id);
-  if (messageIds.length > 0) {
-    await transaction
-      .delete(messageLabelDecisions)
-      .where(
-        and(
-          inArray(messageLabelDecisions.messageId, messageIds),
-          isNull(messageLabelDecisions.userOverride),
-        ),
-      );
-    await transaction
-      .delete(messageLabels)
-      .where(
-        and(
-          inArray(messageLabels.messageId, messageIds),
-          eq(messageLabels.source, "ai"),
-        ),
-      );
-  }
-  await transaction
-    .update(labels)
-    .set({ analysisState: "pending", updatedAt: new Date() })
-    .where(and(eq(labels.accountId, accountId), eq(labels.kind, "invook")));
-}
-
-async function refreshIndexedThread(
-  transaction: DatabaseTransaction,
-  threadId: string,
-  incrementContentVersion = true,
-): Promise<boolean> {
-  const threadMessages = await transaction
-    .select({
-      sender: messages.sender,
-      recipients: messages.recipients,
-      subject: messages.subject,
-      snippet: messages.snippet,
-      sentAt: messages.sentAt,
-      createdAt: messages.createdAt,
-    })
-    .from(messages)
-    .where(eq(messages.threadId, threadId))
-    .orderBy(desc(messages.sentAt), desc(messages.createdAt));
-
-  const latestMessage = threadMessages[0];
-  if (!latestMessage) {
-    await transaction.delete(threads).where(eq(threads.id, threadId));
-    return false;
-  }
-
-  const participants = Array.from(
-    new Set(
-      threadMessages.flatMap((message) => [
-        message.sender.raw,
-        ...message.recipients,
-      ]),
-    ),
-  ).filter(Boolean);
-  await transaction
-    .update(threads)
-    .set({
-      subject: latestMessage.subject,
-      snippet: latestMessage.snippet,
-      participants,
-      latestMessageAt: latestMessage.sentAt,
-      messageCount: threadMessages.length,
-      ...(incrementContentVersion
-        ? { contentVersion: sql`${threads.contentVersion} + 1` }
-        : {}),
-      updatedAt: new Date(),
-    })
-    .where(eq(threads.id, threadId));
-  return true;
-}
-
 async function lockEmbeddingIndex(
   transaction: DatabaseTransaction,
   accountId: string,
@@ -2082,6 +2129,7 @@ export async function upsertIndexedMessage(
         rawEtag: messages.rawEtag,
         sentAt: messages.sentAt,
         isMemoryEligible: messages.isMemoryEligible,
+        embeddingContentHash: messages.embeddingContentHash,
       })
       .from(messages)
       .where(
@@ -2106,7 +2154,10 @@ export async function upsertIndexedMessage(
     const currentGmailLabelIds = existingMemberships.flatMap((membership) =>
       membership.providerLabelId ? [membership.providerLabelId] : [],
     );
+    const contentHash = createMessageContentHash(input);
     const analysisChanged =
+      !existingMessage || existingMessage.embeddingContentHash !== contentHash;
+    const storedDataChanged =
       !existingMessage ||
       existingMessage.direction !== input.direction ||
       !equalSender(existingMessage.sender, input.sender) ||
@@ -2114,7 +2165,8 @@ export async function upsertIndexedMessage(
       existingMessage.providerHistoryId !== input.providerHistoryId ||
       existingMessage.internalDate.getTime() !== input.internalDate.getTime() ||
       existingMessage.sizeEstimate !== input.sizeEstimate ||
-      JSON.stringify(existingMessage.headerLines) !== JSON.stringify(input.headerLines) ||
+      JSON.stringify(existingMessage.headerLines) !==
+        JSON.stringify(input.headerLines) ||
       existingMessage.subject !== input.subject ||
       existingMessage.bodyText !== input.bodyText ||
       existingMessage.bodyHtml !== input.bodyHtml ||
@@ -2127,8 +2179,11 @@ export async function upsertIndexedMessage(
       existingMessage.sentAt.getTime() !== input.sentAt.getTime() ||
       existingMessage.isMemoryEligible !== input.isMemoryEligible;
     const changed =
-      analysisChanged ||
-      !equalStringArrays(currentGmailLabelIds, input.gmailLabelIds) ||
+      storedDataChanged ||
+      !equalStringArrays(
+        currentGmailLabelIds,
+        input.gmailLabels.map((label) => label.providerLabelId),
+      ) ||
       (existingMessage?.snippet ?? "") !== input.snippet;
 
     let messageId = existingMessage?.id;
@@ -2150,7 +2205,9 @@ export async function upsertIndexedMessage(
           subject: input.subject,
           snippet: input.snippet,
           bodyText: input.bodyText,
-          embeddingContentHash: createMessageContentHash(input),
+          embeddingContentHash: contentHash,
+          labelAnalysisState: "pending",
+          labelAnalysisVersion: 1,
           bodyHtml: input.bodyHtml,
           rawObjectKey: input.rawObject?.key ?? null,
           rawChecksumSha256: input.rawObject?.checksumSha256 ?? null,
@@ -2172,7 +2229,16 @@ export async function upsertIndexedMessage(
             subject: input.subject,
             snippet: input.snippet,
             bodyText: input.bodyText,
-            embeddingContentHash: createMessageContentHash(input),
+            embeddingContentHash: contentHash,
+            ...(analysisChanged
+              ? {
+                  labelAnalysisState: "pending" as const,
+                  labelAnalysisVersion: sql`${messages.labelAnalysisVersion} + 1`,
+                  labelAnalysisDefinitionHash: null,
+                  labelAnalysisError: null,
+                  labelAnalyzedAt: null,
+                }
+              : {}),
             bodyHtml: input.bodyHtml,
             rawObjectKey: input.rawObject?.key ?? null,
             rawChecksumSha256: input.rawObject?.checksumSha256 ?? null,
@@ -2183,13 +2249,50 @@ export async function upsertIndexedMessage(
             updatedAt: new Date(),
           },
         })
-        .returning({ id: messages.id });
+        .returning({
+          id: messages.id,
+          contentHash: messages.embeddingContentHash,
+          labelAnalysisVersion: messages.labelAnalysisVersion,
+        });
       messageId = storedMessage?.id;
-      if (!messageId) throw new Error("The Gmail message could not be stored.");
+      if (!storedMessage || !messageId) {
+        throw new Error("The Gmail message could not be stored.");
+      }
 
-      const requestedProviderLabelIds = Array.from(new Set(input.gmailLabelIds));
+      const requestedGmailLabels = Array.from(
+        new Map(
+          input.gmailLabels.map((label) => [label.providerLabelId, label]),
+        ).values(),
+      );
+      const requestedProviderLabelIds = requestedGmailLabels.map(
+        (label) => label.providerLabelId,
+      );
       let providerLabels: Array<{ id: string; providerLabelId: string }> = [];
       if (requestedProviderLabelIds.length > 0) {
+        await transaction
+          .insert(labels)
+          .values(
+            requestedGmailLabels.map((label) => ({
+              userId: input.userId,
+              accountId: input.accountId,
+              kind: "gmail" as const,
+              providerLabelId: label.providerLabelId,
+              name: label.name,
+              normalizedName: label.name.toLowerCase(),
+              description: "",
+              providerType: "system" as const,
+            })),
+          )
+          .onConflictDoUpdate({
+            target: [labels.accountId, labels.providerLabelId],
+            targetWhere: isNotNull(labels.providerLabelId),
+            set: {
+              name: sql`excluded.name`,
+              normalizedName: sql`excluded.normalized_name`,
+              providerType: "system",
+              updatedAt: new Date(),
+            },
+          });
         const providerLabelRows = await transaction
           .select({
             id: labels.id,
@@ -2208,19 +2311,6 @@ export async function upsertIndexedMessage(
             ? [{ id: label.id, providerLabelId: label.providerLabelId }]
             : [],
         );
-        const storedProviderLabelIds = new Set(
-          providerLabels.map((label) => label.providerLabelId),
-        );
-        const missingProviderLabelIds = requestedProviderLabelIds.filter(
-          (providerLabelId) => !storedProviderLabelIds.has(providerLabelId),
-        );
-        if (missingProviderLabelIds.length > 0) {
-          throw new GmailLabelCatalogMismatchError({
-            accountId: input.accountId,
-            providerMessageId: input.providerMessageId,
-            missingProviderLabelIds,
-          });
-        }
       }
       await transaction
         .delete(messageLabels)
@@ -2243,7 +2333,32 @@ export async function upsertIndexedMessage(
       }
 
       if (analysisChanged) {
-        await invalidateThreadAnalysis(transaction, input.accountId, threadId);
+        await transaction
+          .delete(messageLabelDecisions)
+          .where(
+            and(
+              eq(messageLabelDecisions.messageId, messageId),
+              isNull(messageLabelDecisions.userOverride),
+            ),
+          );
+        await transaction
+          .delete(messageLabels)
+          .where(
+            and(
+              eq(messageLabels.messageId, messageId),
+              eq(messageLabels.source, "ai"),
+            ),
+          );
+        await enqueueMessageLabelAnalysisWithExecutor(
+          {
+            userId: input.userId,
+            accountId: input.accountId,
+            messageId,
+            contentHash: storedMessage.contentHash,
+            analysisVersion: storedMessage.labelAnalysisVersion,
+          },
+          transaction,
+        );
       }
 
       if (analysisChanged && input.ingestionMode === "incremental") {
@@ -2312,7 +2427,6 @@ export async function upsertIndexedMessage(
       }
 
       if (analysisChanged) {
-        const contentHash = createMessageContentHash(input);
         await transaction
           .delete(messageEmbeddings)
           .where(
@@ -2362,10 +2476,12 @@ export async function upsertIndexedMessage(
     }
 
     if (changed) {
-      await refreshIndexedThread(transaction, threadId, analysisChanged);
+      await refreshVisibleThread(transaction, threadId, {
+        incrementContentVersion: analysisChanged,
+      });
     }
 
-    return { messageId, threadId, changed };
+    return { messageId, threadId, changed, analysisQueued: analysisChanged };
   });
 }
 
@@ -2386,6 +2502,7 @@ export async function deleteIndexedMessage(
         threadId: messages.threadId,
         providerThreadId: threads.providerThreadId,
         providerHistoryId: messages.providerHistoryId,
+        labelAnalysisState: messages.labelAnalysisState,
         rawObjectKey: messages.rawObjectKey,
         updatedAt: messages.updatedAt,
       })
@@ -2398,7 +2515,9 @@ export async function deleteIndexedMessage(
         ),
       )
       .limit(1);
-    if (!storedMessage) return { changed: false, threadId: null };
+    if (!storedMessage) {
+      return { changed: false, threadId: null, wasVisible: false };
+    }
 
     const attachmentObjects = await transaction
       .select({ objectKey: messageAttachments.objectKey })
@@ -2431,14 +2550,16 @@ export async function deleteIndexedMessage(
     );
 
     await transaction.delete(messages).where(eq(messages.id, storedMessage.id));
-    await invalidateThreadAnalysis(
-      transaction,
-      input.accountId,
-      storedMessage.threadId,
-    );
-    await refreshIndexedThread(transaction, storedMessage.threadId);
+    await refreshVisibleThread(transaction, storedMessage.threadId);
 
-    return { changed: true, threadId: storedMessage.threadId, objectKeys };
+    return {
+      changed: true,
+      threadId: storedMessage.threadId,
+      objectKeys,
+      wasVisible:
+        storedMessage.labelAnalysisState === "complete" ||
+        storedMessage.labelAnalysisState === "failed",
+    };
   });
 }
 
@@ -2472,10 +2593,21 @@ export async function getStoredProviderMessageIds(
 }
 
 export function createMessageContentHash(
-  input: Pick<MailboxMessage, "subject" | "bodyText">,
+  input: Pick<
+    MailboxMessage,
+    "direction" | "sender" | "recipients" | "subject" | "bodyText"
+  >,
 ): string {
   return createHash("sha256")
-    .update(`${input.subject.trim()}\n${input.bodyText.trim()}`)
+    .update(
+      JSON.stringify({
+        direction: input.direction,
+        sender: input.sender,
+        recipients: input.recipients,
+        subject: input.subject.trim(),
+        bodyText: input.bodyText.trim(),
+      }),
+    )
     .digest("hex");
 }
 
@@ -2487,13 +2619,22 @@ export async function replaceGmailMessageLabels(
     accountId: string;
     providerMessageId: string;
     providerHistoryId: string | null;
-    providerLabelIds: string[];
+    gmailLabels: Array<{ providerLabelId: string; name: string }>;
   },
   database: Database = getDatabase(),
-): Promise<{ found: boolean; changed: boolean; threadId: string | null }> {
+): Promise<{
+  found: boolean;
+  changed: boolean;
+  threadId: string | null;
+  isVisible: boolean;
+}> {
   return database.transaction(async (transaction) => {
     const [message] = await transaction
-      .select({ id: messages.id, threadId: messages.threadId })
+      .select({
+        id: messages.id,
+        threadId: messages.threadId,
+        labelAnalysisState: messages.labelAnalysisState,
+      })
       .from(messages)
       .where(
         and(
@@ -2503,11 +2644,39 @@ export async function replaceGmailMessageLabels(
       )
       .for("update")
       .limit(1);
-    if (!message) return { found: false, changed: false, threadId: null };
+    if (!message) {
+      return { found: false, changed: false, threadId: null, isVisible: false };
+    }
 
     const requestedProviderLabelIds = Array.from(
-      new Set(input.providerLabelIds),
+      new Set(input.gmailLabels.map((label) => label.providerLabelId)),
     );
+    if (input.gmailLabels.length > 0) {
+      await transaction
+        .insert(labels)
+        .values(
+          input.gmailLabels.map((label) => ({
+            userId: input.userId,
+            accountId: input.accountId,
+            kind: "gmail" as const,
+            providerLabelId: label.providerLabelId,
+            name: label.name,
+            normalizedName: label.name.toLowerCase(),
+            description: "",
+            providerType: "system" as const,
+          })),
+        )
+        .onConflictDoUpdate({
+          target: [labels.accountId, labels.providerLabelId],
+          targetWhere: isNotNull(labels.providerLabelId),
+          set: {
+            name: sql`excluded.name`,
+            normalizedName: sql`excluded.normalized_name`,
+            providerType: "system",
+            updatedAt: new Date(),
+          },
+        });
+    }
     const providerLabelRows =
       requestedProviderLabelIds.length > 0
         ? await transaction
@@ -2526,20 +2695,6 @@ export async function replaceGmailMessageLabels(
         ? [{ id: label.id, providerLabelId: label.providerLabelId }]
         : [],
     );
-    const storedProviderLabelIds = new Set(
-      providerLabels.map((label) => label.providerLabelId),
-    );
-    const missingProviderLabelIds = requestedProviderLabelIds.filter(
-      (providerLabelId) => !storedProviderLabelIds.has(providerLabelId),
-    );
-    if (missingProviderLabelIds.length > 0) {
-      throw new GmailLabelCatalogMismatchError({
-        accountId: input.accountId,
-        providerMessageId: input.providerMessageId,
-        missingProviderLabelIds,
-      });
-    }
-
     const existingMemberships = await transaction
       .select({ providerLabelId: labels.providerLabelId })
       .from(messageLabels)
@@ -2585,7 +2740,14 @@ export async function replaceGmailMessageLabels(
         updatedAt: new Date(),
       })
       .where(eq(messages.id, message.id));
-    return { found: true, changed, threadId: message.threadId };
+    return {
+      found: true,
+      changed,
+      threadId: message.threadId,
+      isVisible:
+        message.labelAnalysisState === "complete" ||
+        message.labelAnalysisState === "failed",
+    };
   });
 }
 
@@ -2630,7 +2792,12 @@ function isUniqueViolation(error: unknown) {
 }
 
 export async function createInvookLabel(
-  input: { userId: string; name: string; description: string },
+  input: {
+    userId: string;
+    name: string;
+    description: string;
+    applyToPastDays?: LabelHistoryWindowDays | null;
+  },
   database: Database = getDatabase(),
 ) {
   try {
@@ -2638,15 +2805,8 @@ export async function createInvookLabel(
       const [account] = await transaction
         .select({
           id: connectedAccounts.id,
-          syncState: connectedAccounts.syncState,
-          historyCursor: gmailReplicaStates.historyCursor,
-          replicaState: gmailReplicaStates.state,
         })
         .from(connectedAccounts)
-        .innerJoin(
-          gmailReplicaStates,
-          eq(gmailReplicaStates.accountId, connectedAccounts.id),
-        )
         .where(
           and(
             eq(connectedAccounts.userId, input.userId),
@@ -2681,40 +2841,31 @@ export async function createInvookLabel(
           normalizedName,
           description: input.description.trim().replace(/\s+/g, " "),
           definitionVersion: 1,
-          analysisState: "pending",
         })
         .returning();
       if (!label) throw new Error("The label could not be created.");
-
-      if (
-        account.syncState.mailSync === "complete" &&
-        account.replicaState === "ready" &&
-        account.historyCursor
-      ) {
-        await enqueueWorkflowStep(
-          {
-            userId: input.userId,
-            accountId: account.id,
-            stepType: "label.backfill.submit",
-            payload: { labelId: label.id, definitionVersion: 1 },
-            idempotencyKey: `label.backfill.submit:${label.id}:1:${account.historyCursor}`,
-          },
-          transaction as unknown as Database,
-        );
-      }
-
-      const [threadTotal] = await transaction
-        .select({ value: count(threads.id) })
-        .from(threads)
-        .where(eq(threads.accountId, account.id));
+      const windowDays = input.applyToPastDays ?? null;
+      const queuedMessageCount = windowDays
+        ? await enqueueHistoricalMessageLabelAnalysis(
+            {
+              userId: input.userId,
+              accountId: account.id,
+              labelId: label.id,
+              definitionVersion: label.definitionVersion,
+              after: new Date(Date.now() - windowDays * 24 * 60 * 60 * 1_000),
+            },
+            transaction,
+          )
+        : 0;
       return {
         id: label.id,
         name: label.name,
         description: label.description,
+        systemKey: label.systemKey,
         definitionVersion: label.definitionVersion,
-        analysisState: label.analysisState,
-        analyzedThreadCount: 0,
-        totalThreadCount: threadTotal?.value ?? 0,
+        historicalAnalysis: windowDays
+          ? { windowDays, queuedMessageCount }
+          : null,
       };
     });
   } catch (error) {
@@ -2740,6 +2891,7 @@ export async function deleteInvookLabel(
           eq(labels.id, input.labelId),
           eq(labels.userId, input.userId),
           eq(labels.kind, "invook"),
+          isNull(labels.systemKey),
         ),
       )
       .limit(1);
@@ -2750,323 +2902,47 @@ export async function deleteInvookLabel(
   });
 }
 
-export async function getLabelForAnalysis(
-  accountId: string,
-  labelId: string,
-  database: Database = getDatabase(),
-) {
-  const [label] = await database
-    .select({
-      id: labels.id,
-      userId: labels.userId,
-      accountId: labels.accountId,
-      name: labels.name,
-      description: labels.description,
-      definitionVersion: labels.definitionVersion,
-      analysisState: labels.analysisState,
-    })
-    .from(labels)
-    .where(
-      and(
-        eq(labels.id, labelId),
-        eq(labels.accountId, accountId),
-        eq(labels.kind, "invook"),
-      ),
-    )
-    .limit(1);
-  return label ?? null;
-}
-
-async function loadLabelAnalysisThreads(
-  accountId: string,
-  threadIds: string[],
-  database: Database,
-) {
-  if (threadIds.length === 0) return [];
-  const threadRows = await database
-    .select({
-      id: threads.id,
-      contentVersion: threads.contentVersion,
-      subject: threads.subject,
-      participants: threads.participants,
-      latestMessageAt: threads.latestMessageAt,
-      updatedAt: threads.updatedAt,
-    })
-    .from(threads)
-    .where(and(eq(threads.accountId, accountId), inArray(threads.id, threadIds)))
-    .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt));
-  const rankedMessages = database
-    .select({
-      messageId: messages.id,
-      threadId: messages.threadId,
-      direction: messages.direction,
-      sender: messages.sender,
-      bodyText: messages.bodyText,
-      sentAt: messages.sentAt,
-      rank: sql<number>`row_number() over (partition by ${messages.threadId} order by ${messages.sentAt} desc, ${messages.id} desc)`.as(
-        "message_rank",
-      ),
-    })
-    .from(messages)
-    .where(inArray(messages.threadId, threadIds))
-    .as("ranked_label_messages");
-  const messageRows = await database
-    .select({
-      messageId: rankedMessages.messageId,
-      threadId: rankedMessages.threadId,
-      direction: rankedMessages.direction,
-      sender: rankedMessages.sender,
-      bodyText: rankedMessages.bodyText,
-      sentAt: rankedMessages.sentAt,
-    })
-    .from(rankedMessages)
-    .where(lte(rankedMessages.rank, 3))
-    .orderBy(desc(rankedMessages.sentAt), desc(rankedMessages.messageId));
-
-  const messagesByThread = new Map<string, typeof messageRows>();
-  for (const message of messageRows) {
-    const grouped = messagesByThread.get(message.threadId) ?? [];
-    grouped.push(message);
-    messagesByThread.set(message.threadId, grouped);
-  }
-
-  return threadRows.map((thread) => ({
-    id: thread.id,
-    contentVersion: thread.contentVersion,
-    subject: thread.subject,
-    participants: thread.participants,
-    messages: (messagesByThread.get(thread.id) ?? [])
-      .slice(0, 3)
-      .map((message) => ({
-        direction: message.direction,
-        sender: message.sender.raw || message.sender.email,
-        bodyText: message.bodyText,
-      })),
-  }));
-}
-
-export async function getThreadsForLabelBackfill(
-  input: { accountId: string; labelId: string; definitionVersion: number },
-  database: Database = getDatabase(),
-) {
-  const candidateRows = await database
-    .select({ id: threads.id })
-    .from(threads)
-    .where(
-      and(
-        eq(threads.accountId, input.accountId),
-        sql<boolean>`exists (
-          select 1
-          from ${messages}
-          left join ${messageLabelDecisions}
-            on ${messageLabelDecisions.messageId} = ${messages.id}
-            and ${messageLabelDecisions.labelId} = ${input.labelId}::uuid
-          where ${messages.threadId} = ${threads.id}
-            and (
-              ${messageLabelDecisions.id} is null
-              or ${messageLabelDecisions.definitionVersion} <> ${input.definitionVersion}
-            )
-        )`,
-      ),
-    )
-    .orderBy(desc(threads.latestMessageAt), desc(threads.updatedAt))
-    .limit(50_000);
-  return loadLabelAnalysisThreads(
-    input.accountId,
-    candidateRows.map((thread) => thread.id),
-    database,
-  );
-}
-
-export function getThreadsForLabelRetry(
-  accountId: string,
-  threadIds: string[],
-  database: Database = getDatabase(),
-) {
-  return loadLabelAnalysisThreads(accountId, threadIds, database);
-}
-
-export async function setLabelAnalysisState(
-  input: {
-    accountId: string;
-    labelId: string;
-    definitionVersion: number;
-    state: LabelAnalysisState;
-  },
-  database: Database = getDatabase(),
-) {
-  await database
-    .update(labels)
-    .set({
-      analysisState: input.state,
-      lastAnalyzedAt: input.state === "complete" ? new Date() : undefined,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(labels.id, input.labelId),
-        eq(labels.accountId, input.accountId),
-        eq(labels.kind, "invook"),
-        eq(labels.definitionVersion, input.definitionVersion),
-      ),
-    );
-}
-
-export async function saveLabelBatchResults(
+export async function updateInvookLabel(
   input: {
     userId: string;
-    accountId: string;
     labelId: string;
-    definitionVersion: number;
-    modelId: string;
-    results: Array<{
-      threadId: string;
-      threadVersion: number;
-      matched: boolean;
-      confidence: number;
-    }>;
+    name: string;
+    description: string;
   },
   database: Database = getDatabase(),
 ) {
-  return database.transaction(async (transaction) => {
-    const [label] = await transaction
-      .select({ id: labels.id })
-      .from(labels)
+  try {
+    const [label] = await database
+      .update(labels)
+      .set({
+        name: input.name.trim().replace(/\s+/g, " "),
+        normalizedName: normalizeLabelName(input.name),
+        description: input.description.trim().replace(/\s+/g, " "),
+        definitionVersion: sql`${labels.definitionVersion} + 1`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(labels.id, input.labelId),
-          eq(labels.accountId, input.accountId),
-          eq(labels.definitionVersion, input.definitionVersion),
+          eq(labels.userId, input.userId),
+          eq(labels.kind, "invook"),
+          isNull(labels.systemKey),
         ),
       )
-      .for("update")
-      .limit(1);
-    if (!label) return null;
-
-    const staleThreadIds = new Set<string>();
-    let savedThreadCount = 0;
-    for (let offset = 0; offset < input.results.length; offset += 500) {
-      const requestedResults = input.results.slice(offset, offset + 500);
-      const requestedThreadIds = requestedResults.map((result) => result.threadId);
-      const currentThreads = await transaction
-        .select({ id: threads.id, contentVersion: threads.contentVersion })
-        .from(threads)
-        .where(
-          and(
-            eq(threads.accountId, input.accountId),
-            inArray(threads.id, requestedThreadIds),
-          ),
-        )
-        .for("update");
-      const currentVersions = new Map(
-        currentThreads.map((thread) => [thread.id, thread.contentVersion]),
-      );
-      const results = requestedResults.filter((result) => {
-        const currentVersion = currentVersions.get(result.threadId);
-        if (currentVersion === result.threadVersion) return true;
-        staleThreadIds.add(result.threadId);
-        return false;
+      .returning({
+        id: labels.id,
+        name: labels.name,
+        description: labels.description,
+        systemKey: labels.systemKey,
+        definitionVersion: labels.definitionVersion,
       });
-      if (results.length === 0) continue;
-
-      savedThreadCount += results.length;
-      const threadIds = results.map((result) => result.threadId);
-      const currentMessages = await transaction
-        .select({ id: messages.id, threadId: messages.threadId })
-        .from(messages)
-        .where(inArray(messages.threadId, threadIds));
-      const messageIds = currentMessages.map((message) => message.id);
-      if (messageIds.length === 0) continue;
-      const existingDecisions = await transaction
-        .select({
-          messageId: messageLabelDecisions.messageId,
-          userOverride: messageLabelDecisions.userOverride,
-        })
-        .from(messageLabelDecisions)
-        .where(
-          and(
-            inArray(messageLabelDecisions.messageId, messageIds),
-            eq(messageLabelDecisions.labelId, input.labelId),
-          ),
-        );
-      const userOverridesByMessageId = new Map(
-        existingDecisions.map((decision) => [
-          decision.messageId,
-          decision.userOverride,
-        ]),
-      );
-      const resultsByThreadId = new Map(
-        results.map((result) => [result.threadId, result]),
-      );
-
-      await transaction
-        .insert(messageLabelDecisions)
-        .values(
-          currentMessages.flatMap((message) => {
-            const result = resultsByThreadId.get(message.threadId);
-            if (!result) return [];
-            return [{
-              userId: input.userId,
-              accountId: input.accountId,
-              messageId: message.id,
-              labelId: input.labelId,
-              aiDecision: result.matched
-                ? ("applied" as const)
-                : ("not_applied" as const),
-              confidence: result.confidence.toFixed(2),
-              modelId: input.modelId,
-              definitionVersion: input.definitionVersion,
-              analyzedAt: new Date(),
-            }];
-          }),
-        )
-        .onConflictDoUpdate({
-          target: [
-            messageLabelDecisions.messageId,
-            messageLabelDecisions.labelId,
-          ],
-          set: {
-            aiDecision: sql`excluded.ai_decision`,
-            confidence: sql`excluded.confidence`,
-            modelId: input.modelId,
-            definitionVersion: input.definitionVersion,
-            analyzedAt: new Date(),
-          },
-        });
-
-      await transaction
-        .delete(messageLabels)
-        .where(
-          and(
-            inArray(messageLabels.messageId, messageIds),
-            eq(messageLabels.labelId, input.labelId),
-          ),
-        );
-      const appliedMemberships = currentMessages.flatMap((message) => {
-        const result = resultsByThreadId.get(message.threadId);
-        if (!result) return [];
-        const userOverride = userOverridesByMessageId.get(message.id) ?? null;
-        if (userOverride === "suppressed") return [];
-        if (userOverride !== "applied" && !result.matched) return [];
-        return [{
-          userId: input.userId,
-          accountId: input.accountId,
-          messageId: message.id,
-          labelId: input.labelId,
-          source: userOverride === "applied" ? ("user" as const) : ("ai" as const),
-        }];
-      });
-      if (appliedMemberships.length > 0) {
-        await transaction
-          .insert(messageLabels)
-          .values(appliedMemberships)
-          .onConflictDoNothing({
-            target: [messageLabels.messageId, messageLabels.labelId],
-          });
-      }
+    return label ?? null;
+  } catch (error) {
+    if (error instanceof LabelConflictError || isUniqueViolation(error)) {
+      throw new LabelConflictError();
     }
-    return { savedThreadCount, staleThreadIds: Array.from(staleThreadIds) };
-  });
+    throw error;
+  }
 }
 
 export async function setUserThreadLabel(
@@ -3107,7 +2983,8 @@ export async function setUserThreadLabel(
     const threadMessages = await transaction
       .select({ id: messages.id })
       .from(messages)
-      .where(eq(messages.threadId, thread.id));
+      .where(eq(messages.threadId, thread.id))
+      .for("update");
     const messageIds = threadMessages.map((message) => message.id);
     if (messageIds.length > 0) {
       await transaction
@@ -4551,16 +4428,13 @@ export async function getReplyDraftContext(
     })
     .from(threads)
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
-    .innerJoin(
-      gmailReplicaStates,
-      eq(gmailReplicaStates.accountId, connectedAccounts.id),
-    )
     .where(
       and(
         eq(threads.id, threadId),
         eq(threads.userId, userId),
+        eq(connectedAccounts.userId, userId),
         eq(connectedAccounts.status, "connected"),
-        eq(gmailReplicaStates.state, "ready"),
+        visibleThreadCondition(),
       ),
     )
     .limit(1);
@@ -4577,7 +4451,13 @@ export async function getReplyDraftContext(
         sentAt: messages.sentAt,
       })
       .from(messages)
-      .where(and(eq(messages.userId, userId), eq(messages.threadId, thread.id)))
+      .where(
+        and(
+          eq(messages.userId, userId),
+          eq(messages.threadId, thread.id),
+          visibleMessageCondition,
+        ),
+      )
       .orderBy(asc(messages.sentAt)),
     database
       .select({
@@ -4844,8 +4724,6 @@ export async function enqueuePendingAnalysisWorkflowSteps(
     .select({
       id: connectedAccounts.id,
       userId: connectedAccounts.userId,
-      historyCursor: gmailReplicaStates.historyCursor,
-      replicaState: gmailReplicaStates.state,
       syncState: connectedAccounts.syncState,
     })
     .from(connectedAccounts)
@@ -4855,49 +4733,6 @@ export async function enqueuePendingAnalysisWorkflowSteps(
     )
     .where(eq(connectedAccounts.status, "connected"));
 
-  const indexedAccountIds = indexedAccounts.map((account) => account.id);
-  const accountLabels =
-    indexedAccountIds.length > 0
-      ? await database
-          .select({
-            id: labels.id,
-            accountId: labels.accountId,
-            definitionVersion: labels.definitionVersion,
-            analysisState: labels.analysisState,
-          })
-          .from(labels)
-          .where(
-            and(
-              inArray(labels.accountId, indexedAccountIds),
-              eq(labels.kind, "invook"),
-            ),
-          )
-      : [];
-
-  const analysisJobs = indexedAccounts.flatMap((account) => {
-    if (
-      account.syncState.mailSync !== "complete" ||
-      account.replicaState !== "ready" ||
-      !account.historyCursor
-    ) return [];
-    return [
-      ...accountLabels
-        .filter(
-          (label) =>
-            label.accountId === account.id && label.analysisState !== "complete",
-        )
-        .map((label) => ({
-          userId: account.userId,
-          accountId: account.id,
-          stepType: "label.backfill.submit",
-          payload: {
-            labelId: label.id,
-            definitionVersion: label.definitionVersion,
-          },
-          idempotencyKey: `label.backfill.submit:${label.id}:${label.definitionVersion}:${account.historyCursor}`,
-        })),
-    ];
-  });
   const memoryReadyAccountIds = indexedAccounts
     .filter((account) => account.syncState.memory === "complete")
     .map((account) => account.id);
@@ -4941,7 +4776,7 @@ export async function enqueuePendingAnalysisWorkflowSteps(
         })
       : [],
   );
-  const values = [...analysisJobs, ...incrementalJobs];
+  const values = incrementalJobs;
   if (values.length === 0) return 0;
 
   const inserted = await enqueueWorkflowStepsWithExecutor(values, database);
@@ -5004,8 +4839,6 @@ export async function enqueueBatchEvent(
                 "memory.extract",
                 "memory.incremental",
                 "memory.batch.retry",
-                "label.backfill.submit",
-                "label.batch.retry",
               ]),
               sql`${workflowSteps.result}->>'provider' = ${input.provider}`,
               sql`${workflowSteps.result}->>'providerBatchId' = ${input.providerBatchId}`,
@@ -5030,9 +4863,7 @@ export async function enqueueBatchEvent(
     if (submission) {
       const eventJobType = submission.stepType.startsWith("embedding.")
         ? "embedding.batch.event"
-        : submission.stepType.startsWith("label.")
-          ? "label.batch.event"
-          : "memory.batch.event";
+        : "memory.batch.event";
       await enqueueWorkflowStep(
         {
           userId: submission.userId,
@@ -5054,35 +4885,6 @@ export async function getBatchSubmission(
   database: Database = getDatabase(),
 ) {
   return getWorkflowStepSubmission(jobId, database);
-}
-
-export async function getLabelBatchSubmission(
-  jobId: string,
-  database: Database = getDatabase(),
-) {
-  const [submission] = await database
-    .select({
-      id: workflowSteps.id,
-      userId: workflowSteps.userId,
-      accountId: workflowSteps.accountId,
-      jobType: workflowSteps.stepType,
-      result: workflowSteps.result,
-      maxAttempts: workflowSteps.maxAttempts,
-    })
-    .from(workflowSteps)
-    .where(
-      and(
-        eq(workflowSteps.id, jobId),
-        eq(workflowSteps.status, "complete"),
-        inArray(workflowSteps.stepType, [
-          "label.backfill.submit",
-          "label.batch.retry",
-        ]),
-      ),
-    )
-    .limit(1);
-
-  return submission ?? null;
 }
 
 export async function enqueueMemoryBatchRetry(
@@ -5127,82 +4929,6 @@ export async function enqueueMemoryBatchRetry(
       accountId: input.accountId,
       stepType: "memory.batch.retry",
       payload,
-      idempotencyKey,
-    },
-    database,
-  );
-}
-
-export async function enqueueLabelBatchRetry(
-  input: {
-    userId: string;
-    accountId: string;
-    labelId: string;
-    definitionVersion: number;
-    parentSubmissionJobId: string;
-    rootSubmissionJobId: string;
-    batchAttempt: number;
-    continueBackfill: boolean;
-    manifest: Array<{
-      key: string;
-      labelId: string;
-      definitionVersion: number;
-      threadId: string;
-    }>;
-  },
-  database: Database = getDatabase(),
-) {
-  const manifestHash = createHash("sha256")
-    .update(
-      JSON.stringify(
-        input.manifest.map((entry) => ({
-          key: entry.key,
-          threadId: entry.threadId,
-        })),
-      ),
-    )
-    .digest("hex");
-  const idempotencyKey = `label.batch.retry:${input.parentSubmissionJobId}:${manifestHash}`;
-  return enqueueWorkflowStep(
-    {
-      userId: input.userId,
-      accountId: input.accountId,
-      stepType: "label.batch.retry",
-      payload: {
-        labelId: input.labelId,
-        definitionVersion: input.definitionVersion,
-        parentSubmissionJobId: input.parentSubmissionJobId,
-        rootSubmissionJobId: input.rootSubmissionJobId,
-        batchAttempt: input.batchAttempt,
-        continueBackfill: input.continueBackfill,
-        manifest: input.manifest,
-      },
-      idempotencyKey,
-    },
-    database,
-  );
-}
-
-export async function enqueueLabelBackfillContinuation(
-  input: {
-    userId: string;
-    accountId: string;
-    labelId: string;
-    definitionVersion: number;
-    parentSubmissionJobId: string;
-  },
-  database: Database = getDatabase(),
-) {
-  const idempotencyKey = `label.backfill.continue:${input.parentSubmissionJobId}`;
-  return enqueueWorkflowStep(
-    {
-      userId: input.userId,
-      accountId: input.accountId,
-      stepType: "label.backfill.submit",
-      payload: {
-        labelId: input.labelId,
-        definitionVersion: input.definitionVersion,
-      },
       idempotencyKey,
     },
     database,

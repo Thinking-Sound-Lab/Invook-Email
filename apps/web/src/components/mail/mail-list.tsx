@@ -1,23 +1,24 @@
-import {
-  ArrowLeft01Icon,
-  ArrowRight01Icon,
-  Search02Icon,
-  StarIcon,
-} from "@hugeicons/core-free-icons";
+"use client";
+
+import { StarIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { MailboxPagination } from "@invook/contracts";
+import type { AccountSyncStage, MailboxWorkspace } from "@invook/contracts";
+import axios from "axios";
 import Link from "next/link";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 
-import { formatMailDate, formatMailText, threadPeople } from "./mail-format";
-import { MailboxRefreshButton } from "./mailbox-refresh-button";
+import { createMailDateSections } from "./mail-date-sections";
+import { formatMailText, threadPeople } from "./mail-format";
+import { mailLabelColorClassName } from "./mail-label-colors";
+import { LocalMailDate } from "./local-mail-date";
 import { MailNavigationPending } from "./mail-navigation-pending";
 import { listMailRowLabels, type MailRowLabel } from "./mail-row-labels";
+import { mergeMailboxThreads } from "./mail-thread-pages";
 import type {
-  MailAccount,
   MailboxView,
   MailThreadSummary,
   StaticMailboxView,
@@ -25,6 +26,7 @@ import type {
 
 const viewTitles: Record<StaticMailboxView, string> = {
   all: "All mail",
+  important: "Important",
   starred: "Starred",
   drafts: "Drafts",
   sent: "Sent",
@@ -34,11 +36,9 @@ const viewTitles: Record<StaticMailboxView, string> = {
 
 function mailboxHref(
   currentView: MailboxView,
-  cursor?: string | null,
   threadId?: string,
 ): string {
   const query = new URLSearchParams({ view: currentView });
-  if (cursor) query.set("cursor", cursor);
   if (threadId) query.set("thread", threadId);
   return `/mail?${query.toString()}`;
 }
@@ -47,7 +47,6 @@ interface MailRowProps {
   thread: MailThreadSummary;
   accountEmail: string;
   currentView: MailboxView;
-  mailboxCursor?: string;
 }
 
 interface MailLabelChipProps {
@@ -63,9 +62,7 @@ function MailLabelChip({ label }: MailLabelChipProps) {
       title={`${label.name} (${sourceName})`}
       className={cn(
         "min-w-0 max-w-28 truncate rounded px-1.5 py-0.5 text-[11px] font-medium",
-        label.kind === "gmail"
-          ? "bg-secondary text-muted-foreground"
-          : "bg-primary/12 text-primary",
+        mailLabelColorClassName(label),
       )}
     >
       {label.name}
@@ -77,30 +74,44 @@ function MailRow({
   thread,
   accountEmail,
   currentView,
-  mailboxCursor,
 }: MailRowProps) {
   const people = threadPeople(thread.participants, accountEmail);
-  const unread = thread.gmailLabels.some(
+  const isUnread = thread.gmailLabels.some(
     (label) => label.providerLabelId === "UNREAD",
   );
-  const starred = thread.gmailLabels.some(
+  const isStarred = thread.gmailLabels.some(
     (label) => label.providerLabelId === "STARRED",
   );
   const labels = listMailRowLabels(thread);
 
   return (
     <Link
-      href={mailboxHref(currentView, mailboxCursor, thread.id)}
+      href={mailboxHref(currentView, thread.id)}
       scroll={false}
       className={cn(
-        "group relative grid min-h-12 grid-cols-[minmax(118px,0.3fr)_minmax(0,1fr)_auto] items-center gap-4 border-b border-border/45 px-5 py-2.5 transition-colors",
+        "group relative grid min-h-10 grid-cols-[minmax(112px,0.3fr)_minmax(0,1fr)_4.5rem] items-center gap-3 border-b border-border/40 px-4 py-1.5 transition-colors [contain-intrinsic-size:40px] [content-visibility:auto] lg:grid-cols-[minmax(112px,0.3fr)_minmax(0,1fr)_6.5rem_1rem_4.5rem] lg:gap-2.5",
         "hover:bg-accent/55 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-        unread && "bg-card/45",
+        isUnread && "bg-card/45",
       )}
     >
       <MailNavigationPending variant="edge" />
       <div className="flex min-w-0 items-center gap-2">
-        <p className={cn("truncate text-sm", unread ? "font-semibold" : "font-medium text-foreground/78")}>
+        <span
+          aria-hidden="true"
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            isUnread ? "bg-blue-500" : "bg-transparent",
+          )}
+        />
+        <span className="sr-only">{isUnread ? "Unread" : "Read"}</span>
+        <p
+          className={cn(
+            "truncate text-sm",
+            isUnread
+              ? "font-semibold"
+              : "font-normal text-foreground/70",
+          )}
+        >
           {people}
           {thread.messageCount > 1 ? (
             <span className="ml-1.5 text-xs font-normal tabular-nums text-muted-foreground">
@@ -111,30 +122,53 @@ function MailRow({
       </div>
 
       <div className="flex min-w-0 items-center gap-2">
-        <p className={cn("shrink-0 truncate text-sm", unread ? "max-w-[48%] font-semibold" : "max-w-[42%] font-medium text-foreground/86")}>
+        <p
+          className={cn(
+            "shrink-0 truncate text-sm",
+            isUnread
+              ? "max-w-[48%] font-semibold"
+              : "max-w-[42%] font-normal text-foreground/76",
+          )}
+        >
           {formatMailText(thread.subject) || "(No subject)"}
         </p>
         <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {formatMailText(thread.snippet) || "No message preview is available."}
         </p>
-        {labels.length > 0 ? (
-          <div
-            className="hidden min-w-0 max-w-[40%] shrink items-center gap-1 overflow-hidden lg:flex"
-            aria-label="User-created labels"
-          >
-            {labels.map((label) => (
-              <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
-            ))}
-          </div>
-        ) : null}
-        {starred ? (
-          <HugeiconsIcon icon={StarIcon} size={13} className="shrink-0 text-warning" fill="currentColor" />
+        {isStarred ? (
+          <HugeiconsIcon
+            icon={StarIcon}
+            size={13}
+            className="shrink-0 text-warning lg:hidden"
+            fill="currentColor"
+          />
         ) : null}
       </div>
 
-      <time className="text-xs tabular-nums text-muted-foreground">
-        {formatMailDate(thread.latestMessageAt)}
-      </time>
+      <div
+        className="hidden min-w-0 items-center justify-end gap-1 overflow-hidden lg:flex"
+        aria-label={labels.length > 0 ? "Message labels" : undefined}
+      >
+        {labels.map((label) => (
+          <MailLabelChip key={`${label.kind}:${label.id}`} label={label} />
+        ))}
+      </div>
+
+      <div className="hidden size-4 items-center justify-center lg:flex">
+        {isStarred ? (
+          <HugeiconsIcon
+            icon={StarIcon}
+            size={13}
+            className="shrink-0 text-warning"
+            fill="currentColor"
+          />
+        ) : null}
+      </div>
+
+      <LocalMailDate
+        className="w-full whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground"
+        value={thread.latestMessageAt}
+      />
     </Link>
   );
 }
@@ -143,52 +177,149 @@ interface MailRowsProps {
   threads: MailThreadSummary[];
   accountEmail: string;
   currentView: MailboxView;
-  mailboxCursor?: string;
 }
 
 function MailRows({
   threads,
   accountEmail,
   currentView,
-  mailboxCursor,
 }: MailRowsProps) {
-  return threads.map((thread) => (
-    <MailRow
-      key={thread.id}
-      thread={thread}
-      accountEmail={accountEmail}
-      currentView={currentView}
-      mailboxCursor={mailboxCursor}
-    />
+  const sections = createMailDateSections(threads);
+
+  return sections.map((section, sectionIndex) => (
+    <section
+      key={section.id}
+      aria-label={section.label ?? "Today"}
+      className={cn(section.label && (sectionIndex === 0 ? "pt-4" : "pt-5"))}
+    >
+      {section.label ? (
+        <h2 className="px-4 pb-1.5 text-xs font-medium text-muted-foreground">
+          {section.label}
+        </h2>
+      ) : null}
+      {section.threads.map((thread) => (
+        <MailRow
+          key={thread.id}
+          thread={thread}
+          accountEmail={accountEmail}
+          currentView={currentView}
+        />
+      ))}
+    </section>
   ));
 }
 
 export interface MailListProps {
-  account: MailAccount;
+  accountEmail: string;
   currentView: MailboxView;
-  mailboxCursor?: string;
-  pagination: MailboxPagination;
+  initialOlderCursor: string | null;
+  mailSyncState: AccountSyncStage;
   threads: MailThreadSummary[];
   query?: string;
   title?: string;
 }
 
+interface MailContinuation {
+  threads: MailThreadSummary[];
+  olderCursor: string | null;
+}
+
 export function MailList({
-  account,
+  accountEmail,
   currentView,
-  mailboxCursor,
-  pagination,
+  initialOlderCursor,
+  mailSyncState,
   threads,
   query,
   title,
 }: MailListProps) {
-  const noMail = threads.length === 0;
-  const syncing =
-    account.syncState.mailSync === "pending" || account.syncState.mailSync === "running";
+  const [continuation, setContinuation] = useState<MailContinuation | null>(
+    null,
+  );
+  const [loadState, setLoadState] = useState<"idle" | "loading" | "error">(
+    "idle",
+  );
+  const isLoadingRef = useRef(false);
+  const requestControllerRef = useRef<AbortController | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const loadedThreads = mergeMailboxThreads(
+    threads,
+    continuation?.threads ?? [],
+  );
+  const olderCursor = continuation
+    ? continuation.olderCursor
+    : initialOlderCursor;
+  const noMail = loadedThreads.length === 0;
+  const syncing = mailSyncState === "pending" || mailSyncState === "running";
+
+  useEffect(
+    () => () => {
+      requestControllerRef.current?.abort();
+    },
+    [],
+  );
+
+  const loadMoreMail = useCallback(async (): Promise<void> => {
+    if (!olderCursor || isLoadingRef.current) return;
+
+    const requestedCursor = olderCursor;
+    const requestController = new AbortController();
+    requestControllerRef.current?.abort();
+    requestControllerRef.current = requestController;
+    isLoadingRef.current = true;
+    setLoadState("loading");
+
+    try {
+      const response = await axios.get<MailboxWorkspace>("/v1/mailbox", {
+        params: { view: currentView, cursor: requestedCursor },
+        signal: requestController.signal,
+      });
+      if (requestController.signal.aborted) return;
+
+      setContinuation((currentContinuation) => ({
+        threads: mergeMailboxThreads(
+          currentContinuation?.threads ?? threads,
+          response.data.threads,
+        ),
+        olderCursor: response.data.pagination.olderCursor,
+      }));
+      setLoadState("idle");
+    } catch (error: unknown) {
+      if (axios.isCancel(error) || requestController.signal.aborted) return;
+      setLoadState("error");
+    } finally {
+      if (requestControllerRef.current === requestController) {
+        requestControllerRef.current = null;
+      }
+      isLoadingRef.current = false;
+    }
+  }, [currentView, olderCursor, threads]);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !olderCursor || loadState !== "idle") return;
+
+    const scrollViewport = sentinel.closest(
+      '[data-slot="scroll-area-viewport"]',
+    );
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          void loadMoreMail();
+        }
+      },
+      { root: scrollViewport, rootMargin: "0px 0px 480px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [loadMoreMail, loadState, olderCursor]);
 
   return (
-    <section className="flex min-h-0 flex-col bg-background" aria-label="Mailbox">
-      <header className="flex h-15 shrink-0 items-center justify-between border-b border-border/45 px-5">
+    <section
+      className="mx-5 flex min-h-0 flex-col bg-background"
+      aria-label="Mailbox"
+    >
+      <header className="flex h-14 shrink-0 items-center px-4">
         <h1 className="truncate text-base font-semibold tracking-[-0.025em]">
           {query
             ? `Search: ${query}`
@@ -197,55 +328,17 @@ export function MailList({
                 ? "Label"
                 : viewTitles[currentView as StaticMailboxView])}
         </h1>
-        <div className="flex items-center gap-1">
-          <span className="mr-1 hidden text-xs tabular-nums text-muted-foreground sm:inline">
-            {pagination.totalThreadCount.toLocaleString()} threads
-          </span>
-          {pagination.newerCursor ? (
-            <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
-              <Link
-                href={mailboxHref(currentView, pagination.newerCursor)}
-                aria-label="Show newer mail"
-                scroll={false}
-              >
-                <HugeiconsIcon icon={ArrowLeft01Icon} size={16} />
-              </Link>
-            </Button>
-          ) : (
-            <Button variant="ghost" size="icon-sm" disabled aria-label="No newer mail">
-              <HugeiconsIcon icon={ArrowLeft01Icon} size={16} />
-            </Button>
-          )}
-          {pagination.olderCursor ? (
-            <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
-              <Link
-                href={mailboxHref(currentView, pagination.olderCursor)}
-                aria-label="Show older mail"
-                scroll={false}
-              >
-                <HugeiconsIcon icon={ArrowRight01Icon} size={16} />
-              </Link>
-            </Button>
-          ) : (
-            <Button variant="ghost" size="icon-sm" disabled aria-label="No older mail">
-              <HugeiconsIcon icon={ArrowRight01Icon} size={16} />
-            </Button>
-          )}
-          <Button asChild variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground">
-            <Link href="/mail?surface=search" aria-label="Search mail">
-              <HugeiconsIcon icon={Search02Icon} size={16} />
-            </Link>
-          </Button>
-          <MailboxRefreshButton />
-        </div>
       </header>
 
-      <ScrollArea hideScrollbar className="min-h-0 flex-1">
+      <ScrollArea
+        hideScrollbar
+        className="min-h-0 flex-1"
+        aria-busy={loadState === "loading"}
+      >
         <MailRows
-          threads={threads}
-          accountEmail={account.email}
+          threads={loadedThreads}
+          accountEmail={accountEmail}
           currentView={currentView}
-          mailboxCursor={mailboxCursor}
         />
 
         {noMail ? (
@@ -258,6 +351,33 @@ export function MailList({
                 ? "Messages will appear here as Invook stores them."
                 : "This view has no synchronized Gmail threads."}
             </p>
+          </div>
+        ) : null}
+
+        {olderCursor ? (
+          <div ref={sentinelRef} className="h-px" aria-hidden="true" />
+        ) : null}
+        {loadState === "loading" ? (
+          <p
+            className="px-4 py-4 text-center text-xs text-muted-foreground"
+            role="status"
+          >
+            Loading more mail…
+          </p>
+        ) : null}
+        {loadState === "error" ? (
+          <div className="flex items-center justify-center gap-3 px-4 py-4" role="alert">
+            <p className="text-xs text-muted-foreground">
+              More mail could not be loaded.
+            </p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => void loadMoreMail()}
+            >
+              Try again
+            </Button>
           </div>
         ) : null}
       </ScrollArea>

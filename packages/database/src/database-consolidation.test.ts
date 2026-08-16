@@ -13,12 +13,8 @@ const removeBuiltInLabelsMigrationUrl = new URL(
   "../drizzle/0022_burly_magneto.sql",
   import.meta.url,
 );
-const separateAuthenticationMigrationUrl = new URL(
-  "../drizzle/0023_right_thunderball.sql",
-  import.meta.url,
-);
-const enforceAuthenticationUserMigrationUrl = new URL(
-  "../drizzle/0024_breezy_next_avengers.sql",
+const authenticationMigrationUrl = new URL(
+  "../drizzle/0024_yielding_talisman.sql",
   import.meta.url,
 );
 const schemaUrl = new URL("./schema.ts", import.meta.url);
@@ -39,7 +35,7 @@ test("the Drizzle schema has exactly the 29 owned tables", async () => {
 });
 
 test("the auth migration preserves identity without copying Gmail credentials", async () => {
-  const migration = await readFile(separateAuthenticationMigrationUrl, "utf8");
+  const migration = await readFile(authenticationMigrationUrl, "utf8");
 
   assertBefore(
     migration,
@@ -52,7 +48,7 @@ test("the auth migration preserves identity without copying Gmail credentials", 
 });
 
 test("the auth user contract backfills real identity data before enforcing required fields", async () => {
-  const migration = await readFile(enforceAuthenticationUserMigrationUrl, "utf8");
+  const migration = await readFile(authenticationMigrationUrl, "utf8");
 
   assertBefore(
     migration,
@@ -136,7 +132,7 @@ test("the built-in Invook labels are deleted before system_key is removed", asyn
 });
 
 async function applyMigrationFile(
-  client: postgres.Sql,
+  client: postgres.Sql | postgres.TransactionSql,
   filename: string,
   schemaName?: string,
 ): Promise<void> {
@@ -163,7 +159,7 @@ test(
       const migrationFiles = (await readdir(migrationsUrl))
         .filter((filename) => /^\d{4}_.+\.sql$/.test(filename))
         .sort();
-      for (const filename of migrationFiles.filter((name) => name < "0023_")) {
+      for (const filename of migrationFiles.filter((name) => name < "0024_")) {
         await applyMigrationFile(client, filename, testSchema);
       }
 
@@ -182,21 +178,26 @@ test(
         );
       `);
 
-      await applyMigrationFile(client, "0023_right_thunderball.sql", testSchema);
       await assert.rejects(
         () =>
-          applyMigrationFile(
-            client,
-            "0024_breezy_next_avengers.sql",
-            testSchema,
-          ),
+          client.begin(async (transaction) => {
+            await applyMigrationFile(
+              transaction,
+              "0024_yielding_talisman.sql",
+              testSchema,
+            );
+          }),
         /Cannot enforce Better Auth user requirements/,
       );
       await client.unsafe(`
         DELETE FROM profiles
         WHERE id = '33333333-3333-4333-8333-333333333333'
       `);
-      await applyMigrationFile(client, "0024_breezy_next_avengers.sql", testSchema);
+      await applyMigrationFile(
+        client,
+        "0024_yielding_talisman.sql",
+        testSchema,
+      );
 
       assert.deepEqual(
         Array.from(

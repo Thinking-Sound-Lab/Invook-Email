@@ -1,6 +1,6 @@
 {
-  "id": "6e79ca3e-f5fb-4f1a-93ba-e89365f60a23",
-  "prevId": "2ca5bf6e-256d-4812-b36b-23c491de6919",
+  "id": "06781358-bc1c-4d60-be33-4753a2d9d64d",
+  "prevId": "555d7c8a-6843-4105-8256-424ee13702d5",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -442,6 +442,12 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "image": {
+          "name": "image",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "status": {
           "name": "status",
@@ -2144,6 +2150,12 @@
           "notNull": true,
           "default": "''"
         },
+        "system_key": {
+          "name": "system_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "definition_version": {
           "name": "definition_version",
           "type": "integer",
@@ -2151,49 +2163,11 @@
           "notNull": true,
           "default": 1
         },
-        "analysis_state": {
-          "name": "analysis_state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'pending'"
-        },
-        "last_analyzed_at": {
-          "name": "last_analyzed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "provider_type": {
           "name": "provider_type",
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "message_list_visibility": {
-          "name": "message_list_visibility",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "label_list_visibility": {
-          "name": "label_list_visibility",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "color": {
-          "name": "color",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "provider_metadata": {
-          "name": "provider_metadata",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
         },
         "created_at": {
           "name": "created_at",
@@ -2251,6 +2225,28 @@
           ],
           "isUnique": true,
           "where": "\"labels\".\"kind\" = 'invook'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "labels_account_system_key_idx": {
+          "name": "labels_account_system_key_idx",
+          "columns": [
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "system_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"labels\".\"system_key\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -2350,15 +2346,15 @@
         },
         "labels_kind_contract_check": {
           "name": "labels_kind_contract_check",
-          "value": "(\"labels\".\"kind\" = 'gmail' and \"labels\".\"provider_label_id\" is not null and \"labels\".\"provider_type\" in ('system', 'user')) or (\"labels\".\"kind\" = 'invook' and \"labels\".\"provider_label_id\" is null and \"labels\".\"provider_type\" is null and char_length(btrim(\"labels\".\"description\")) > 0)"
+          "value": "(\"labels\".\"kind\" = 'gmail' and \"labels\".\"provider_label_id\" is not null and \"labels\".\"provider_type\" = 'system' and \"labels\".\"system_key\" is null) or (\"labels\".\"kind\" = 'invook' and \"labels\".\"provider_label_id\" is null and \"labels\".\"provider_type\" is null and char_length(btrim(\"labels\".\"description\")) > 0)"
+        },
+        "labels_system_key_check": {
+          "name": "labels_system_key_check",
+          "value": "\"labels\".\"system_key\" is null or \"labels\".\"system_key\" = 'newsletter'"
         },
         "labels_definition_version_check": {
           "name": "labels_definition_version_check",
           "value": "\"labels\".\"definition_version\" > 0"
-        },
-        "labels_analysis_state_check": {
-          "name": "labels_analysis_state_check",
-          "value": "\"labels\".\"analysis_state\" in ('pending', 'running', 'complete', 'failed')"
         }
       },
       "isRLSEnabled": false
@@ -4160,6 +4156,38 @@
           "primaryKey": false,
           "notNull": true
         },
+        "label_analysis_state": {
+          "name": "label_analysis_state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "label_analysis_version": {
+          "name": "label_analysis_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "label_analysis_definition_hash": {
+          "name": "label_analysis_definition_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "label_analysis_error": {
+          "name": "label_analysis_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "label_analyzed_at": {
+          "name": "label_analyzed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "body_html": {
           "name": "body_html",
           "type": "text",
@@ -4309,6 +4337,33 @@
           "method": "btree",
           "with": {}
         },
+        "messages_account_label_analysis_idx": {
+          "name": "messages_account_label_analysis_idx",
+          "columns": [
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "label_analysis_state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sent_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "messages_search_idx": {
           "name": "messages_search_idx",
           "columns": [
@@ -4422,6 +4477,18 @@
         "messages_embedding_content_hash_check": {
           "name": "messages_embedding_content_hash_check",
           "value": "\"messages\".\"embedding_content_hash\" ~ '^[0-9a-f]{64}$'"
+        },
+        "messages_label_analysis_state_check": {
+          "name": "messages_label_analysis_state_check",
+          "value": "\"messages\".\"label_analysis_state\" in ('pending', 'running', 'complete', 'failed')"
+        },
+        "messages_label_analysis_version_check": {
+          "name": "messages_label_analysis_version_check",
+          "value": "\"messages\".\"label_analysis_version\" > 0"
+        },
+        "messages_label_analysis_definition_hash_check": {
+          "name": "messages_label_analysis_definition_hash_check",
+          "value": "\"messages\".\"label_analysis_definition_hash\" is null or \"messages\".\"label_analysis_definition_hash\" ~ '^[0-9a-f]{64}$'"
         }
       },
       "isRLSEnabled": false
@@ -4622,7 +4689,7 @@
         },
         "queue_outbox_queue_name_check": {
           "name": "queue_outbox_queue_name_check",
-          "value": "\"queue_outbox\".\"queue_name\" in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit', 'mail-label-events')"
+          "value": "\"queue_outbox\".\"queue_name\" in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit')"
         }
       },
       "isRLSEnabled": false
