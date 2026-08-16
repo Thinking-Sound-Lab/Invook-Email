@@ -159,6 +159,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
       <MailboxEventSubscriber />
       <div className="grid h-full grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
         <MailSidebar
+          user={workspace.user}
           account={workspace.account}
           currentView={currentView}
           currentSurface={currentSurface}

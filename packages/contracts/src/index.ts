@@ -163,6 +163,12 @@ export type MailboxAccount = {
   };
 };
 
+export type SignedInUser = {
+  email: string;
+  image: string | null;
+  name: string;
+};
+
 export type GmailLabel = {
   id: string;
   providerLabelId: string;
@@ -293,6 +299,7 @@ export type MailboxPagination = {
 export type MailboxWorkspace = {
   aiConfigured: boolean;
   batchConfigured: boolean;
+  user: SignedInUser;
   account: MailboxAccount;
   memories: MemoryEntry[];
   gmailUserLabels: GmailUserLabel[];

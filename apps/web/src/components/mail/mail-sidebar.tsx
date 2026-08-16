@@ -4,12 +4,15 @@ import {
   FileEditIcon,
   InboxIcon,
   Mail01Icon,
+  MailAccount01Icon,
   PencilEdit01Icon,
+  PlusSignIcon,
   Search02Icon,
   SentIcon,
   SpamIcon,
   StarIcon,
   Tag01Icon,
+  Tick02Icon,
   WorkflowSquare01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -18,11 +21,17 @@ import type {
   InvookLabel,
   MailboxAccount,
   MemoryEntry,
+  SignedInUser,
 } from "@invook/contracts";
 import Link from "next/link";
 
 import { SignOutButton } from "@/components/auth/sign-out-button";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
 import { AccountPipelineProgress } from "./account-pipeline-progress";
@@ -85,6 +94,7 @@ function NavLink({
 }
 
 export interface MailSidebarProps {
+  user: SignedInUser;
   account: MailboxAccount;
   currentView: MailboxView;
   currentSurface: MailSurface;
@@ -96,6 +106,7 @@ export interface MailSidebarProps {
 }
 
 export function MailSidebar({
+  user,
   account,
   currentView,
   currentSurface,
@@ -110,12 +121,17 @@ export function MailSidebar({
   return (
     <aside className="flex min-h-0 flex-col bg-sidebar px-2 py-3 lg:px-3" aria-label="Mailbox navigation">
       <div className="flex h-11 items-center gap-2.5 px-1.5 lg:px-2">
-        <span className="grid size-8 shrink-0 place-items-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-foreground">
-          {initials(account.email)}
-        </span>
+        <Avatar className="size-8 border-0 after:border-0">
+          {user.image ? <AvatarImage src={user.image} alt="" /> : null}
+          <AvatarFallback className="bg-sidebar-accent text-xs font-semibold text-sidebar-foreground">
+            {initials(user.name)}
+          </AvatarFallback>
+        </Avatar>
         <div className="hidden min-w-0 flex-1 lg:block">
-          <p className="truncate text-sm font-semibold text-sidebar-foreground">Invook</p>
-          <p className="truncate text-xs text-sidebar-foreground/45">{account.email}</p>
+          <p className="truncate text-sm font-semibold text-sidebar-foreground">
+            {user.name}
+          </p>
+          <p className="truncate text-xs text-sidebar-foreground/45">{user.email}</p>
         </div>
         <div className="hidden lg:block">
           <SignOutButton isIconOnly />
@@ -187,6 +203,45 @@ export function MailSidebar({
               href={`/mail?view=${item.view}`}
             />
           ))}
+        </nav>
+
+        <p className="mb-1.5 mt-5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">
+          Inboxes
+        </p>
+        <nav className="space-y-0.5" aria-label="Connected inboxes">
+          <div className="flex h-9 items-center gap-2.5 rounded-md bg-sidebar-accent px-2.5 text-sm font-medium text-sidebar-foreground">
+            <span className="grid size-[18px] shrink-0 place-items-center rounded bg-sidebar-foreground/8">
+              <HugeiconsIcon
+                icon={MailAccount01Icon}
+                size={14}
+                strokeWidth={1.65}
+              />
+            </span>
+            <span className="hidden min-w-0 flex-1 truncate lg:block">
+              {account.email}
+            </span>
+            <HugeiconsIcon
+              icon={Tick02Icon}
+              size={14}
+              strokeWidth={1.8}
+              className="hidden shrink-0 text-sidebar-foreground/65 lg:block"
+            />
+          </div>
+          <form action="/v1/connections/gmail/start" method="get">
+            <button
+              type="submit"
+              aria-label="Add Gmail account"
+              className={cn(navItemClassName(false), "font-normal")}
+            >
+              <HugeiconsIcon
+                icon={PlusSignIcon}
+                size={15}
+                strokeWidth={1.65}
+                className="shrink-0"
+              />
+              <span className="hidden truncate lg:block">Add account</span>
+            </button>
+          </form>
         </nav>
       </div>
 
