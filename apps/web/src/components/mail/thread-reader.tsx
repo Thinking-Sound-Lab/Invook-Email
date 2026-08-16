@@ -24,6 +24,7 @@ import { DraftComposer } from "./draft-composer";
 import { buildEmailHtmlDocument } from "./email-html-document";
 import { EmailHtmlFrame } from "./email-html-frame";
 import { SmartLabelControls } from "./smart-label-controls";
+import { ThreadReadTracker } from "./thread-read-tracker";
 import type { MailboxView, SelectedThread } from "./types";
 
 export interface ThreadReaderProps {
@@ -48,6 +49,9 @@ export function ThreadReader({
   ).length;
   const hasLabelAnalysisFailure =
     thread.hasLabelAnalysisFailure || failedMessageCount > 0;
+  const isUnread = thread.gmailLabels.some(
+    (label) => label.providerLabelId === "UNREAD",
+  );
 
   return (
     <section className="flex min-h-0 flex-col bg-background" aria-label="Open email thread">
@@ -67,6 +71,11 @@ export function ThreadReader({
           </Button>
         </div>
       </header>
+      <ThreadReadTracker
+        key={thread.id}
+        threadId={thread.id}
+        isUnread={isUnread}
+      />
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto w-full max-w-3xl px-6 py-8 sm:px-10 sm:py-10">

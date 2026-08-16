@@ -98,6 +98,38 @@ export async function getGmailMessageMutationContext(
   return message ?? null;
 }
 
+export async function getGmailThreadMutationContext(
+  input: { userId: string; threadId: string },
+  database: Database = getDatabase(),
+) {
+  const [thread] = await database
+    .select({
+      accountId: threads.accountId,
+      providerThreadId: threads.providerThreadId,
+    })
+    .from(threads)
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
+    .innerJoin(
+      messages,
+      and(
+        eq(messages.threadId, threads.id),
+        eq(messages.accountId, threads.accountId),
+        eq(messages.userId, input.userId),
+        inArray(messages.labelAnalysisState, ["complete", "failed"]),
+      ),
+    )
+    .where(
+      and(
+        eq(threads.id, input.threadId),
+        eq(threads.userId, input.userId),
+        eq(connectedAccounts.userId, input.userId),
+        eq(connectedAccounts.status, "connected"),
+      ),
+    )
+    .limit(1);
+  return thread ?? null;
+}
+
 export async function getGmailDraftResourceForUser(
   input: { userId: string; gmailDraftId: string },
   database: Database = getDatabase(),

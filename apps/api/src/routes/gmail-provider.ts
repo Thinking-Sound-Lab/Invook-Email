@@ -1,11 +1,13 @@
 import type { FastifyPluginAsync } from "fastify";
 
+import type { SetGmailThreadReadStateRequest } from "@invook/contracts";
 import {
   enqueueGmailHistoryCatchup,
   GmailDraftWriteConflictError,
   getAiReplyDraftForGmailSave,
   getGmailDraftResourceForUser,
   getGmailMessageMutationContext,
+  getGmailThreadMutationContext,
 } from "@invook/database";
 import {
   deleteGmailDraft,
@@ -19,6 +21,7 @@ import {
 import { mutationAccessHooks, requireUuidParameter } from "../access";
 import { sendJson, sendProblem } from "../responses";
 import type { GmailProviderAccess } from "../services/gmail-provider";
+import { setGmailThreadReadState } from "../services/gmail-thread-read-state";
 import { GmailDraftWritePendingError } from "../services/compose-drafts";
 import {
   GmailReplyComposeError,
@@ -30,6 +33,7 @@ import {
 } from "./gmail-provider-access";
 
 type GmailMessageParams = { messageId: string };
+type GmailThreadParams = { threadId: string };
 type GmailDraftParams = { gmailDraftId: string };
 type AiDraftParams = { draftId: string };
 
@@ -81,6 +85,19 @@ function parseGmailMessageAction(body: unknown): GmailMessageAction | null {
     return null;
   }
   return gmailMessageActions.find((action) => action === body.action) ?? null;
+}
+
+export function parseGmailThreadReadState(
+  body: unknown,
+): SetGmailThreadReadStateRequest | null {
+  if (
+    !isRecord(body) ||
+    Object.keys(body).some((key) => key !== "isRead") ||
+    typeof body.isRead !== "boolean"
+  ) {
+    return null;
+  }
+  return { isRead: body.isRead };
 }
 
 async function enqueueProviderCatchup(
@@ -139,6 +156,52 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         }
         const stepId = await enqueueProviderCatchup(session.userId, access);
         await sendJson(reply, 200, { stepId });
+      } catch (error) {
+        if (error instanceof GmailApiError) {
+          await sendGmailWriteProblem(error, request, reply);
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  api.put<{ Params: GmailThreadParams; Body: unknown }>(
+    "/v1/gmail/threads/:threadId/read-state",
+    {
+      onRequest: [
+        ...mutationAccessHooks,
+        requireUuidParameter("threadId", "Thread ID must be valid"),
+      ],
+    },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const readState = parseGmailThreadReadState(request.body);
+      if (!readState) {
+        await sendProblem(request, reply, 400, "Gmail thread read state is invalid");
+        return;
+      }
+      const [access, context] = await Promise.all([
+        getGmailProviderAccessForRequest(request, reply),
+        getGmailThreadMutationContext({
+          userId: session.userId,
+          threadId: request.params.threadId,
+        }),
+      ]);
+      if (!access) return;
+      try {
+        const result = await setGmailThreadReadState({
+          userId: session.userId,
+          access,
+          context,
+          isRead: readState.isRead,
+        });
+        if (result.status === "not_found") {
+          await sendProblem(request, reply, 404, "Gmail thread not found");
+          return;
+        }
+        await sendJson(reply, 200, { stepId: result.stepId });
       } catch (error) {
         if (error instanceof GmailApiError) {
           await sendGmailWriteProblem(error, request, reply);

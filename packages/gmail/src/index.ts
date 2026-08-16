@@ -13,6 +13,7 @@ export {
   listGmailHistory,
   listGmailMessages,
   modifyGmailMessageLabels,
+  modifyGmailThreadLabels,
   refreshGoogleAccessToken,
   sendGmailDraft,
   startGmailWatch,

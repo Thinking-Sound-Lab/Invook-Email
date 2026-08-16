@@ -505,6 +505,7 @@ test("account sync progress events require an authenticated session", async () =
 test("Gmail provider writes require an authenticated session", async () => {
   const requests = [
     { method: "POST", url: "/v1/gmail/messages/not-a-uuid/actions" },
+    { method: "PUT", url: "/v1/gmail/threads/not-a-uuid/read-state" },
     { method: "PUT", url: "/v1/gmail/drafts/not-a-uuid" },
     { method: "DELETE", url: "/v1/gmail/drafts/not-a-uuid" },
     { method: "POST", url: "/v1/gmail/compose-drafts" },

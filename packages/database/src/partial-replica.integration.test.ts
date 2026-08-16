@@ -13,6 +13,7 @@ import {
   getAiReplyDraftForGmailSave,
   getGmailMessageMutationContext,
   getGmailProviderWriteContext,
+  getGmailThreadMutationContext,
 } from "./replica";
 import {
   createMessageContentHash,
@@ -430,6 +431,36 @@ test(
           { userId, messageId: uuidv4() },
           database,
         ),
+        null,
+      );
+
+      const thread = await getGmailThreadMutationContext(
+        { userId, threadId },
+        database,
+      );
+      assert.equal(thread?.accountId, accountId);
+      assert.equal(thread?.providerThreadId, `provider-thread-${threadId}`);
+      assert.equal(
+        await getGmailThreadMutationContext(
+          { userId: otherUserId, threadId },
+          database,
+        ),
+        null,
+      );
+      assert.equal(
+        await getGmailThreadMutationContext(
+          { userId, threadId: uuidv4() },
+          database,
+        ),
+        null,
+      );
+
+      await database
+        .update(messages)
+        .set({ labelAnalysisState: "pending" })
+        .where(eq(messages.id, messageId));
+      assert.equal(
+        await getGmailThreadMutationContext({ userId, threadId }, database),
         null,
       );
     });
