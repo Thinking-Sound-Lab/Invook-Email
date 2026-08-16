@@ -2,10 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { cn } from "@/lib/utils";
+
 const MINIMUM_FRAME_HEIGHT = 160;
-const MAXIMUM_FRAME_HEIGHT = 2_400;
 
 export interface EmailHtmlFrameProps {
+  className?: string;
   document: string;
   frameId: string;
 }
@@ -27,7 +29,11 @@ function isEmailHeightMessage(value: unknown): value is EmailHeightMessage {
   );
 }
 
-export function EmailHtmlFrame({ document, frameId }: EmailHtmlFrameProps) {
+export function EmailHtmlFrame({
+  className,
+  document,
+  frameId,
+}: EmailHtmlFrameProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(MINIMUM_FRAME_HEIGHT);
 
@@ -41,26 +47,23 @@ export function EmailHtmlFrame({ document, frameId }: EmailHtmlFrameProps) {
         return;
       }
 
-      setHeight(
-        Math.min(
-          MAXIMUM_FRAME_HEIGHT,
-          Math.max(MINIMUM_FRAME_HEIGHT, Math.ceil(event.data.height)),
-        ),
-      );
+      setHeight(Math.max(MINIMUM_FRAME_HEIGHT, Math.ceil(event.data.height)));
     };
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
   }, [frameId]);
 
   return (
-    <iframe
-      ref={frameRef}
-      className="block w-full rounded-lg bg-white"
-      height={height}
-      referrerPolicy="no-referrer"
-      sandbox="allow-popups allow-popups-to-escape-sandbox allow-scripts"
-      srcDoc={document}
-      title="Original email content"
-    />
+    <div className={cn("w-full", className)}>
+      <iframe
+        ref={frameRef}
+        className="block w-full bg-white"
+        height={height}
+        referrerPolicy="no-referrer"
+        sandbox="allow-popups allow-popups-to-escape-sandbox allow-scripts"
+        srcDoc={document}
+        title="Original email content"
+      />
+    </div>
   );
 }

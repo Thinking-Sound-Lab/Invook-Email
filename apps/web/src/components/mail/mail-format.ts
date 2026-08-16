@@ -23,6 +23,40 @@ export function threadPeople(participants: string[], accountEmail: string): stri
   return `${people.slice(0, 2).join(", ")} +${people.length - 2}`;
 }
 
+function formatRecipient(value: string, accountEmail: string): string {
+  const email = extractEmail(value);
+  if (!email) return formatMailText(value);
+  if (email === accountEmail.toLowerCase()) return `me (${email})`;
+
+  const name = displayName(value);
+  const hasNamedAddress = value.includes("<") && value.includes(">");
+  return hasNamedAddress && name && name.toLowerCase() !== email
+    ? `${name} (${email})`
+    : email;
+}
+
+export function formatRecipientSummary(
+  recipients: string[],
+  accountEmail: string,
+): string {
+  const formattedRecipients = recipients
+    .map((recipient) => formatRecipient(recipient, accountEmail))
+    .filter(Boolean);
+  if (formattedRecipients.length === 0) return "Recipients unavailable";
+  if (formattedRecipients.length <= 2) return formattedRecipients.join(", ");
+  return `${formattedRecipients.slice(0, 2).join(", ")} +${formattedRecipients.length - 2}`;
+}
+
+export function formatRecipientDetails(
+  recipients: string[],
+  accountEmail: string,
+): string {
+  const formattedRecipients = recipients
+    .map((recipient) => formatRecipient(recipient, accountEmail))
+    .filter(Boolean);
+  return formattedRecipients.join(", ") || "Recipients unavailable";
+}
+
 export function initials(value: string): string {
   return value
     .split(/[\s@._-]+/)
@@ -129,14 +163,5 @@ export function formatMailDate(
     month: "short",
     day: "numeric",
     year: "numeric",
-  }).format(date);
-}
-
-export function formatMessageDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("en", {
-    dateStyle: "medium",
-    timeStyle: "short",
   }).format(date);
 }

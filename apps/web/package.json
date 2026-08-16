@@ -6,7 +6,7 @@
     "dev": "node ../../scripts/run-with-root-env.mjs node_modules/next/dist/bin/next dev",
     "build": "node ../../scripts/run-with-root-env.mjs node_modules/next/dist/bin/next build",
     "start": "node ../../scripts/run-with-root-env.mjs node_modules/next/dist/bin/next start",
-    "test": "node --import tsx --test src/components/mail/*.test.ts src/components/settings/*.test.ts",
+    "test": "node --import tsx --test src/components/mail/*.test.ts src/components/settings/*.test.ts src/components/ui/*.test.tsx src/hooks/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
   },

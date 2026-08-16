@@ -2,7 +2,13 @@
 
 import { useMailboxEvents } from "@/hooks/use-mailbox-events";
 
-export function MailboxEventSubscriber() {
-  useMailboxEvents();
+export interface MailboxEventSubscriberProps {
+  selectedThreadId?: string;
+}
+
+export function MailboxEventSubscriber({
+  selectedThreadId,
+}: MailboxEventSubscriberProps) {
+  useMailboxEvents({ selectedThreadId });
   return null;
 }

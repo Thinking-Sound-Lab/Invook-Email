@@ -366,5 +366,6 @@ export type MailboxChangeEvent = {
     | "repair_complete"
     | "drafts_changed"
     | "labels_changed";
+  changedThreadIds: string[];
   createdAt: string;
 };

@@ -127,6 +127,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         thread={selectedThread}
         currentView={currentView}
         mailboxCursor={mailboxCursor}
+        accountEmail={workspace.account.email}
         aiConfigured={workspace.aiConfigured}
         availableLabels={workspace.invookLabels}
       />
@@ -156,7 +157,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
 
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-background">
-      <MailboxEventSubscriber />
+      <MailboxEventSubscriber selectedThreadId={selectedThread?.id} />
       <div className="grid min-h-0 flex-1 grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
         <MailSidebar
           user={workspace.user}
