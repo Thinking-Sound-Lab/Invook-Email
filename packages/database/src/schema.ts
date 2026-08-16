@@ -36,16 +36,94 @@ const searchVector = customType<{ data: string }>({
   },
 });
 
-export const profiles = pgTable("profiles", {
-  id: uuid("id").primaryKey(),
-  displayName: text("display_name"),
-  memoryAcknowledgedAt: timestampWithTimezone("memory_acknowledged_at"),
-  createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
-  updatedAt: timestampWithTimezone("updated_at")
-    .notNull()
-    .defaultNow()
-    .$onUpdate(() => new Date()),
-});
+export const profiles = pgTable(
+  "profiles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    displayName: text("display_name").notNull(),
+    email: text("email").notNull(),
+    emailVerified: boolean("email_verified").notNull().default(false),
+    image: text("image"),
+    memoryAcknowledgedAt: timestampWithTimezone("memory_acknowledged_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [uniqueIndex("profiles_email_idx").on(table.email)],
+);
+
+export const authSessions = pgTable(
+  "auth_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    expiresAt: timestampWithTimezone("expires_at").notNull(),
+    token: text("token").notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+  },
+  (table) => [
+    uniqueIndex("auth_sessions_token_idx").on(table.token),
+    index("auth_sessions_user_idx").on(table.userId),
+    index("auth_sessions_expiration_idx").on(table.expiresAt),
+  ],
+);
+
+export const authAccounts = pgTable(
+  "auth_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: text("account_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    idToken: text("id_token"),
+    accessTokenExpiresAt: timestampWithTimezone("access_token_expires_at"),
+    refreshTokenExpiresAt: timestampWithTimezone("refresh_token_expires_at"),
+    scope: text("scope"),
+    password: text("password"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("auth_accounts_provider_identity_idx").on(
+      table.providerId,
+      table.accountId,
+    ),
+    index("auth_accounts_user_idx").on(table.userId),
+  ],
+);
+
+export const authVerifications = pgTable(
+  "auth_verifications",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    identifier: text("identifier").notNull(),
+    value: text("value").notNull(),
+    expiresAt: timestampWithTimezone("expires_at").notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [index("auth_verifications_identifier_idx").on(table.identifier)],
+);
 
 export const connectedAccounts = pgTable(
   "connected_accounts",
@@ -57,6 +135,7 @@ export const connectedAccounts = pgTable(
     provider: text("provider").$type<"gmail">().notNull().default("gmail"),
     providerAccountId: text("provider_account_id").notNull(),
     email: text("email").notNull(),
+    image: text("image"),
     status: text("status")
       .$type<"connected" | "reconnect_required" | "disconnected">()
       .notNull()
@@ -85,6 +164,29 @@ export const connectedAccounts = pgTable(
       "connected_accounts_status_check",
       sql`${table.status} in ('connected', 'reconnect_required', 'disconnected')`,
     ),
+  ],
+);
+
+export const gmailConnectionRequests = pgTable(
+  "gmail_connection_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    stateHash: text("state_hash").notNull(),
+    codeVerifier: text("code_verifier").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id").references(() => connectedAccounts.id, {
+      onDelete: "cascade",
+    }),
+    expiresAt: timestampWithTimezone("expires_at").notNull(),
+    consumedAt: timestampWithTimezone("consumed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("gmail_connection_requests_state_idx").on(table.stateHash),
+    index("gmail_connection_requests_expiration_idx").on(table.expiresAt),
+    index("gmail_connection_requests_user_idx").on(table.userId),
   ],
 );
 

@@ -30,7 +30,11 @@ import {
 } from "@/lib/api/compose-drafts";
 import { apiErrorMessage } from "@/lib/http-error";
 
-export function ComposeSurface() {
+interface ComposeSurfaceProps {
+  gmailAccountId: string;
+}
+
+export function ComposeSurface({ gmailAccountId }: ComposeSurfaceProps) {
   const [state, dispatch] = useReducer(
     composeDraftReducer,
     undefined,
@@ -195,7 +199,11 @@ export function ComposeSurface() {
             {isReconnectRequired ? (
               <div className="mt-2">
                 <Button asChild variant="outline" size="sm">
-                  <a href="/v1/auth/google/start">Reconnect Gmail</a>
+                  <a
+                    href={`/v1/connections/gmail/start?accountId=${encodeURIComponent(gmailAccountId)}`}
+                  >
+                    Reconnect Gmail
+                  </a>
                 </Button>
               </div>
             ) : null}

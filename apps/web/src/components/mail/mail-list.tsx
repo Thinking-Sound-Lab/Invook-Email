@@ -331,7 +331,7 @@ export function MailList({
       </header>
 
       <ScrollArea
-        type="always"
+        hideScrollbar
         className="min-h-0 flex-1"
         aria-busy={loadState === "loading"}
       >

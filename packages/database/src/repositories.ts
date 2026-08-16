@@ -55,6 +55,7 @@ import {
   connectedAccounts,
   drafts,
   embeddingBatchSubmissions,
+  gmailConnectionRequests,
   gmailReplicaStates,
   gmailWatchStates,
   labels,
@@ -66,7 +67,6 @@ import {
   messageAttachments,
   messageEmbeddings,
   messages,
-  profiles,
   messageLabels,
   messageLabelDecisions,
   threads,
@@ -310,11 +310,95 @@ export async function getGmailConnectionForOAuth(
   return connection ?? null;
 }
 
+export async function getGmailConnectionForUser(
+  input: { userId: string; accountId: string },
+  database: Database = getDatabase(),
+) {
+  const [connection] = await database
+    .select({
+      id: connectedAccounts.id,
+      userId: connectedAccounts.userId,
+      providerAccountId: connectedAccounts.providerAccountId,
+      status: connectedAccounts.status,
+    })
+    .from(connectedAccounts)
+    .where(
+      and(
+        eq(connectedAccounts.id, input.accountId),
+        eq(connectedAccounts.userId, input.userId),
+        eq(connectedAccounts.provider, "gmail"),
+      ),
+    )
+    .limit(1);
+
+  return connection ?? null;
+}
+
+function hashGmailConnectionState(state: string): string {
+  return createHash("sha256").update(state).digest("hex");
+}
+
+export async function createGmailConnectionRequest(
+  input: {
+    state: string;
+    codeVerifier: string;
+    userId: string;
+    accountId: string | null;
+    expiresAt: Date;
+  },
+  database: Database = getDatabase(),
+): Promise<void> {
+  await database.transaction(async (transaction) => {
+    await transaction
+      .delete(gmailConnectionRequests)
+      .where(lte(gmailConnectionRequests.expiresAt, new Date()));
+    await transaction.insert(gmailConnectionRequests).values({
+      stateHash: hashGmailConnectionState(input.state),
+      codeVerifier: input.codeVerifier,
+      userId: input.userId,
+      accountId: input.accountId,
+      expiresAt: input.expiresAt,
+    });
+  });
+}
+
+export async function consumeGmailConnectionRequest(
+  input: { state: string; consumedAt: Date },
+  database: Database = getDatabase(),
+): Promise<{
+  userId: string;
+  accountId: string | null;
+  codeVerifier: string;
+} | null> {
+  return database.transaction(async (transaction) => {
+    const [request] = await transaction
+      .update(gmailConnectionRequests)
+      .set({ consumedAt: input.consumedAt })
+      .where(
+        and(
+          eq(
+            gmailConnectionRequests.stateHash,
+            hashGmailConnectionState(input.state),
+          ),
+          isNull(gmailConnectionRequests.consumedAt),
+          gt(gmailConnectionRequests.expiresAt, input.consumedAt),
+        ),
+      )
+      .returning({
+        userId: gmailConnectionRequests.userId,
+        accountId: gmailConnectionRequests.accountId,
+        codeVerifier: gmailConnectionRequests.codeVerifier,
+      });
+
+    return request ?? null;
+  });
+}
+
 type GmailAuthenticationInput = {
   userId: string;
-  displayName: string | null;
   providerAccountId: string;
   email: string;
+  image: string | null;
   scopes: string[];
   currentHistoryId: string;
   tokenCiphertext: string;
@@ -327,6 +411,7 @@ type NewGmailConnectionInput = GmailAuthenticationInput & {
     topicName: string;
     historyId: string;
     expirationAt: Date;
+    renewedAt: Date;
   };
 };
 
@@ -391,27 +476,6 @@ async function findGmailAuthenticationAccount(
   return account ?? null;
 }
 
-async function saveNewGmailProfile(
-  transaction: DatabaseTransaction,
-  input: GmailAuthenticationInput,
-) {
-  await transaction
-    .insert(profiles)
-    .values({
-      id: input.userId,
-      displayName: input.displayName,
-      memoryAcknowledgedAt: input.authenticatedAt,
-    })
-    .onConflictDoUpdate({
-      target: profiles.id,
-      set: {
-        displayName: input.displayName,
-        memoryAcknowledgedAt: input.authenticatedAt,
-        updatedAt: new Date(),
-      },
-    });
-}
-
 async function saveGmailCredential(
   transaction: DatabaseTransaction,
   input: GmailAuthenticationInput,
@@ -436,25 +500,72 @@ async function saveGmailCredential(
     });
 }
 
-async function saveGmailProfileAndCredential(
+async function saveGmailAccountAndCredential(
   transaction: DatabaseTransaction,
   input: GmailAuthenticationInput,
   accountId: string,
 ) {
   await transaction
-    .update(profiles)
-    .set({ displayName: input.displayName, updatedAt: new Date() })
-    .where(eq(profiles.id, input.userId));
-  await transaction
     .update(connectedAccounts)
     .set({
       email: input.email,
+      image: input.image,
       status: "connected",
       scopes: input.scopes,
       updatedAt: new Date(),
     })
     .where(eq(connectedAccounts.id, accountId));
   await saveGmailCredential(transaction, input, accountId);
+}
+
+async function saveStartedGmailWatch(
+  transaction: DatabaseTransaction,
+  input: {
+    userId: string;
+    accountId: string;
+    watch: NewGmailConnectionInput["watch"];
+  },
+): Promise<void> {
+  const [savedWatch] = await transaction
+    .insert(gmailWatchStates)
+    .values({
+      accountId: input.accountId,
+      topicName: input.watch.topicName,
+      historyId: input.watch.historyId,
+      expirationAt: input.watch.expirationAt,
+      lastRenewedAt: input.watch.renewedAt,
+    })
+    .onConflictDoUpdate({
+      target: gmailWatchStates.accountId,
+      set: {
+        topicName: input.watch.topicName,
+        historyId: input.watch.historyId,
+        expirationAt: input.watch.expirationAt,
+        status: "active",
+        lastRenewedAt: input.watch.renewedAt,
+        lastError: null,
+        updatedAt: input.watch.renewedAt,
+      },
+      setWhere: or(
+        lt(gmailWatchStates.expirationAt, input.watch.expirationAt),
+        and(
+          eq(gmailWatchStates.expirationAt, input.watch.expirationAt),
+          lte(gmailWatchStates.lastRenewedAt, input.watch.renewedAt),
+        ),
+      ),
+    })
+    .returning({ accountId: gmailWatchStates.accountId });
+  if (!savedWatch) return;
+
+  await enqueueDailyGmailWatchRenewal(
+    {
+      userId: input.userId,
+      accountId: input.accountId,
+      renewedAt: input.watch.renewedAt,
+      expectedExpirationAt: input.watch.expirationAt,
+    },
+    transaction as unknown as Database,
+  );
 }
 
 async function saveReturningGmailAuthentication(
@@ -465,7 +576,7 @@ async function saveReturningGmailAuthentication(
   if (account.userId !== input.userId) {
     throw new Error("This Gmail account is already linked to another Invook user.");
   }
-  await saveGmailProfileAndCredential(transaction, input, account.id);
+  await saveGmailAccountAndCredential(transaction, input, account.id);
   const authenticationAction = getReturningGmailAuthenticationAction({
     status: account.status,
     replicaState: account.replicaState,
@@ -541,10 +652,13 @@ export async function saveNewGmailConnection(
         input,
         existingAccount,
       );
+      await saveStartedGmailWatch(transaction, {
+        userId: input.userId,
+        accountId: account.id,
+        watch: input.watch,
+      });
       return { ...account, created: false };
     }
-
-    await saveNewGmailProfile(transaction, input);
 
     const [account] = await transaction
       .insert(connectedAccounts)
@@ -553,6 +667,7 @@ export async function saveNewGmailConnection(
         provider: "gmail",
         providerAccountId: input.providerAccountId,
         email: input.email,
+        image: input.image,
         status: "connected",
         scopes: input.scopes,
         memoryAcknowledgedAt: input.authenticatedAt,
@@ -575,13 +690,6 @@ export async function saveNewGmailConnection(
         historyCursor: null,
         state: "pending",
       });
-    await transaction
-      .insert(gmailWatchStates)
-      .values({
-        accountId: account.id,
-        ...input.watch,
-        lastRenewedAt: input.authenticatedAt,
-      });
     await saveGmailCredential(transaction, input, account.id);
 
     await createInitialMailSyncRun(
@@ -592,15 +700,11 @@ export async function saveNewGmailConnection(
       },
       transaction as unknown as Database,
     );
-    await enqueueDailyGmailWatchRenewal(
-      {
-        userId: input.userId,
-        accountId: account.id,
-        renewedAt: input.authenticatedAt,
-        expectedExpirationAt: input.watch.expirationAt,
-      },
-      transaction as unknown as Database,
-    );
+    await saveStartedGmailWatch(transaction, {
+      userId: input.userId,
+      accountId: account.id,
+      watch: input.watch,
+    });
 
     return { ...account, created: true };
   });
@@ -1082,6 +1186,7 @@ export async function getMailboxWorkspace(
     .select({
       id: connectedAccounts.id,
       email: connectedAccounts.email,
+      image: connectedAccounts.image,
       status: connectedAccounts.status,
       syncState: connectedAccounts.syncState,
       lastSyncedAt: connectedAccounts.lastSyncedAt,

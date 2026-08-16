@@ -53,8 +53,8 @@ async function refreshCredentialIfRequired(
     !Number.isFinite(expiration) || expiration <= Date.now() + 60_000;
   if (!expiresSoon) return credential;
 
-  const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+  const clientId = process.env.GMAIL_GOOGLE_CLIENT_ID?.trim();
+  const clientSecret = process.env.GMAIL_GOOGLE_CLIENT_SECRET?.trim();
   const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY?.trim();
   if (!clientId || !clientSecret || !encryptionKey) {
     throw new GmailProviderConfigurationError(

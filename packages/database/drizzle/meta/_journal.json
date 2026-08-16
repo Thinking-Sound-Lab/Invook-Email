@@ -169,6 +169,13 @@
       "when": 1786810258382,
       "tag": "0023_married_rick_jones",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1786864892154,
+      "tag": "0024_yielding_talisman",
+      "breakpoints": true
     }
   ]
 }

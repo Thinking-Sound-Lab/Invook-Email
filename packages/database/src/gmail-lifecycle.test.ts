@@ -41,7 +41,11 @@ test(
     const providerMessageId = `provider-${messageId}`;
     const invalidSentAt = new Date("2612-01-12T15:12:10.000Z");
     try {
-      await database.insert(profiles).values({ id: userId });
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
       await database.insert(connectedAccounts).values({
         id: accountId,
         userId,
@@ -130,7 +134,11 @@ test(
     const stalledStepId = uuidv4();
     const remainingStepId = uuidv4();
     try {
-      await database.insert(profiles).values({ id: userId });
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
       await database.insert(connectedAccounts).values({
         id: accountId,
         userId,
@@ -256,7 +264,11 @@ test(
     const renewalStepId = uuidv4();
     const workflowStepIds = [catchupStepId, renewalStepId];
     try {
-      await database.insert(profiles).values({ id: userId });
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
       await database.insert(connectedAccounts).values({
         id: accountId,
         userId,

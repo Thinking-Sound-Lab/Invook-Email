@@ -4,13 +4,14 @@ import {
   FileEditIcon,
   InboxIcon,
   LabelImportantIcon,
-  Logout01Icon,
   Mail01Icon,
   PencilEdit01Icon,
+  PlusSignIcon,
   Search02Icon,
   SentIcon,
   SpamIcon,
   StarIcon,
+  Tick02Icon,
   WorkflowSquare01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -19,11 +20,17 @@ import type {
   MailboxAccount,
   MailboxSidebarCounts,
   MemoryEntry,
+  SignedInUser,
 } from "@invook/contracts";
 import Link from "next/link";
 
-import { Button } from "@/components/ui/button";
+import { SignOutButton } from "@/components/auth/sign-out-button";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@/components/ui/avatar";
 import { cn } from "@/lib/utils";
 
 import { initials } from "./mail-format";
@@ -94,6 +101,7 @@ function NavLink({
 }
 
 export interface MailSidebarProps {
+  user: SignedInUser;
   account: MailboxAccount;
   currentView: MailboxView;
   currentSurface: MailSurface;
@@ -104,6 +112,7 @@ export interface MailSidebarProps {
 }
 
 export function MailSidebar({
+  user,
   account,
   currentView,
   currentSurface,
@@ -113,28 +122,30 @@ export function MailSidebar({
   aiConfigured,
 }: MailSidebarProps) {
   const labels = listSidebarLabels(invookLabels);
+  const connectedAccountImage =
+    account.image ??
+    (account.email.toLowerCase() === user.email.toLowerCase()
+      ? user.image
+      : null);
 
   return (
     <aside className="flex min-h-0 flex-col bg-sidebar px-2 py-3 lg:px-3" aria-label="Mailbox navigation">
       <div className="flex h-11 items-center gap-2.5 px-1.5 lg:px-2">
-        <span className="grid size-8 shrink-0 place-items-center rounded-full bg-sidebar-accent text-xs font-semibold text-sidebar-foreground">
-          {initials(account.email)}
-        </span>
+        <Avatar className="size-8 border-0 after:border-0">
+          {user.image ? <AvatarImage src={user.image} alt="" /> : null}
+          <AvatarFallback className="bg-sidebar-accent text-xs font-semibold text-sidebar-foreground">
+            {initials(user.name)}
+          </AvatarFallback>
+        </Avatar>
         <div className="hidden min-w-0 flex-1 lg:block">
-          <p className="truncate text-sm font-semibold text-sidebar-foreground">Invook</p>
-          <p className="truncate text-xs text-sidebar-foreground/45">{account.email}</p>
+          <p className="truncate text-sm font-semibold text-sidebar-foreground">
+            {user.name}
+          </p>
+          <p className="truncate text-xs text-sidebar-foreground/45">{user.email}</p>
         </div>
-        <form action="/v1/auth/sign-out" method="post" className="hidden lg:block">
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            type="submit"
-            aria-label="Sign out"
-            className="text-sidebar-foreground/45 hover:bg-sidebar-accent hover:text-sidebar-foreground"
-          >
-            <HugeiconsIcon icon={Logout01Icon} size={14} />
-          </Button>
-        </form>
+        <div className="hidden lg:block">
+          <SignOutButton isIconOnly />
+        </div>
       </div>
 
       <nav className="mt-3 space-y-0.5" aria-label="Workspace">
@@ -162,7 +173,7 @@ export function MailSidebar({
         />
       </nav>
 
-      <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
+      <div className="scrollbar-hidden mt-5 min-h-0 flex-1 overflow-y-auto">
         <p className="mb-1.5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">
           Labels
         </p>
@@ -210,6 +221,49 @@ export function MailSidebar({
               count={sidebarCounts.views[item.view]}
             />
           ))}
+        </nav>
+
+        <p className="mb-1.5 mt-5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">
+          Inboxes
+        </p>
+        <nav className="space-y-0.5" aria-label="Connected inboxes">
+          <div className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent/70">
+            <Avatar size="sm" className="size-5 border-0 after:border-0">
+              {connectedAccountImage ? (
+                <AvatarImage src={connectedAccountImage} alt="" />
+              ) : null}
+              <AvatarFallback className="bg-sidebar-accent text-[9px] font-semibold text-sidebar-foreground">
+                {initials(account.email)}
+              </AvatarFallback>
+            </Avatar>
+            <span className="hidden min-w-0 flex-1 truncate lg:block">
+              {account.email}
+            </span>
+            <HugeiconsIcon
+              icon={Tick02Icon}
+              size={14}
+              strokeWidth={1.8}
+              className="hidden shrink-0 text-sidebar-foreground/65 lg:block"
+            />
+          </div>
+          <form action="/v1/connections/gmail/start" method="get">
+            <button
+              type="submit"
+              aria-label="Add Gmail account"
+              className={cn(
+                navItemClassName(false),
+                "h-8 gap-2 px-2 text-[13px] font-normal",
+              )}
+            >
+              <HugeiconsIcon
+                icon={PlusSignIcon}
+                size={15}
+                strokeWidth={1.65}
+                className="shrink-0"
+              />
+              <span className="hidden truncate lg:block">Add account</span>
+            </button>
+          </form>
         </nav>
       </div>
     </aside>

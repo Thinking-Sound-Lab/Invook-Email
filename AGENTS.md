@@ -45,6 +45,7 @@ apps/
   worker/              Durable Gmail, indexing, labeling, Memory, and feedback work
 packages/
   ai/                  Model, embedding, Memory, label, draft, and mail-agent logic
+  auth/                Better Auth Google identity and database-backed sessions
   contracts/           Shared browser/server product and wire contracts
   database/            Schema, migrations, repositories, replica operations, and workflows
   gmail/               Google OAuth/OIDC, Gmail API, history mapping, and MIME parsing

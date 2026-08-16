@@ -6,6 +6,7 @@ import type {
   MailboxWorkspace,
   MemoryEntry,
   AiReplyDraft,
+  SignedInUser,
 } from "@invook/contracts";
 import {
   getIndexingProgressForAccount,
@@ -16,6 +17,7 @@ import {
 
 export async function serializeWorkspace(
   workspace: NonNullable<Awaited<ReturnType<typeof getMailboxWorkspace>>>,
+  user: SignedInUser,
 ): Promise<MailboxWorkspace> {
   const [mailSyncProgress, indexingProgress] = await Promise.all([
     getMailSyncProgressForAccount({ accountId: workspace.account.id }),
@@ -31,9 +33,11 @@ export async function serializeWorkspace(
   return {
     aiConfigured: isAiConfigured(),
     batchConfigured: isMemoryBatchConfigured(),
+    user,
     account: {
       id: workspace.account.id,
       email: workspace.account.email,
+      image: workspace.account.image,
       status: workspace.account.status,
       syncState: {
         ...workspace.account.syncState,

@@ -181,6 +181,7 @@ export type SessionState =
 export type MailboxAccount = {
   id: string;
   email: string;
+  image: string | null;
   status: "connected" | "reconnect_required" | "disconnected";
   syncState: AccountSyncState;
   mailSyncProgress: MailSyncProgress;
@@ -197,6 +198,12 @@ export type MailboxAccount = {
       | "deleting";
     readyAt: string | null;
   };
+};
+
+export type SignedInUser = {
+  email: string;
+  image: string | null;
+  name: string;
 };
 
 export type GmailLabel = {
@@ -333,6 +340,7 @@ export type MailboxSidebarCounts = {
 export type MailboxWorkspace = {
   aiConfigured: boolean;
   batchConfigured: boolean;
+  user: SignedInUser;
   account: MailboxAccount;
   memories: MemoryEntry[];
   invookLabels: InvookLabel[];

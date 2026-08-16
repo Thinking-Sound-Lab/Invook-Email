@@ -9,10 +9,13 @@ type AuthenticationErrorPageProps = {
 };
 
 const messages: Record<string, string> = {
-  authorization: "Google sign-in could not be verified.",
+  already_connected: "That Gmail mailbox is already connected to another Invook user.",
+  authorization: "The Gmail connection request could not be verified.",
   configuration:
     "Google OAuth and Gmail synchronization are not fully configured for this installation.",
-  gmail_access: "Google sign-in succeeded, but Gmail access was rejected.",
+  gmail_access: "Google authorization succeeded, but Gmail access was rejected.",
+  identity: "Invook could not verify your Google identity.",
+  mailbox_mismatch: "Reconnect with the same Gmail mailbox that was previously connected.",
   offline_access: "Google did not grant the background access Invook needs.",
   unknown: "Invook could not finish connecting Gmail.",
 };

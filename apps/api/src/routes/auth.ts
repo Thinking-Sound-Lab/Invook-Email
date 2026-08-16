@@ -1,208 +1,77 @@
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+import type {
+  FastifyPluginAsync,
+  FastifyReply,
+  FastifyRequest,
+} from "fastify";
 
-import {
-  decryptGoogleCredential,
-  encryptGoogleCredential,
-  getGmailConnectionForOAuth,
-  refreshGmailAuthentication,
-  saveNewGmailConnection,
-} from "@invook/database";
-import {
-  createGoogleAuthorizationRequest,
-  exchangeGoogleAuthorizationCode,
-  getGmailProfile,
-  GmailApiError,
-  startGmailWatch,
-} from "@invook/gmail";
+import { createWebHeaders } from "../auth/auth-service";
+import { getPublicAppOrigin } from "../config";
+import { sendProblem } from "../responses";
 
-import {
-  clearOAuthRequestCookies,
-  createOAuthRequestCookies,
-  createOAuthState,
-  getInvookUserId,
-  isMatchingOAuthState,
-  readOAuthRequest,
-} from "../auth/oauth-state";
-import { clearSessionCookie, createSessionCookie } from "../auth/session";
-import {
-  getMissingGmailConnectionConfiguration,
-  getPublicAppOrigin,
-} from "../config";
-import { sendRedirect } from "../responses";
-
-type ConnectionErrorReason =
-  | "authorization"
-  | "configuration"
-  | "gmail_access"
-  | "offline_access"
-  | "unknown";
-
-type CallbackQuery = {
-  error?: unknown;
-  code?: unknown;
-  state?: unknown;
-};
-
-function connectionErrorUrl(reason: ConnectionErrorReason): string {
-  const target = new URL("/auth/error", getPublicAppOrigin());
-  target.searchParams.set("reason", reason);
-  return target.toString();
+function requestBody(request: FastifyRequest): string | undefined {
+  if (request.method === "GET" || request.method === "HEAD") return undefined;
+  if (request.body === null || request.body === undefined) return undefined;
+  if (typeof request.body === "string") return request.body;
+  return JSON.stringify(request.body);
 }
 
-async function handleGoogleStart(reply: FastifyReply) {
-  if (getMissingGmailConnectionConfiguration().length > 0) {
-    await sendRedirect(reply, connectionErrorUrl("configuration"), 302);
-    return;
-  }
-
-  const state = createOAuthState();
-  const authorization = await createGoogleAuthorizationRequest({
-    clientId: process.env.GOOGLE_CLIENT_ID ?? "",
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
-    redirectUri: `${getPublicAppOrigin()}/auth/callback`,
-    state,
+function createAuthRequest(request: FastifyRequest): Request {
+  return new Request(new URL(request.raw.url ?? request.url, getPublicAppOrigin()), {
+    method: request.method,
+    headers: createWebHeaders(request.headers),
+    body: requestBody(request),
   });
-  createOAuthRequestCookies(reply, state, authorization.codeVerifier);
-  await sendRedirect(reply, authorization.url, 302);
 }
 
-async function handleGoogleCallback(
-  request: FastifyRequest<{ Querystring: CallbackQuery }>,
-  reply: FastifyReply,
-) {
-  const providerError =
-    typeof request.query.error === "string" ? request.query.error : null;
-  const code = typeof request.query.code === "string" ? request.query.code : null;
-  const returnedState =
-    typeof request.query.state === "string" ? request.query.state : null;
-  const oauthRequest = readOAuthRequest(request);
+function hasDisallowedGoogleAuthInput(request: FastifyRequest): boolean {
+  const pathname = new URL(request.raw.url ?? request.url, getPublicAppOrigin())
+    .pathname;
+  if (request.method !== "POST" || pathname !== "/v1/auth/sign-in/social") {
+    return false;
+  }
+  if (typeof request.body !== "object" || request.body === null) return false;
+  return (
+    !("provider" in request.body) ||
+    request.body.provider !== "google" ||
+    "scopes" in request.body ||
+    "idToken" in request.body
+  );
+}
 
-  if (
-    providerError ||
-    !code ||
-    !oauthRequest.codeVerifier ||
-    !isMatchingOAuthState(oauthRequest.state, returnedState)
-  ) {
-    clearOAuthRequestCookies(reply);
-    await sendRedirect(reply, connectionErrorUrl("authorization"), 302);
+async function sendAuthResponse(
+  response: Response,
+  reply: FastifyReply,
+): Promise<void> {
+  const setCookies = response.headers.getSetCookie();
+  response.headers.forEach((value, name) => {
+    if (name !== "set-cookie" && name !== "content-length") {
+      reply.header(name, value);
+    }
+  });
+  if (setCookies.length > 0) reply.header("set-cookie", setCookies);
+
+  reply.status(response.status);
+  if (!response.body) {
+    await reply.send();
     return;
   }
-
-  try {
-    const authorization = await exchangeGoogleAuthorizationCode({
-      clientId: process.env.GOOGLE_CLIENT_ID ?? "",
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET ?? "",
-      redirectUri: `${getPublicAppOrigin()}/auth/callback`,
-      code,
-      codeVerifier: oauthRequest.codeVerifier,
-    });
-    const gmailProfile = await getGmailProfile(authorization.accessToken);
-    const providerAccountId = authorization.identity.subject;
-    const userId = getInvookUserId(providerAccountId);
-    const existingAccount = await getGmailConnectionForOAuth(providerAccountId);
-    if (existingAccount && existingAccount.userId !== userId) {
-      throw new Error("This Gmail account is already linked to another Invook user.");
-    }
-
-    let refreshToken = authorization.refreshToken;
-    if (!refreshToken && existingAccount?.tokenCiphertext) {
-      refreshToken = decryptGoogleCredential(
-        existingAccount.tokenCiphertext,
-        process.env.TOKEN_ENCRYPTION_KEY ?? "",
-      ).refreshToken;
-    }
-    if (!refreshToken) {
-      clearOAuthRequestCookies(reply);
-      await sendRedirect(reply, connectionErrorUrl("offline_access"), 302);
-      return;
-    }
-
-    const authenticatedAt = new Date();
-    const tokenCiphertext = encryptGoogleCredential(
-      {
-        accessToken: authorization.accessToken,
-        refreshToken,
-        expiresAt: authorization.expiresAt,
-        scopes: authorization.scopes,
-      },
-      process.env.TOKEN_ENCRYPTION_KEY ?? "",
-    );
-    const authentication = {
-      userId,
-      displayName: authorization.identity.displayName,
-      providerAccountId,
-      email: gmailProfile.emailAddress,
-      scopes: authorization.scopes,
-      currentHistoryId: gmailProfile.historyId,
-      tokenCiphertext,
-      authenticatedAt,
-    };
-    let account = existingAccount
-      ? await refreshGmailAuthentication(authentication)
-      : null;
-    if (!account) {
-      const topicName = process.env.GMAIL_PUBSUB_TOPIC;
-      if (!topicName) {
-        throw new Error("GMAIL_PUBSUB_TOPIC is required to connect Gmail.");
-      }
-      const watch = await startGmailWatch(authorization.accessToken, {
-        topicName,
-      });
-      const watchExpiration = Number(watch.expiration);
-      if (!Number.isFinite(watchExpiration)) {
-        throw new Error("Gmail returned an invalid watch expiration.");
-      }
-      account = await saveNewGmailConnection({
-        ...authentication,
-        initialHistoryId: gmailProfile.historyId,
-        watch: {
-          topicName,
-          historyId: watch.historyId,
-          expirationAt: new Date(watchExpiration),
-        },
-      });
-    }
-
-    clearOAuthRequestCookies(reply);
-    createSessionCookie(reply, { userId, googleSubject: providerAccountId });
-    await sendRedirect(
-      reply,
-      new URL("/mail", getPublicAppOrigin()).toString(),
-      302,
-    );
-  } catch (error) {
-    console.error("api: gmail oauth callback failed", {
-      requestId: request.id,
-      name: error instanceof Error ? error.name : "UnknownError",
-      status: error instanceof GmailApiError ? error.status : undefined,
-    });
-    clearOAuthRequestCookies(reply);
-    await sendRedirect(
-      reply,
-      connectionErrorUrl(
-        error instanceof GmailApiError && error.status === 403
-          ? "gmail_access"
-          : "unknown",
-      ),
-      302,
-    );
-  }
+  await reply.send(Buffer.from(await response.arrayBuffer()));
 }
 
 export const registerAuthRoutes: FastifyPluginAsync = async (api) => {
-  api.get("/v1/auth/google/start", async (_request, reply) => {
-    await handleGoogleStart(reply);
-  });
-
-  api.get<{ Querystring: CallbackQuery }>(
-    "/v1/auth/google/callback",
-    async (request, reply) => {
-      await handleGoogleCallback(request, reply);
-    },
-  );
-
-  api.post("/v1/auth/sign-out", async (_request, reply) => {
-    clearSessionCookie(reply);
-    await sendRedirect(reply, new URL("/", getPublicAppOrigin()).toString(), 303);
+  api.all("/v1/auth/*", async (request, reply) => {
+    if (hasDisallowedGoogleAuthInput(request)) {
+      await sendProblem(
+        request,
+        reply,
+        400,
+        "Google authentication accepts identity scopes only",
+      );
+      return;
+    }
+    const response = await request.server.invookAuth.handle(
+      createAuthRequest(request),
+    );
+    await sendAuthResponse(response, reply);
   });
 };

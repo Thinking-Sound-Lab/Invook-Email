@@ -2,6 +2,10 @@ import fastifyCookie from "@fastify/cookie";
 import Fastify, { type FastifyRequest } from "fastify";
 import { v4 as uuidv4 } from "uuid";
 
+import {
+  createAuthService,
+  type AuthService,
+} from "./auth/auth-service";
 import { registerAuthRoutes } from "./routes/auth";
 import { registerAgentRoutes } from "./routes/agent";
 import {
@@ -12,6 +16,7 @@ import { registerBatchWebhookRoutes } from "./routes/batch-webhook";
 import { registerComposeDraftRoutes } from "./routes/compose-drafts";
 import { registerDraftRoutes } from "./routes/drafts";
 import { registerGmailProviderRoutes } from "./routes/gmail-provider";
+import { registerGmailConnectionRoutes } from "./routes/gmail-connections";
 import { registerHealthRoutes } from "./routes/health";
 import { registerAccountSyncEventRoutes } from "./routes/account-sync-events";
 import { registerLabelRoutes } from "./routes/labels";
@@ -36,6 +41,7 @@ function isInvalidBodyError(error: unknown): boolean {
 
 export async function buildApi(options: {
   attachmentRoutes?: AttachmentRouteDependencies;
+  auth?: AuthService;
 } = {}) {
   const api = Fastify({
     bodyLimit: MAXIMUM_REQUEST_BODY_BYTES,
@@ -50,6 +56,7 @@ export async function buildApi(options: {
   });
 
   api.decorateRequest("invookSession", null);
+  api.decorate("invookAuth", options.auth ?? createAuthService());
   await api.register(fastifyCookie);
 
   api.addHook("onRequest", async (request, reply) => {
@@ -77,6 +84,7 @@ export async function buildApi(options: {
   await api.register(registerHealthRoutes);
   await api.register(registerAuthRoutes);
   await api.register(registerSessionRoutes);
+  await api.register(registerGmailConnectionRoutes);
   await api.register(registerAttachmentRoutes(options.attachmentRoutes));
   await api.register(registerAgentRoutes);
   await api.register(registerAccountSyncEventRoutes);

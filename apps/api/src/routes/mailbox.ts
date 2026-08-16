@@ -67,7 +67,11 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
         return;
       }
 
-      await sendJson(reply, 200, await serializeWorkspace(workspace));
+      await sendJson(
+        reply,
+        200,
+        await serializeWorkspace(workspace, session.user),
+      );
     },
   );
 

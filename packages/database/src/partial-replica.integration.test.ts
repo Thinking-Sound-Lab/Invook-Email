@@ -73,7 +73,18 @@ async function withPartialReplicaFixture(
   try {
     await database
       .insert(profiles)
-      .values([{ id: userId }, { id: otherUserId }]);
+      .values([
+        {
+          id: userId,
+          displayName: "Database Test User",
+          email: `${userId}@example.test`,
+        },
+        {
+          id: otherUserId,
+          displayName: "Other Database Test User",
+          email: `${otherUserId}@example.test`,
+        },
+      ]);
     await database.insert(connectedAccounts).values({
       id: accountId,
       userId,

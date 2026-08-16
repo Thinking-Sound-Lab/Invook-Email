@@ -2,12 +2,12 @@
 
 Invook is an open-source, AI-native Gmail client. It keeps a lossless local Gmail mailbox replica, applies user-created Invook labels, and drafts replies using an inspectable Memory rather than a hidden writing profile.
 
-The application starts with one Google sign-in action. Until a real Gmail account is connected, it shows an honest setup or empty state and never manufactures mailbox data.
+The application starts with Google Identity sign-in through Better Auth. That flow requests only `openid`, `email`, and `profile`. Gmail authorization is a separate, authenticated mailbox-connection flow, so signing into Invook never grants mailbox access.
 
 ## What works today
 
-1. Direct Google OAuth authenticates the user and grants Gmail access.
-2. On first connection, the callback validates the Google identity, captures H0, registers a Gmail watch, encrypts the provider credentials with AES-256-GCM, and transactionally records exactly one replica run plus its first BullMQ step. Returning sign-in refreshes only the browser session, profile, and encrypted credentials; it preserves durable replica/watch/run state and queues stored-cursor catch-up only when needed. Signing out clears only the browser session.
+1. Better Auth owns global Google Identity users and database-backed browser sessions. Its OAuth client requests identity scopes only and never receives Gmail access.
+2. An authenticated user can separately add or reconnect Gmail mailboxes through a dedicated Google OAuth authorization flow. On first connection, the callback validates the mailbox identity, captures H0, registers a Gmail watch, encrypts the Gmail credentials with AES-256-GCM, and transactionally records exactly one replica run plus its first BullMQ step. Reconnection refreshes only the selected mailbox credential and preserves durable replica/watch/run state. Signing out clears only the Better Auth session.
 3. A sequential page worker discovers every message in 500-result pages, including Spam and Trash, while configurable parallel per-message workers fetch exact raw MIME. Raw MIME and attachment bytes go to S3-compatible object storage with checksums; PostgreSQL stores complete headers, text/HTML, recognized Gmail system memberships, Gmail Draft resources, watch state, pending/applied history cursors, and workflow checkpoints. Each committed message atomically creates its own label-analysis job. Finalization replays history from H0, performs a final locked catch-up, and only then releases indexing and initial Memory.
 4. One structured per-message classifier independently evaluates the built-in Newsletter definition and active custom Invook labels. Label creation first previews matches from up to 100 recent canonical stored messages and may optionally enqueue a durable scan of stored mail from the last 7, 30, or 90 days. Without that explicit choice, creation and editing remain forward-only. Important comes only from Gmail. Others is derived after successful analysis only when neither Important nor any Invook label applies, and opaque Gmail user-label IDs are ignored. Applied relationships and explicit user overrides are persisted per message; thread display is calculated from visible messages.
 5. Initial Memory analysis sends all eligible email threads to the selected OpenAI or Azure OpenAI native Batch API. Later eligible owner-sent messages accumulate as targeted global and contact evidence without rescanning the original mailbox. Incoming messages provide context and only the owner's eligible sent messages can become evidence for three kinds of Memory:
@@ -41,6 +41,7 @@ packages/
   contracts/           Shared JSON API types
   database/            Drizzle schema, migrations, repositories, and credential encryption
   gmail/               Gmail API client, OAuth scopes, and MIME parsing
+  auth/                Better Auth Google Identity and database sessions
   object-storage/      Axios/SigV4 S3-compatible raw MIME and attachment storage
 docker/
   Dockerfile           Web, API, and worker image targets
@@ -53,12 +54,23 @@ docs/
 
 The frontend uses shadcn/ui source components, the free Hugeicons package, Plus Jakarta Sans, and a Notion-inspired dark palette.
 
-## Google OAuth setup
+## Google Identity and Gmail OAuth setup
 
-Create a Google Cloud OAuth web application and enable the Gmail API. Configure these authorized redirect URIs:
+One Google Cloud OAuth web client can serve both flows because each authorization request selects its own scopes. You may use two clients in production to isolate credential rotation and redirect configuration, but the security boundary is the separate flow and enforced scope set rather than the client ID.
 
-- Local: `http://localhost:3000/auth/callback`
-- Hosted: `https://your-domain.example/auth/callback`
+The Better Auth identity client requests only `openid`, `email`, and `profile`. Configure:
+
+- Local: `http://localhost:3000/v1/auth/callback/google`
+- Hosted: `https://your-domain.example/v1/auth/callback/google`
+
+Set `BETTER_AUTH_GOOGLE_CLIENT_ID`, `BETTER_AUTH_GOOGLE_CLIENT_SECRET`, and an independent `BETTER_AUTH_SECRET`.
+
+Enable the Gmail API for the Gmail connection client and configure:
+
+- Local: `http://localhost:3000/connections/gmail/callback`
+- Hosted: `https://your-domain.example/connections/gmail/callback`
+
+Set `GMAIL_GOOGLE_CLIENT_ID` and `GMAIL_GOOGLE_CLIENT_SECRET`. To reuse one Google OAuth client, set both environment-variable pairs to the same client ID and secret and register both callback URLs on that client.
 
 Copy the environment template and fill every blank value:
 
@@ -67,7 +79,7 @@ cp .env.example .env.local
 openssl rand -base64 32
 ```
 
-Put the generated value in `TOKEN_ENCRYPTION_KEY`. Invook uses Google's OAuth endpoints directly; it does not use Supabase Auth.
+Generate separate values for `BETTER_AUTH_SECRET` and `TOKEN_ENCRYPTION_KEY`. Better Auth owns global identity and sessions; Invook's Gmail package owns mailbox authorization and encrypted provider credentials.
 
 Continuous Gmail synchronization also needs a Google Pub/Sub topic and an authenticated push subscription targeting `https://your-domain.example/v1/webhooks/google-pubsub`. Set `GMAIL_PUBSUB_TOPIC`, the subscription's OIDC audience in `GOOGLE_PUBSUB_PUSH_AUDIENCE`, its service-account email in `GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL`, and the full subscription name in `GOOGLE_PUBSUB_SUBSCRIPTION`. Gmail connection stays unavailable until these real resources are configured.
 

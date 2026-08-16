@@ -2,7 +2,6 @@ import { createHash, randomBytes } from "node:crypto";
 
 import axios from "axios";
 import {
-  decodeJwt,
   decodeProtectedHeader,
   importJWK,
   jwtVerify,
@@ -48,6 +47,7 @@ export type GoogleAuthorizationResult = {
     subject: string;
     email: string;
     displayName: string | null;
+    image: string | null;
   };
 };
 
@@ -58,7 +58,19 @@ export type VerifiedGoogleIdTokenClaims = {
   iss: string;
   aud: string | string[];
   exp: number;
+  name: string | null;
+  picture: string | null;
 };
+
+function verifiedGoogleProfileImage(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const imageUrl = new URL(value);
+    return imageUrl.protocol === "https:" ? imageUrl.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 function base64UrlSha256(value: string): string {
   return createHash("sha256").update(value).digest("base64url");
@@ -126,6 +138,8 @@ export async function verifyGoogleIdToken(
     iss: payload.iss,
     aud: payload.aud,
     exp: payload.exp,
+    name: typeof payload.name === "string" ? payload.name : null,
+    picture: verifiedGoogleProfileImage(payload.picture),
   };
 }
 
@@ -187,7 +201,6 @@ export async function exchangeGoogleAuthorizationCode(
   }
 
   const identity = await verifyGoogleIdToken(tokens.id_token, configuration.clientId);
-  const identityPayload = decodeJwt(tokens.id_token);
 
   const scopes = grantedScopes(tokens);
   if (!scopes.includes("https://www.googleapis.com/auth/gmail.modify")) {
@@ -202,8 +215,8 @@ export async function exchangeGoogleAuthorizationCode(
     identity: {
       subject: identity.sub,
       email: identity.email,
-      displayName:
-        typeof identityPayload.name === "string" ? identityPayload.name : null,
+      displayName: identity.name,
+      image: identity.picture,
     },
   };
 }

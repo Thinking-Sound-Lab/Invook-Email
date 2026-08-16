@@ -64,7 +64,11 @@ test(
       bodyText: "Second body updated",
     });
     try {
-      await database.insert(profiles).values({ id: userId });
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
       await database.insert(connectedAccounts).values({
         id: accountId,
         userId,
@@ -284,7 +288,11 @@ test(
     const userId = uuidv4();
     const accountId = uuidv4();
     try {
-      await database.insert(profiles).values({ id: userId });
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
       await database.insert(connectedAccounts).values({
         id: accountId,
         userId,

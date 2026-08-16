@@ -12,6 +12,7 @@
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
     "@invook/ai": "workspace:*",
+    "@invook/auth": "workspace:*",
     "@invook/contracts": "workspace:*",
     "@invook/database": "workspace:*",
     "@invook/gmail": "workspace:*",
