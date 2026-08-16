@@ -59,7 +59,7 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported privately to the community leaders at <hello@thinkingsoundlab.com>.
+reported privately to the community leaders at <abhishek@thinkingsoundlab.com>.
 Use the subject line `[Invook conduct report]` and do not open a public issue.
 All complaints will be reviewed and investigated promptly and fairly.
 

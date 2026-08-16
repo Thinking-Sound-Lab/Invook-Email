@@ -12,7 +12,7 @@ not supported.
 
 ## Reporting a Vulnerability
 
-Email <hello@thinkingsoundlab.com> with the subject
+Email <abhishek@thinkingsoundlab.com> with the subject
 `[Invook security] <short description>`. Do not open a public GitHub issue,
 discussion, or pull request for an undisclosed vulnerability.
 
