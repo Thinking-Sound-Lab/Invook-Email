@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { submitThreadReadAttempt } from "./thread-read-state";
+import {
+  getThreadReadTrackerKey,
+  submitThreadReadAttempt,
+} from "./thread-read-state";
 
 test("opening one thread submits only one read mutation while it is pending", async () => {
   const attemptedThreadIds = new Set<string>();
@@ -71,4 +74,24 @@ test("a failed passive attempt retries only after an explicit reset", async () =
     "complete",
   );
   assert.equal(providerWriteCount, 2);
+});
+
+test("canonical read convergence remounts a later unread attempt", () => {
+  const unreadKey = getThreadReadTrackerKey({
+    threadId: "thread-id",
+    isUnread: true,
+  });
+  const readKey = getThreadReadTrackerKey({
+    threadId: "thread-id",
+    isUnread: false,
+  });
+
+  assert.notEqual(unreadKey, readKey);
+  assert.equal(
+    getThreadReadTrackerKey({
+      threadId: "thread-id",
+      isUnread: true,
+    }),
+    unreadKey,
+  );
 });

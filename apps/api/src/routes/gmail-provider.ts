@@ -28,7 +28,7 @@ import {
   promoteReplyDraftToGmail,
 } from "../services/promote-reply-draft";
 import {
-  getGmailProviderAccessForRequest,
+  getGmailProviderAccessForAccountRequest,
   sendGmailWriteProblem,
 } from "./gmail-provider-access";
 
@@ -128,18 +128,20 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         await sendProblem(request, reply, 400, "Gmail message action is invalid");
         return;
       }
-      const [access, context] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getGmailMessageMutationContext({
-          userId: session.userId,
-          messageId: request.params.messageId,
-        }),
-      ]);
-      if (!access) return;
-      if (!context || context.accountId !== access.accountId) {
+      const context = await getGmailMessageMutationContext({
+        userId: session.userId,
+        messageId: request.params.messageId,
+      });
+      if (!context) {
         await sendProblem(request, reply, 404, "Gmail message not found");
         return;
       }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        context.accountId,
+      );
+      if (!access) return;
       try {
         const mutation = gmailMessageActionMutation(action);
         if (mutation.kind === "trash") {
@@ -182,13 +184,19 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         await sendProblem(request, reply, 400, "Gmail thread read state is invalid");
         return;
       }
-      const [access, context] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getGmailThreadMutationContext({
-          userId: session.userId,
-          threadId: request.params.threadId,
-        }),
-      ]);
+      const context = await getGmailThreadMutationContext({
+        userId: session.userId,
+        threadId: request.params.threadId,
+      });
+      if (!context) {
+        await sendProblem(request, reply, 404, "Gmail thread not found");
+        return;
+      }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        context.accountId,
+      );
       if (!access) return;
       try {
         const result = await setGmailThreadReadState({
@@ -231,18 +239,20 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         await sendProblem(request, reply, 400, "Raw RFC 2822 draft is required");
         return;
       }
-      const [access, draft] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getGmailDraftResourceForUser({
-          userId: session.userId,
-          gmailDraftId: request.params.gmailDraftId,
-        }),
-      ]);
-      if (!access) return;
-      if (!draft || draft.accountId !== access.accountId) {
+      const draft = await getGmailDraftResourceForUser({
+        userId: session.userId,
+        gmailDraftId: request.params.gmailDraftId,
+      });
+      if (!draft) {
         await sendProblem(request, reply, 404, "Gmail draft not found");
         return;
       }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        draft.accountId,
+      );
+      if (!access) return;
       try {
         const updated = await updateGmailDraft(
           access.accessToken,
@@ -275,18 +285,20 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      const [access, draft] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getGmailDraftResourceForUser({
-          userId: session.userId,
-          gmailDraftId: request.params.gmailDraftId,
-        }),
-      ]);
-      if (!access) return;
-      if (!draft || draft.accountId !== access.accountId) {
+      const draft = await getGmailDraftResourceForUser({
+        userId: session.userId,
+        gmailDraftId: request.params.gmailDraftId,
+      });
+      if (!draft) {
         await sendProblem(request, reply, 404, "Gmail draft not found");
         return;
       }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        draft.accountId,
+      );
+      if (!access) return;
       try {
         await deleteGmailDraft(access.accessToken, draft.providerDraftId);
         const stepId = await enqueueProviderCatchup(session.userId, access);
@@ -312,18 +324,20 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      const [access, draft] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getAiReplyDraftForGmailSave({
-          userId: session.userId,
-          draftId: request.params.draftId,
-        }),
-      ]);
-      if (!access) return;
-      if (!draft || draft.accountId !== access.accountId) {
+      const draft = await getAiReplyDraftForGmailSave({
+        userId: session.userId,
+        draftId: request.params.draftId,
+      });
+      if (!draft) {
         await sendProblem(request, reply, 404, "Draft not found");
         return;
       }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        draft.accountId,
+      );
+      if (!access) return;
       if (!draft.replyTarget) {
         await sendProblem(request, reply, 409, "Draft has no incoming message to reply to");
         return;

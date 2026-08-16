@@ -9,6 +9,18 @@ export interface SubmitThreadReadAttemptInput {
   threadId: string;
 }
 
+export interface GetThreadReadTrackerKeyInput {
+  isUnread: boolean;
+  threadId: string;
+}
+
+export function getThreadReadTrackerKey({
+  isUnread,
+  threadId,
+}: GetThreadReadTrackerKeyInput): string {
+  return `${threadId}:${isUnread ? "unread" : "read"}`;
+}
+
 export async function submitThreadReadAttempt({
   attemptedThreadIds,
   markRead,

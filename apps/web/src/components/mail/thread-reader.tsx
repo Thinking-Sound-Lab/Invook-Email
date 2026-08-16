@@ -25,6 +25,7 @@ import { buildEmailHtmlDocument } from "./email-html-document";
 import { EmailHtmlFrame } from "./email-html-frame";
 import { SmartLabelControls } from "./smart-label-controls";
 import { ThreadReadTracker } from "./thread-read-tracker";
+import { getThreadReadTrackerKey } from "./thread-read-state";
 import type { MailboxView, SelectedThread } from "./types";
 
 export interface ThreadReaderProps {
@@ -72,7 +73,7 @@ export function ThreadReader({
         </div>
       </header>
       <ThreadReadTracker
-        key={thread.id}
+        key={getThreadReadTrackerKey({ threadId: thread.id, isUnread })}
         threadId={thread.id}
         isUnread={isUnread}
       />

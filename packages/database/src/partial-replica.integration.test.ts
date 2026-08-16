@@ -13,6 +13,7 @@ import {
   getAiReplyDraftForGmailSave,
   getGmailMessageMutationContext,
   getGmailProviderWriteContext,
+  getGmailProviderWriteContextForAccount,
   getGmailThreadMutationContext,
 } from "./replica";
 import {
@@ -401,7 +402,13 @@ test(
         messageId,
       } = fixture;
 
-      const access = await getGmailProviderWriteContext(userId, database);
+      const defaultAccess = await getGmailProviderWriteContext(userId, database);
+      assert.equal(defaultAccess?.accountId, accountId);
+
+      const access = await getGmailProviderWriteContextForAccount(
+        { userId, accountId },
+        database,
+      );
       assert.deepEqual(access, {
         userId,
         accountId,
@@ -409,7 +416,17 @@ test(
         tokenCiphertext: "stored-encrypted-credential",
       });
       assert.equal(
-        await getGmailProviderWriteContext(otherUserId, database),
+        await getGmailProviderWriteContextForAccount(
+          { userId: otherUserId, accountId },
+          database,
+        ),
+        null,
+      );
+      assert.equal(
+        await getGmailProviderWriteContextForAccount(
+          { userId, accountId: uuidv4() },
+          database,
+        ),
         null,
       );
 

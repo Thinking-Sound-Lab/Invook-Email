@@ -48,8 +48,8 @@ export type GmailProviderWriteContext = {
   tokenCiphertext: string;
 };
 
-export async function getGmailProviderWriteContext(
-  userId: string,
+async function queryGmailProviderWriteContext(
+  input: { userId: string; accountId?: string },
   database: Database = getDatabase(),
 ): Promise<GmailProviderWriteContext | null> {
   const [context] = await database
@@ -67,12 +67,29 @@ export async function getGmailProviderWriteContext(
     )
     .where(
       and(
-        eq(connectedAccounts.userId, userId),
+        input.accountId === undefined
+          ? undefined
+          : eq(connectedAccounts.id, input.accountId),
+        eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
       ),
     )
     .limit(1);
   return context ?? null;
+}
+
+export async function getGmailProviderWriteContext(
+  userId: string,
+  database: Database = getDatabase(),
+): Promise<GmailProviderWriteContext | null> {
+  return queryGmailProviderWriteContext({ userId }, database);
+}
+
+export async function getGmailProviderWriteContextForAccount(
+  input: { userId: string; accountId: string },
+  database: Database = getDatabase(),
+): Promise<GmailProviderWriteContext | null> {
+  return queryGmailProviderWriteContext(input, database);
 }
 
 export async function getGmailMessageMutationContext(
@@ -101,7 +118,7 @@ export async function getGmailMessageMutationContext(
 export async function getGmailThreadMutationContext(
   input: { userId: string; threadId: string },
   database: Database = getDatabase(),
-) {
+): Promise<{ accountId: string; providerThreadId: string } | null> {
   const [thread] = await database
     .select({
       accountId: threads.accountId,
