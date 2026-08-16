@@ -169,7 +169,7 @@ export function MailSidebar({
         />
       </nav>
 
-      <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
+      <div className="scrollbar-hidden mt-5 min-h-0 flex-1 overflow-y-auto">
         <p className="mb-1.5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">
           Labels
         </p>

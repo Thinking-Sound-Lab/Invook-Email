@@ -97,4 +97,12 @@
   [role="button"]:not([aria-disabled="true"]) {
     cursor: pointer;
   }
+
+  .scrollbar-hidden {
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hidden::-webkit-scrollbar {
+    display: none;
+  }
 }

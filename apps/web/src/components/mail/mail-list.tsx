@@ -240,7 +240,7 @@ export function MailList({
         </div>
       </header>
 
-      <ScrollArea type="always" className="min-h-0 flex-1">
+      <ScrollArea hideScrollbar className="min-h-0 flex-1">
         <MailRows
           threads={threads}
           accountEmail={account.email}
