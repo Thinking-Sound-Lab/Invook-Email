@@ -367,6 +367,21 @@ export function modifyGmailMessageLabels(
   ).then(filterGmailMessageState);
 }
 
+export async function modifyGmailThreadLabels(
+  accessToken: string,
+  threadId: string,
+  changes: {
+    addLabelIds?: GmailSystemLabelId[];
+    removeLabelIds?: GmailSystemLabelId[];
+  },
+): Promise<void> {
+  await gmailRequest<unknown>(
+    accessToken,
+    `/users/me/threads/${encodeURIComponent(threadId)}/modify`,
+    { method: "POST", data: changes },
+  );
+}
+
 export function trashGmailMessage(
   accessToken: string,
   messageId: string,

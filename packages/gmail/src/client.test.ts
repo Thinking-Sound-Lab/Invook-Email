@@ -14,6 +14,7 @@ import {
   listGmailDrafts,
   listGmailMessages,
   modifyGmailMessageLabels,
+  modifyGmailThreadLabels,
   sendGmailDraft,
 } from "./client";
 
@@ -115,6 +116,21 @@ test("draft and provider-write responses discard opaque Gmail label IDs", async 
     { addLabelIds: ["STARRED"] },
   );
   assert.deepEqual(modified.labelIds, ["STARRED"]);
+});
+
+test("thread label writes use Gmail's single thread mutation endpoint", async () => {
+  await modifyGmailThreadLabels(
+    "access-token",
+    "thread/with spaces",
+    { removeLabelIds: ["UNREAD"] },
+  );
+
+  const request = requests[0];
+  assert.ok(request);
+  const url = new URL(request.url ?? "", request.baseURL);
+  assert.equal(url.pathname, "/users/me/threads/thread%2Fwith%20spaces/modify");
+  assert.equal(request.method, "POST");
+  assert.deepEqual(request.data, { removeLabelIds: ["UNREAD"] });
 });
 
 test("history mapping retains only recognized Gmail system labels", () => {

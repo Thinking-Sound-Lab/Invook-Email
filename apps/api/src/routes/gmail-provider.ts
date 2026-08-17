@@ -1,11 +1,13 @@
 import type { FastifyPluginAsync } from "fastify";
 
+import type { SetGmailThreadReadStateRequest } from "@invook/contracts";
 import {
   enqueueGmailHistoryCatchup,
   GmailDraftWriteConflictError,
   getAiReplyDraftForGmailSave,
   getGmailDraftResourceForUser,
   getGmailMessageMutationContext,
+  getGmailThreadMutationContext,
 } from "@invook/database";
 import {
   deleteGmailDraft,
@@ -19,17 +21,19 @@ import {
 import { mutationAccessHooks, requireUuidParameter } from "../access";
 import { sendJson, sendProblem } from "../responses";
 import type { GmailProviderAccess } from "../services/gmail-provider";
+import { setGmailThreadReadState } from "../services/gmail-thread-read-state";
 import { GmailDraftWritePendingError } from "../services/compose-drafts";
 import {
   GmailReplyComposeError,
   promoteReplyDraftToGmail,
 } from "../services/promote-reply-draft";
 import {
-  getGmailProviderAccessForRequest,
+  getGmailProviderAccessForAccountRequest,
   sendGmailWriteProblem,
 } from "./gmail-provider-access";
 
 type GmailMessageParams = { messageId: string };
+type GmailThreadParams = { threadId: string };
 type GmailDraftParams = { gmailDraftId: string };
 type AiDraftParams = { draftId: string };
 
@@ -83,6 +87,19 @@ function parseGmailMessageAction(body: unknown): GmailMessageAction | null {
   return gmailMessageActions.find((action) => action === body.action) ?? null;
 }
 
+export function parseGmailThreadReadState(
+  body: unknown,
+): SetGmailThreadReadStateRequest | null {
+  if (
+    !isRecord(body) ||
+    Object.keys(body).some((key) => key !== "isRead") ||
+    typeof body.isRead !== "boolean"
+  ) {
+    return null;
+  }
+  return { isRead: body.isRead };
+}
+
 async function enqueueProviderCatchup(
   userId: string,
   access: GmailProviderAccess,
@@ -111,18 +128,20 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         await sendProblem(request, reply, 400, "Gmail message action is invalid");
         return;
       }
-      const [access, context] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getGmailMessageMutationContext({
-          userId: session.userId,
-          messageId: request.params.messageId,
-        }),
-      ]);
-      if (!access) return;
-      if (!context || context.accountId !== access.accountId) {
+      const context = await getGmailMessageMutationContext({
+        userId: session.userId,
+        messageId: request.params.messageId,
+      });
+      if (!context) {
         await sendProblem(request, reply, 404, "Gmail message not found");
         return;
       }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        context.accountId,
+      );
+      if (!access) return;
       try {
         const mutation = gmailMessageActionMutation(action);
         if (mutation.kind === "trash") {
@@ -139,6 +158,58 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         }
         const stepId = await enqueueProviderCatchup(session.userId, access);
         await sendJson(reply, 200, { stepId });
+      } catch (error) {
+        if (error instanceof GmailApiError) {
+          await sendGmailWriteProblem(error, request, reply);
+          return;
+        }
+        throw error;
+      }
+    },
+  );
+
+  api.put<{ Params: GmailThreadParams; Body: unknown }>(
+    "/v1/gmail/threads/:threadId/read-state",
+    {
+      onRequest: [
+        ...mutationAccessHooks,
+        requireUuidParameter("threadId", "Thread ID must be valid"),
+      ],
+    },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const readState = parseGmailThreadReadState(request.body);
+      if (!readState) {
+        await sendProblem(request, reply, 400, "Gmail thread read state is invalid");
+        return;
+      }
+      const context = await getGmailThreadMutationContext({
+        userId: session.userId,
+        threadId: request.params.threadId,
+      });
+      if (!context) {
+        await sendProblem(request, reply, 404, "Gmail thread not found");
+        return;
+      }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        context.accountId,
+      );
+      if (!access) return;
+      try {
+        const result = await setGmailThreadReadState({
+          userId: session.userId,
+          access,
+          context,
+          isRead: readState.isRead,
+        });
+        if (result.status === "not_found") {
+          await sendProblem(request, reply, 404, "Gmail thread not found");
+          return;
+        }
+        await sendJson(reply, 200, { stepId: result.stepId });
       } catch (error) {
         if (error instanceof GmailApiError) {
           await sendGmailWriteProblem(error, request, reply);
@@ -168,18 +239,20 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
         await sendProblem(request, reply, 400, "Raw RFC 2822 draft is required");
         return;
       }
-      const [access, draft] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getGmailDraftResourceForUser({
-          userId: session.userId,
-          gmailDraftId: request.params.gmailDraftId,
-        }),
-      ]);
-      if (!access) return;
-      if (!draft || draft.accountId !== access.accountId) {
+      const draft = await getGmailDraftResourceForUser({
+        userId: session.userId,
+        gmailDraftId: request.params.gmailDraftId,
+      });
+      if (!draft) {
         await sendProblem(request, reply, 404, "Gmail draft not found");
         return;
       }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        draft.accountId,
+      );
+      if (!access) return;
       try {
         const updated = await updateGmailDraft(
           access.accessToken,
@@ -212,18 +285,20 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      const [access, draft] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getGmailDraftResourceForUser({
-          userId: session.userId,
-          gmailDraftId: request.params.gmailDraftId,
-        }),
-      ]);
-      if (!access) return;
-      if (!draft || draft.accountId !== access.accountId) {
+      const draft = await getGmailDraftResourceForUser({
+        userId: session.userId,
+        gmailDraftId: request.params.gmailDraftId,
+      });
+      if (!draft) {
         await sendProblem(request, reply, 404, "Gmail draft not found");
         return;
       }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        draft.accountId,
+      );
+      if (!access) return;
       try {
         await deleteGmailDraft(access.accessToken, draft.providerDraftId);
         const stepId = await enqueueProviderCatchup(session.userId, access);
@@ -249,18 +324,20 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      const [access, draft] = await Promise.all([
-        getGmailProviderAccessForRequest(request, reply),
-        getAiReplyDraftForGmailSave({
-          userId: session.userId,
-          draftId: request.params.draftId,
-        }),
-      ]);
-      if (!access) return;
-      if (!draft || draft.accountId !== access.accountId) {
+      const draft = await getAiReplyDraftForGmailSave({
+        userId: session.userId,
+        draftId: request.params.draftId,
+      });
+      if (!draft) {
         await sendProblem(request, reply, 404, "Draft not found");
         return;
       }
+      const access = await getGmailProviderAccessForAccountRequest(
+        request,
+        reply,
+        draft.accountId,
+      );
+      if (!access) return;
       if (!draft.replyTarget) {
         await sendProblem(request, reply, 409, "Draft has no incoming message to reply to");
         return;

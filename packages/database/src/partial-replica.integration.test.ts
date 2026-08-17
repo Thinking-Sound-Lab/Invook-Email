@@ -9,10 +9,13 @@ import { v4 as uuidv4 } from "uuid";
 import type { Database } from "./client";
 import { queryInvookMailbox } from "./mailbox-query";
 import {
+  applyGmailHistoryBatch,
   enqueueGmailHistoryCatchup,
   getAiReplyDraftForGmailSave,
   getGmailMessageMutationContext,
   getGmailProviderWriteContext,
+  getGmailProviderWriteContextForAccount,
+  getGmailThreadMutationContext,
 } from "./replica";
 import {
   createMessageContentHash,
@@ -28,6 +31,7 @@ import {
   drafts,
   gmailReplicaStates,
   labels,
+  mailboxChangeEvents,
   messageAttachments,
   messageLabels,
   messages,
@@ -400,7 +404,13 @@ test(
         messageId,
       } = fixture;
 
-      const access = await getGmailProviderWriteContext(userId, database);
+      const defaultAccess = await getGmailProviderWriteContext(userId, database);
+      assert.equal(defaultAccess?.accountId, accountId);
+
+      const access = await getGmailProviderWriteContextForAccount(
+        { userId, accountId },
+        database,
+      );
       assert.deepEqual(access, {
         userId,
         accountId,
@@ -408,7 +418,17 @@ test(
         tokenCiphertext: "stored-encrypted-credential",
       });
       assert.equal(
-        await getGmailProviderWriteContext(otherUserId, database),
+        await getGmailProviderWriteContextForAccount(
+          { userId: otherUserId, accountId },
+          database,
+        ),
+        null,
+      );
+      assert.equal(
+        await getGmailProviderWriteContextForAccount(
+          { userId, accountId: uuidv4() },
+          database,
+        ),
         null,
       );
 
@@ -431,6 +451,114 @@ test(
           database,
         ),
         null,
+      );
+
+      const thread = await getGmailThreadMutationContext(
+        { userId, threadId },
+        database,
+      );
+      assert.equal(thread?.accountId, accountId);
+      assert.equal(thread?.providerThreadId, `provider-thread-${threadId}`);
+      assert.equal(
+        await getGmailThreadMutationContext(
+          { userId: otherUserId, threadId },
+          database,
+        ),
+        null,
+      );
+      assert.equal(
+        await getGmailThreadMutationContext(
+          { userId, threadId: uuidv4() },
+          database,
+        ),
+        null,
+      );
+
+      await database
+        .update(messages)
+        .set({ labelAnalysisState: "pending" })
+        .where(eq(messages.id, messageId));
+      assert.equal(
+        await getGmailThreadMutationContext({ userId, threadId }, database),
+        null,
+      );
+    });
+  },
+);
+
+test(
+  "coalesced Gmail label history refreshes an unchanged visible thread",
+  { skip: !testDatabaseUrl },
+  async () => {
+    await withPartialReplicaFixture(async (fixture) => {
+      const { database, userId, accountId, threadId, messageId } = fixture;
+      const unreadLabelId = uuidv4();
+      await database.insert(labels).values({
+        id: unreadLabelId,
+        userId,
+        accountId,
+        kind: "gmail",
+        providerLabelId: "UNREAD",
+        name: "Unread",
+        normalizedName: "unread",
+        providerType: "system",
+      });
+      await database.insert(messageLabels).values({
+        userId,
+        accountId,
+        messageId,
+        labelId: unreadLabelId,
+        source: "gmail",
+      });
+
+      const result = await applyGmailHistoryBatch(
+        {
+          userId,
+          accountId,
+          expectedCursor: "100",
+          nextCursor: "120",
+          messages: [],
+          labelChanges: [
+            {
+              providerMessageId: `provider-message-${messageId}`,
+              providerHistoryId: "120",
+              gmailLabels: [
+                { providerLabelId: "INBOX", name: "Inbox" },
+                { providerLabelId: "DRAFT", name: "Drafts" },
+                { providerLabelId: "UNREAD", name: "Unread" },
+              ],
+            },
+          ],
+          deletedMessageIds: [],
+        },
+        database,
+      );
+
+      assert.deepEqual(result.changedThreadIds, []);
+      assert.ok(result.eventId);
+      const [event] = await database
+        .select({ payload: mailboxChangeEvents.payload })
+        .from(mailboxChangeEvents)
+        .where(eq(mailboxChangeEvents.id, result.eventId));
+      assert.deepEqual(event?.payload, {
+        historyCursor: "120",
+        changedThreadIds: [],
+        refreshedThreadIds: [threadId],
+      });
+      const workspace = await getMailboxWorkspace(
+        userId,
+        { selectedThreadId: threadId },
+        database,
+      );
+      assert.equal(
+        workspace?.selectedThread?.messages[0]?.providerHistoryId,
+        "120",
+      );
+      assert.equal(
+        workspace?.selectedThread?.gmailLabels.some(
+          (label) => label.providerLabelId === "UNREAD",
+        ),
+        true,
       );
     });
   },

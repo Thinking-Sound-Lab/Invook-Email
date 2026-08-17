@@ -2,6 +2,7 @@ import {
   decryptGoogleCredential,
   encryptGoogleCredential,
   getGmailProviderWriteContext,
+  getGmailProviderWriteContextForAccount,
   markGmailAccountReconnectRequired,
   updateStoredCredential,
   type GoogleCredential,
@@ -40,8 +41,21 @@ export interface GmailProviderAccessDependencies {
   getWriteContext: typeof getGmailProviderWriteContext;
 }
 
+export interface GmailProviderAccessForAccountDependencies {
+  getWriteContext: typeof getGmailProviderWriteContextForAccount;
+}
+
+export interface GetGmailProviderAccessForAccountInput {
+  accountId: string;
+  userId: string;
+}
+
 const defaultDependencies: GmailProviderAccessDependencies = {
   getWriteContext: getGmailProviderWriteContext,
+};
+
+const defaultForAccountDependencies: GmailProviderAccessForAccountDependencies = {
+  getWriteContext: getGmailProviderWriteContextForAccount,
 };
 
 async function refreshCredentialIfRequired(
@@ -90,11 +104,9 @@ async function refreshCredentialIfRequired(
   return nextCredential;
 }
 
-export async function getGmailProviderAccess(
-  userId: string,
-  dependencies: GmailProviderAccessDependencies = defaultDependencies,
+async function resolveGmailProviderAccess(
+  context: Awaited<ReturnType<typeof getGmailProviderWriteContext>>,
 ): Promise<GmailProviderAccessResult> {
-  const context = await dependencies.getWriteContext(userId);
   if (!context) return { status: "not_found", access: null };
 
   const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY?.trim();
@@ -119,4 +131,23 @@ export async function getGmailProviderAccess(
       email: context.email,
     },
   };
+}
+
+export async function getGmailProviderAccess(
+  userId: string,
+  dependencies: GmailProviderAccessDependencies = defaultDependencies,
+): Promise<GmailProviderAccessResult> {
+  return resolveGmailProviderAccess(
+    await dependencies.getWriteContext(userId),
+  );
+}
+
+export async function getGmailProviderAccessForAccount(
+  input: GetGmailProviderAccessForAccountInput,
+  dependencies: GmailProviderAccessForAccountDependencies =
+    defaultForAccountDependencies,
+): Promise<GmailProviderAccessResult> {
+  return resolveGmailProviderAccess(
+    await dependencies.getWriteContext(input),
+  );
 }

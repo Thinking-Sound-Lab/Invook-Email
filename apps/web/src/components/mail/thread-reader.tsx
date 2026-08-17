@@ -27,6 +27,8 @@ import { buildEmailHtmlContent } from "./email-html-sanitizer";
 import { LocalMailDate } from "./local-mail-date";
 import { MessageStarButton } from "./message-star-button";
 import { SmartLabelControls } from "./smart-label-controls";
+import { ThreadReadTracker } from "./thread-read-tracker";
+import { getThreadReadTrackerKey } from "./thread-read-state";
 import type { MailboxView, SelectedThread } from "./types";
 
 export interface ThreadReaderProps {
@@ -53,6 +55,9 @@ export async function ThreadReader({
   ).length;
   const hasLabelAnalysisFailure =
     thread.hasLabelAnalysisFailure || failedMessageCount > 0;
+  const isUnread = thread.gmailLabels.some(
+    (label) => label.providerLabelId === "UNREAD",
+  );
   const latestMessage = thread.messages.at(-1);
   const isLatestMessageStarred = Boolean(
     latestMessage?.gmailLabels.some(
@@ -93,6 +98,17 @@ export async function ThreadReader({
           ) : null}
         </div>
       </header>
+      <ThreadReadTracker
+        key={getThreadReadTrackerKey({
+          threadId: thread.id,
+          isUnread,
+          providerHistoryIds: thread.messages.map(
+            (message) => message.providerHistoryId,
+          ),
+        })}
+        threadId={thread.id}
+        isUnread={isUnread}
+      />
 
       <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto w-full max-w-[900px] px-5 py-7 sm:px-8 sm:py-9 lg:px-10">

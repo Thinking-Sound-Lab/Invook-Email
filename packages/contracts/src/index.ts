@@ -170,6 +170,14 @@ export type AcceptedMailboxSyncResponse = {
   stepId: string;
 };
 
+export type SetGmailThreadReadStateRequest = {
+  isRead: boolean;
+};
+
+export type GmailThreadReadStateResponse = {
+  stepId: string;
+};
+
 export type DeletedResourceResponse = {
   deleted: true;
 };

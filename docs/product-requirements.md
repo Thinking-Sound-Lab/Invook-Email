@@ -76,7 +76,7 @@ The left sidebar contains:
 - All plus built-in and user-created Invook labels owned by the connected account;
 - mail views: Starred, Shared, Reminders, Scheduled, Drafts, Done, Sent, Trash.
 
-The center pane shows the selected mailbox or label view in reverse chronological order. Selecting a thread replaces the list with the real thread.
+The center pane shows the selected mailbox or label view in reverse chronological order. Selecting a thread replaces the list with the real thread. Opening an unread thread submits one Gmail thread-level read mutation; Gmail is written first, and the stored replica changes only when provider history is applied. A failed passive mutation remains non-optimistic and exposes an explicit retry.
 
 The right pane is the agent for Find and local Write. It reads only authoritative stored messages whose label analysis is complete or terminally failed and may create local drafts, but it has no Gmail mutation tools. During initial synchronization, not-yet-stored and pending/running messages remain unavailable while Gmail fetching and other UI activity continue. Explicit product actions for archive, read state, star, Trash, and Gmail Drafts write Gmail first and converge through provider history. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
 
@@ -265,6 +265,7 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `PATCH` | `/v1/drafts/:id` | Save an edit and queue feedback analysis when changed |
 | `POST` | `/v1/drafts/:id/save-to-gmail` | Create a distinct Gmail Draft from saved AI reply evidence |
 | `POST` | `/v1/gmail/messages/:id/actions` | Apply read, star, archive, or Trash state at Gmail first |
+| `PUT` | `/v1/gmail/threads/:id/read-state` | Apply one read-state change to every Gmail message in an owned thread |
 | `PUT/DELETE` | `/v1/gmail/drafts/:id` | Update or delete an existing Gmail Draft resource |
 
 Every product mutation requires an authenticated Better Auth database session and an allowed request origin. IDs and bodies are validated before repository calls. User ownership is enforced in every product lookup.

@@ -48,8 +48,8 @@ export type GmailProviderWriteContext = {
   tokenCiphertext: string;
 };
 
-export async function getGmailProviderWriteContext(
-  userId: string,
+async function queryGmailProviderWriteContext(
+  input: { userId: string; accountId?: string },
   database: Database = getDatabase(),
 ): Promise<GmailProviderWriteContext | null> {
   const [context] = await database
@@ -67,12 +67,29 @@ export async function getGmailProviderWriteContext(
     )
     .where(
       and(
-        eq(connectedAccounts.userId, userId),
+        input.accountId === undefined
+          ? undefined
+          : eq(connectedAccounts.id, input.accountId),
+        eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
       ),
     )
     .limit(1);
   return context ?? null;
+}
+
+export async function getGmailProviderWriteContext(
+  userId: string,
+  database: Database = getDatabase(),
+): Promise<GmailProviderWriteContext | null> {
+  return queryGmailProviderWriteContext({ userId }, database);
+}
+
+export async function getGmailProviderWriteContextForAccount(
+  input: { userId: string; accountId: string },
+  database: Database = getDatabase(),
+): Promise<GmailProviderWriteContext | null> {
+  return queryGmailProviderWriteContext(input, database);
 }
 
 export async function getGmailMessageMutationContext(
@@ -96,6 +113,38 @@ export async function getGmailMessageMutationContext(
     )
     .limit(1);
   return message ?? null;
+}
+
+export async function getGmailThreadMutationContext(
+  input: { userId: string; threadId: string },
+  database: Database = getDatabase(),
+): Promise<{ accountId: string; providerThreadId: string } | null> {
+  const [thread] = await database
+    .select({
+      accountId: threads.accountId,
+      providerThreadId: threads.providerThreadId,
+    })
+    .from(threads)
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
+    .innerJoin(
+      messages,
+      and(
+        eq(messages.threadId, threads.id),
+        eq(messages.accountId, threads.accountId),
+        eq(messages.userId, input.userId),
+        inArray(messages.labelAnalysisState, ["complete", "failed"]),
+      ),
+    )
+    .where(
+      and(
+        eq(threads.id, input.threadId),
+        eq(threads.userId, input.userId),
+        eq(connectedAccounts.userId, input.userId),
+        eq(connectedAccounts.status, "connected"),
+      ),
+    )
+    .limit(1);
+  return thread ?? null;
 }
 
 export async function getGmailDraftResourceForUser(
@@ -724,6 +773,7 @@ export async function applyGmailHistoryBatch(
     }
 
     const changedThreadIds = new Set<string>();
+    const refreshedThreadIds = new Set<string>();
     const executor = transaction as unknown as Database;
     for (const message of input.messages) {
       const result = await upsertIndexedMessage(message, executor);
@@ -742,8 +792,9 @@ export async function applyGmailHistoryBatch(
         },
         executor,
       );
-      if (result.changed && result.threadId && result.isVisible) {
-        changedThreadIds.add(result.threadId);
+      if (result.threadId && result.isVisible) {
+        refreshedThreadIds.add(result.threadId);
+        if (result.changed) changedThreadIds.add(result.threadId);
       }
     }
     for (const deletion of input.deletedMessageIds) {
@@ -779,7 +830,8 @@ export async function applyGmailHistoryBatch(
       .update(connectedAccounts)
       .set({ lastSyncedAt: new Date(), updatedAt: new Date() })
       .where(eq(connectedAccounts.id, input.accountId));
-    const eventId = changedThreadIds.size > 0
+    for (const threadId of changedThreadIds) refreshedThreadIds.add(threadId);
+    const eventId = refreshedThreadIds.size > 0
       ? await insertMailboxChange(transaction, {
           userId: input.userId,
           accountId: input.accountId,
@@ -787,6 +839,7 @@ export async function applyGmailHistoryBatch(
           payload: {
             historyCursor: input.nextCursor,
             changedThreadIds: Array.from(changedThreadIds),
+            refreshedThreadIds: Array.from(refreshedThreadIds),
           },
         })
       : null;

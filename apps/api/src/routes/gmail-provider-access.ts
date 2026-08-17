@@ -5,19 +5,20 @@ import { GmailApiError } from "@invook/gmail";
 import { sendProblem } from "../responses";
 import {
   getGmailProviderAccess,
+  getGmailProviderAccessForAccount,
   GmailProviderConfigurationError,
   GmailProviderReconnectRequiredError,
   type GmailProviderAccess,
+  type GmailProviderAccessResult,
 } from "../services/gmail-provider";
 
-export async function getGmailProviderAccessForRequest(
+async function resolveGmailProviderAccessForRequest(
   request: FastifyRequest,
   reply: FastifyReply,
+  loadAccess: () => Promise<GmailProviderAccessResult>,
 ): Promise<GmailProviderAccess | null> {
-  const session = request.invookSession;
-  if (!session) return null;
   try {
-    const result = await getGmailProviderAccess(session.userId);
+    const result = await loadAccess();
     if (result.status === "not_found") {
       await sendProblem(request, reply, 404, "Connected Gmail account not found");
       return null;
@@ -38,6 +39,32 @@ export async function getGmailProviderAccessForRequest(
     }
     throw error;
   }
+}
+
+export async function getGmailProviderAccessForRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<GmailProviderAccess | null> {
+  const session = request.invookSession;
+  if (!session) return null;
+  return resolveGmailProviderAccessForRequest(request, reply, () =>
+    getGmailProviderAccess(session.userId),
+  );
+}
+
+export async function getGmailProviderAccessForAccountRequest(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  accountId: string,
+): Promise<GmailProviderAccess | null> {
+  const session = request.invookSession;
+  if (!session) return null;
+  return resolveGmailProviderAccessForRequest(request, reply, () =>
+    getGmailProviderAccessForAccount({
+      userId: session.userId,
+      accountId,
+    }),
+  );
 }
 
 export async function sendGmailWriteProblem(

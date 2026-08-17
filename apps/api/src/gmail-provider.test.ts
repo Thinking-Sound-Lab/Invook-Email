@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { gmailMessageActionMutation } from "./routes/gmail-provider";
+import {
+  gmailMessageActionMutation,
+  parseGmailThreadReadState,
+} from "./routes/gmail-provider";
 
 test("Gmail message actions map only to authoritative provider mutations", () => {
   assert.deepEqual(gmailMessageActionMutation("mark_read"), {
@@ -25,4 +28,16 @@ test("Gmail message actions map only to authoritative provider mutations", () =>
     changes: { removeLabelIds: ["INBOX"] },
   });
   assert.deepEqual(gmailMessageActionMutation("trash"), { kind: "trash" });
+});
+
+test("Gmail thread read state accepts only the exact boolean contract", () => {
+  assert.deepEqual(parseGmailThreadReadState({ isRead: true }), {
+    isRead: true,
+  });
+  assert.deepEqual(parseGmailThreadReadState({ isRead: false }), {
+    isRead: false,
+  });
+  assert.equal(parseGmailThreadReadState({ isRead: "true" }), null);
+  assert.equal(parseGmailThreadReadState({ isRead: true, extra: true }), null);
+  assert.equal(parseGmailThreadReadState(null), null);
 });
