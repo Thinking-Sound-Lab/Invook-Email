@@ -3,18 +3,21 @@ import type { FastifyPluginAsync } from "fastify";
 import { mailboxViews, type MailboxView } from "@invook/contracts";
 import {
   enqueueGmailHistoryCatchupForUser,
-  getMailboxWorkspace,
+  getMailboxSettings,
+  getMailboxShellData,
+  getMailboxSidebarCounts,
+  getMailboxThreadDetail,
+  listMailboxThreads,
   markGmailReplicaDeletingForUser,
   parseMailboxCursor,
 } from "@invook/database";
 
 import { isUuid, mutationAccessHooks, requireSession } from "../access";
 import { sendJson, sendProblem } from "../responses";
-import { serializeWorkspace } from "../serializers";
+import { serializeMailboxShell } from "../serializers";
 
 type MailboxQuery = {
   cursor?: unknown;
-  thread?: unknown;
   view?: unknown;
 };
 
@@ -29,17 +32,42 @@ function parseMailboxView(value: unknown): MailboxView | null {
 }
 
 export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
-  api.get<{ Querystring: MailboxQuery }>(
-    "/v1/mailbox",
+  api.get(
+    "/v1/mailbox/shell",
     { onRequest: requireSession },
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
+      const shell = await getMailboxShellData(session.userId);
+      if (!shell) {
+        await sendProblem(request, reply, 404, "Connected Gmail account not found");
+        return;
+      }
+      await sendJson(reply, 200, serializeMailboxShell(shell, session.user));
+    },
+  );
 
-      const threadId =
-        typeof request.query.thread === "string"
-          ? request.query.thread.trim() || undefined
-          : undefined;
+  api.get(
+    "/v1/mailbox/sidebar-counts",
+    { onRequest: requireSession },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const counts = await getMailboxSidebarCounts(session.userId);
+      if (!counts) {
+        await sendProblem(request, reply, 404, "Connected Gmail account not found");
+        return;
+      }
+      await sendJson(reply, 200, counts);
+    },
+  );
+
+  api.get<{ Querystring: MailboxQuery }>(
+    "/v1/mailbox/threads",
+    { onRequest: requireSession },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
       const view = parseMailboxView(request.query.view);
       if (!view) {
         await sendProblem(request, reply, 400, "Invalid mailbox view");
@@ -52,12 +80,11 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
         await sendProblem(request, reply, 400, "Invalid mailbox cursor");
         return;
       }
-      const workspace = await getMailboxWorkspace(session.userId, {
+      const threadPage = await listMailboxThreads(session.userId, {
         cursor,
-        selectedThreadId: threadId,
         view,
       });
-      if (!workspace) {
+      if (!threadPage) {
         await sendProblem(
           request,
           reply,
@@ -67,11 +94,44 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
         return;
       }
 
-      await sendJson(
-        reply,
-        200,
-        await serializeWorkspace(workspace, session.user),
+      await sendJson(reply, 200, threadPage);
+    },
+  );
+
+  api.get<{ Params: { threadId: string } }>(
+    "/v1/mailbox/threads/:threadId",
+    { onRequest: requireSession },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      if (!isUuid(request.params.threadId)) {
+        await sendProblem(request, reply, 400, "Invalid mailbox thread");
+        return;
+      }
+      const thread = await getMailboxThreadDetail(
+        session.userId,
+        request.params.threadId,
       );
+      if (!thread) {
+        await sendProblem(request, reply, 404, "Mailbox thread not found");
+        return;
+      }
+      await sendJson(reply, 200, thread);
+    },
+  );
+
+  api.get(
+    "/v1/mailbox/settings",
+    { onRequest: requireSession },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const settings = await getMailboxSettings(session.userId);
+      if (!settings) {
+        await sendProblem(request, reply, 404, "Connected Gmail account not found");
+        return;
+      }
+      await sendJson(reply, 200, settings);
     },
   );
 

@@ -1,29 +1,37 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useTransition } from "react";
-
 import {
   parseMailboxChangeEvent,
-  shouldRefreshMailboxForEvent,
-} from "./mailbox-change-event";
+  parseMailboxStreamReadyEvent,
+} from "@invook/contracts";
+import { useRouter, useSearchParams } from "next/navigation";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 
-export interface UseMailboxEventsProps {
-  selectedThreadId?: string;
-}
+import { isRelevantMailboxChange } from "@/components/mail/mailbox-event-relevance";
 
-export function useMailboxEvents({
-  selectedThreadId,
-}: UseMailboxEventsProps = {}): void {
+export type MailboxEventStreamStatus = "connecting" | "ready" | "degraded";
+
+export function useMailboxEvents(): MailboxEventStreamStatus {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const surface = searchParams.get("surface") ?? "mail";
+  const threadId = searchParams.get("thread");
+  const view = searchParams.get("view") ?? "all";
+  const [status, setStatus] = useState<MailboxEventStreamStatus>("connecting");
   const [isRefreshPending, startRefreshTransition] = useTransition();
-  const selectedThreadIdRef = useRef(selectedThreadId);
+  const locationRef = useRef({ surface, threadId, view });
   const isRefreshPendingRef = useRef(false);
   const hasQueuedRefreshRef = useRef(false);
 
   useEffect(() => {
-    selectedThreadIdRef.current = selectedThreadId;
-  }, [selectedThreadId]);
+    locationRef.current = { surface, threadId, view };
+  }, [surface, threadId, view]);
 
   const refreshMailbox = useCallback(() => {
     if (isRefreshPendingRef.current) {
@@ -44,20 +52,38 @@ export function useMailboxEvents({
 
   useEffect(() => {
     const eventSource = new EventSource("/v1/mailbox/events");
-    const handleMailboxChange = (message: MessageEvent<string>) => {
-      const event = parseMailboxChangeEvent(message.data);
+    const handleReady = (event: Event) => {
       if (
-        event &&
-        shouldRefreshMailboxForEvent(event, selectedThreadIdRef.current)
+        event instanceof MessageEvent &&
+        typeof event.data === "string" &&
+        parseMailboxStreamReadyEvent(event.data)
       ) {
+        setStatus("ready");
         refreshMailbox();
       }
     };
+    const handleOpen = () => setStatus("connecting");
+    const handleError = () => setStatus("degraded");
+    eventSource.addEventListener("open", handleOpen);
+    eventSource.addEventListener("error", handleError);
+    const handleMailboxChange = (event: Event) => {
+      if (!(event instanceof MessageEvent) || typeof event.data !== "string") return;
+      const change = parseMailboxChangeEvent(event.data);
+      if (change && isRelevantMailboxChange(change, locationRef.current)) {
+        refreshMailbox();
+      }
+    };
+    eventSource.addEventListener("mailbox-ready", handleReady);
     eventSource.addEventListener("mailbox", handleMailboxChange);
 
     return () => {
+      eventSource.removeEventListener("mailbox-ready", handleReady);
       eventSource.removeEventListener("mailbox", handleMailboxChange);
+      eventSource.removeEventListener("open", handleOpen);
+      eventSource.removeEventListener("error", handleError);
       eventSource.close();
     };
   }, [refreshMailbox]);
+
+  return status;
 }

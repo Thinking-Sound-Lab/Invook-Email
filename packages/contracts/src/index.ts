@@ -1,4 +1,5 @@
 export * from "./gmail-compose";
+export * from "./mailbox-events";
 
 export type AccountSyncStage = "pending" | "running" | "complete" | "failed";
 
@@ -192,8 +193,6 @@ export type MailboxAccount = {
   image: string | null;
   status: "connected" | "reconnect_required" | "disconnected";
   syncState: AccountSyncState;
-  mailSyncProgress: MailSyncProgress;
-  indexingProgress: IndexingProgress;
   lastSyncedAt: string | null;
   replica: {
     state:
@@ -337,7 +336,6 @@ export type MailboxSelectedThread = Omit<MailboxThreadSummary, "snippet"> & {
 export type MailboxPagination = {
   newerCursor: string | null;
   olderCursor: string | null;
-  totalThreadCount: number;
 };
 
 export type MailboxSidebarCounts = {
@@ -345,17 +343,26 @@ export type MailboxSidebarCounts = {
   labels: Record<string, number>;
 };
 
-export type MailboxWorkspace = {
+export type MailboxShell = {
   aiConfigured: boolean;
-  batchConfigured: boolean;
   user: SignedInUser;
   account: MailboxAccount;
-  memories: MemoryEntry[];
   invookLabels: InvookLabel[];
-  sidebarCounts: MailboxSidebarCounts;
+};
+
+export type MailboxThreadPage = {
   pagination: MailboxPagination;
   threads: MailboxThreadSummary[];
-  selectedThread: MailboxSelectedThread | null;
+};
+
+export type MailboxThreadDetail = {
+  thread: MailboxSelectedThread;
+  invookLabels: InvookLabel[];
+};
+
+export type MailboxSettings = {
+  memories: MemoryEntry[];
+  invookLabels: InvookLabel[];
 };
 
 export type ApiProblem = {
@@ -365,15 +372,38 @@ export type ApiProblem = {
   requestId: string;
 };
 
-export type MailboxChangeEvent = {
-  id: string;
+type MailboxChangeEventBase = {
   accountId: string;
-  changeType:
-    | "replica_ready"
-    | "history_applied"
-    | "repair_complete"
-    | "drafts_changed"
-    | "labels_changed";
-  changedThreadIds: string[];
   createdAt: string;
+};
+
+export type MailboxChangeEvent = MailboxChangeEventBase & (
+  | {
+      changeType: "replica_ready";
+    }
+  | {
+      changeType: "history_applied";
+      reason: "history_catchup" | "message_refresh";
+      changedThreadIds: string[];
+      refreshedThreadIds: string[];
+    }
+  | {
+      changeType: "drafts_changed";
+      kind: "snapshot" | "upsert" | "delete";
+      affectedThreadIds: string[];
+    }
+  | {
+      changeType: "labels_changed";
+      kind: "analysis_resolution" | "decision";
+      affectedThreadIds: string[];
+    }
+  | {
+      changeType: "safe_invalidation";
+      reason: "legacy_or_malformed";
+    }
+);
+
+export type MailboxStreamReadyEvent = {
+  type: "mailbox_stream_ready";
+  accountId: string;
 };

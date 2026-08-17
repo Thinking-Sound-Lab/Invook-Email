@@ -9,11 +9,11 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
-  InvookLabel,
   MailboxAccount,
-  MemoryEntry,
+  MailboxSettings,
 } from "@invook/contracts";
-import { useState } from "react";
+import axios from "axios";
+import { useCallback, useEffect, useState } from "react";
 
 import { SignOutButton } from "@/components/auth/sign-out-button";
 import { Button } from "@/components/ui/button";
@@ -121,26 +121,76 @@ function BillingSettings() {
 
 export interface SettingsDialogProps {
   account: MailboxAccount;
-  memories: MemoryEntry[];
-  invookLabels: InvookLabel[];
   aiConfigured: boolean;
   triggerClassName?: string;
 }
 
 export function SettingsDialog({
   account,
-  memories,
-  invookLabels,
   aiConfigured,
   triggerClassName,
 }: SettingsDialogProps) {
   const [isOpen, setIsOpen] = useState(false);
+  const [settings, setSettings] = useState<MailboxSettings | null>(null);
+  const [loadState, setLoadState] = useState<"idle" | "loading" | "available" | "error">(
+    "idle",
+  );
   const liveMemoryState = useAccountSyncStore(
     (state) => state.progress?.memory,
   );
+  const loadSettings = useCallback(async (): Promise<void> => {
+    setLoadState("loading");
+    try {
+      const response = await axios.get<MailboxSettings>("/v1/mailbox/settings");
+      setSettings(response.data);
+      setLoadState("available");
+    } catch {
+      setSettings(null);
+      setLoadState("error");
+    }
+  }, []);
+
+  const handleOpenChange = useCallback(
+    (nextIsOpen: boolean): void => {
+      setIsOpen(nextIsOpen);
+      if (nextIsOpen && loadState === "idle") void loadSettings();
+    },
+    [loadSettings, loadState],
+  );
+
+  useEffect(() => {
+    return useAccountSyncStore.subscribe((state, previousState) => {
+      if (
+        isOpen &&
+        settings &&
+        previousState.progress?.memory !== "complete" &&
+        state.progress?.memory === "complete"
+      ) {
+        void loadSettings();
+      }
+    });
+  }, [isOpen, loadSettings, settings]);
+
+  const settingsUnavailable = (
+    <div className="mx-auto max-w-sm px-6 py-16 text-center" role={loadState === "error" ? "alert" : "status"}>
+      <p className="text-sm font-medium">
+        {loadState === "error" ? "Settings are unavailable" : "Loading settings"}
+      </p>
+      <p className="mt-2 text-xs leading-5 text-muted-foreground">
+        {loadState === "error"
+          ? "Invook could not read the current mailbox settings."
+          : "Invook is reading the current mailbox settings."}
+      </p>
+      {loadState === "error" ? (
+        <Button type="button" variant="ghost" size="sm" className="mt-3" onClick={() => void loadSettings()}>
+          Try again
+        </Button>
+      ) : null}
+    </div>
+  );
 
   return (
-    <Dialog open={isOpen} onOpenChange={setIsOpen}>
+    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <button
           type="button"
@@ -202,14 +252,22 @@ export function SettingsDialog({
             <AccountSettings account={account} aiConfigured={aiConfigured} />
           </TabsContent>
           <TabsContent value="memory" className="min-h-0 overflow-y-auto">
-            <MemorySettings
-              memories={memories}
-              syncState={liveMemoryState ?? account.syncState.memory}
-              aiConfigured={aiConfigured}
-            />
+            {settings ? (
+              <MemorySettings
+                memories={settings.memories}
+                syncState={liveMemoryState ?? account.syncState.memory}
+                aiConfigured={aiConfigured}
+                onChanged={loadSettings}
+              />
+            ) : settingsUnavailable}
           </TabsContent>
           <TabsContent value="labels" className="min-h-0 overflow-y-auto">
-            <LabelSettings invookLabels={invookLabels} />
+            {settings ? (
+              <LabelSettings
+                invookLabels={settings.invookLabels}
+                onChanged={loadSettings}
+              />
+            ) : settingsUnavailable}
           </TabsContent>
           <TabsContent value="billing" className="min-h-0 overflow-y-auto">
             <BillingSettings />

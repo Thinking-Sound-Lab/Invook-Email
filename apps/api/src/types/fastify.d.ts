@@ -9,6 +9,7 @@ declare module "fastify" {
 
   interface FastifyRequest {
     invookSession: InvookSession | null;
+    invookStartedAt: number;
   }
 }
 

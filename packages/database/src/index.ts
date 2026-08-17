@@ -16,6 +16,8 @@ export * from "./gmail-draft-writes";
 export * from "./message-label-analysis";
 export * from "./embedding-indexing";
 export * from "./mail-sync-progress";
+export * from "./mailbox-change-events";
+export * from "./mailbox-resources";
 export * from "./mailbox-query";
 export * from "./gmail-watch";
 export * from "./repositories";

@@ -3,7 +3,6 @@
 import { Add01Icon, Brain02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type { AccountSyncStage, MemoryEntry, MemoryType } from "@invook/contracts";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -27,6 +26,7 @@ export interface MemorySettingsProps {
   memories: MemoryEntry[];
   syncState: AccountSyncStage;
   aiConfigured: boolean;
+  onChanged: () => void | Promise<void>;
 }
 
 function isMemoryType(value: string): value is MemoryType {
@@ -37,8 +37,8 @@ export function MemorySettings({
   memories,
   syncState,
   aiConfigured,
+  onChanged,
 }: MemorySettingsProps) {
-  const router = useRouter();
   const [activeType, setActiveType] = useState<MemoryType>("preference");
   const [editor, setEditor] = useState<MemoryEditorState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,15 +78,15 @@ export function MemorySettings({
     setError(null);
     try {
       await deleteMemory(memory.id);
-      router.refresh();
+      await onChanged();
     } catch (cause) {
       setError(apiErrorMessage(cause, "Invook could not delete this memory."));
     }
   }
 
-  function handleMemorySaved() {
+  async function handleMemorySaved() {
     setEditor(null);
-    router.refresh();
+    await onChanged();
   }
 
   return (

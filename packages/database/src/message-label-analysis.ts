@@ -7,10 +7,10 @@ import {
   type Database,
   type DatabaseExecutor,
 } from "./client";
+import { insertMailboxChange } from "./mailbox-change-events";
 import {
   connectedAccounts,
   labels,
-  mailboxChangeEvents,
   messageLabelDecisions,
   messageLabels,
   messages,
@@ -217,21 +217,15 @@ async function insertResolutionEvent(
     state: "complete" | "failed";
   },
 ): Promise<string> {
-  const [event] = await database
-    .insert(mailboxChangeEvents)
-    .values({
-      userId: input.userId,
-      accountId: input.accountId,
-      changeType: "labels_changed",
-      payload: {
-        messageId: input.messageId,
-        changedThreadIds: [input.threadId],
-        labelAnalysisState: input.state,
-      },
-    })
-    .returning({ id: mailboxChangeEvents.id });
-  if (!event) throw new Error("The mailbox label-analysis event was not stored.");
-  return event.id;
+  return insertMailboxChange(database, {
+    userId: input.userId,
+    accountId: input.accountId,
+    changeType: "labels_changed",
+    payload: {
+      kind: "analysis_resolution",
+      affectedThreadIds: [input.threadId],
+    },
+  });
 }
 
 function checkpointMatches(
@@ -937,14 +931,13 @@ export async function completeHistoricalMessageLabelAnalysis(
 
     if (isMessageLabelAnalysisVisible(target.labelAnalysisState)) {
       await refreshVisibleThread(transaction, target.threadId);
-      await transaction.insert(mailboxChangeEvents).values({
+      await insertMailboxChange(transaction, {
         userId: input.userId,
         accountId: input.accountId,
         changeType: "labels_changed",
         payload: {
-          messageId: target.messageId,
-          changedThreadIds: [target.threadId],
-          labelId: target.labelId,
+          kind: "decision",
+          affectedThreadIds: [target.threadId],
         },
       });
     }

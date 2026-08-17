@@ -8,6 +8,10 @@ import { v4 as uuidv4 } from "uuid";
 
 import type { Database } from "./client";
 import {
+  getMailboxThreadDetail,
+  listMailboxThreads,
+} from "./mailbox-resources";
+import {
   beginHistoricalMessageLabelAnalysis,
   beginMessageLabelAnalysis,
   completeHistoricalMessageLabelAnalysis,
@@ -24,7 +28,6 @@ import {
 } from "./replica";
 import {
   createInvookLabel,
-  getMailboxWorkspace,
   updateInvookLabel,
   upsertIndexedMessage,
 } from "./repositories";
@@ -211,7 +214,7 @@ test(
         .from(messages)
         .where(eq(messages.id, initial.messageId));
       assert.equal(initialStored?.state, "pending");
-      assert.deepEqual((await getMailboxWorkspace(userId, {}, database))?.threads, []);
+      assert.deepEqual((await listMailboxThreads(userId, {}, database))?.threads, []);
 
       const initialCheckpoint = await queuedAnalysisCheckpoint(
         database,
@@ -302,14 +305,13 @@ test(
         ),
       );
       assert.equal(eventsAfter[0]?.value, (eventsBefore[0]?.value ?? 0) + 1);
-      const visible = await getMailboxWorkspace(
-        userId,
-        { selectedThreadId: initial.threadId },
-        database,
-      );
+      const [visible, visibleDetail] = await Promise.all([
+        listMailboxThreads(userId, {}, database),
+        getMailboxThreadDetail(userId, initial.threadId, database),
+      ]);
       assert.equal(visible?.threads[0]?.isOthers, false);
-      assert.equal(visible?.selectedThread?.messages[0]?.labelAnalysisState, "complete");
-      const important = await getMailboxWorkspace(
+      assert.equal(visibleDetail?.thread.messages[0]?.labelAnalysisState, "complete");
+      const important = await listMailboxThreads(
         userId,
         { view: "important" },
         database,
@@ -365,12 +367,12 @@ test(
         providerThreadId: "initial-thread",
         status: "editing",
       });
-      const workspaceWithPendingDraft = await getMailboxWorkspace(
+      const workspaceWithPendingDraft = await getMailboxThreadDetail(
         userId,
-        { selectedThreadId: initial.threadId },
+        initial.threadId,
         database,
       );
-      assert.deepEqual(workspaceWithPendingDraft?.selectedThread?.gmailDrafts, []);
+      assert.deepEqual(workspaceWithPendingDraft?.thread.gmailDrafts, []);
       assert.equal(
         await getGmailDraftResourceForUser({ userId, gmailDraftId }, database),
         null,
@@ -550,7 +552,7 @@ test(
         },
         database,
       );
-      const historyWorkspace = await getMailboxWorkspace(userId, {}, database);
+      const historyWorkspace = await listMailboxThreads(userId, {}, database);
       assert.equal(
         historyWorkspace?.threads.find(
           (thread) => thread.id === historyMessage.threadId,
@@ -597,17 +599,16 @@ test(
         },
         database,
       );
-      const othersWorkspace = await getMailboxWorkspace(
-        userId,
-        { selectedThreadId: othersMessage.threadId },
-        database,
-      );
+      const [othersWorkspace, othersDetail] = await Promise.all([
+        listMailboxThreads(userId, {}, database),
+        getMailboxThreadDetail(userId, othersMessage.threadId, database),
+      ]);
       assert.equal(
         othersWorkspace?.threads.find((thread) => thread.id === othersMessage.threadId)
           ?.isOthers,
         true,
       );
-      assert.equal(othersWorkspace?.selectedThread?.messages[0]?.isOthers, true);
+      assert.equal(othersDetail?.thread.messages[0]?.isOthers, true);
 
       const staleMessage = await upsertIndexedMessage(
         indexedMessage({
@@ -781,15 +782,14 @@ test(
         ),
         true,
       );
-      const workspace = await getMailboxWorkspace(
-        userId,
-        { selectedThreadId: stored.threadId },
-        database,
-      );
+      const [workspace, detail] = await Promise.all([
+        listMailboxThreads(userId, {}, database),
+        getMailboxThreadDetail(userId, stored.threadId, database),
+      ]);
       assert.equal(workspace?.threads[0]?.hasLabelAnalysisFailure, true);
       assert.equal(workspace?.threads[0]?.isOthers, false);
-      assert.equal(workspace?.selectedThread?.messages[0]?.labelAnalysisState, "failed");
-      assert.equal(workspace?.selectedThread?.messages[0]?.isOthers, false);
+      assert.equal(detail?.thread.messages[0]?.labelAnalysisState, "failed");
+      assert.equal(detail?.thread.messages[0]?.isOthers, false);
       const decisions = await database
         .select({ labelId: messageLabelDecisions.labelId })
         .from(messageLabelDecisions)

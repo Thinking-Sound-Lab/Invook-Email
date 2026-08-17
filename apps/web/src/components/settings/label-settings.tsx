@@ -7,7 +7,6 @@ import type {
   InvookLabel,
   PreviewInvookLabelRequest,
 } from "@invook/contracts";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -24,10 +23,10 @@ import { LabelSettingsRow } from "./label-settings-row";
 
 export interface LabelSettingsProps {
   invookLabels: InvookLabel[];
+  onChanged: () => void | Promise<void>;
 }
 
-export function LabelSettings({ invookLabels }: LabelSettingsProps) {
-  const router = useRouter();
+export function LabelSettings({ invookLabels, onChanged }: LabelSettingsProps) {
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [deletingLabelKey, setDeletingLabelKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +39,7 @@ export function LabelSettings({ invookLabels }: LabelSettingsProps) {
 
   async function handleCreateLabel(request: CreateInvookLabelRequest) {
     await createInvookLabel(request);
-    router.refresh();
+    await onChanged();
   }
 
   function handlePreviewLabel(request: PreviewInvookLabelRequest) {
@@ -52,7 +51,7 @@ export function LabelSettings({ invookLabels }: LabelSettingsProps) {
     setError(null);
     try {
       await deleteInvookLabel(label.id);
-      router.refresh();
+      await onChanged();
     } catch (cause) {
       setError(apiErrorMessage(cause, "Invook could not delete this label."));
     } finally {

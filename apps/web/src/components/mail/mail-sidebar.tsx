@@ -1,3 +1,5 @@
+"use client";
+
 import {
   AiMagicIcon,
   Delete02Icon,
@@ -16,13 +18,10 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import type {
-  InvookLabel,
-  MailboxAccount,
   MailboxSidebarCounts,
-  MemoryEntry,
-  SignedInUser,
 } from "@invook/contracts";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 
 import { SignOutButton } from "@/components/auth/sign-out-button";
 import { SettingsDialog } from "@/components/settings/settings-dialog";
@@ -35,6 +34,7 @@ import { cn } from "@/lib/utils";
 
 import { initials } from "./mail-format";
 import { MailNavigationPending } from "./mail-navigation-pending";
+import { useMailShell } from "./mail-shell-provider";
 import { listSidebarLabels } from "./mail-sidebar-labels";
 import type { MailboxView, MailSurface } from "./types";
 
@@ -101,26 +101,33 @@ function NavLink({
 }
 
 export interface MailSidebarProps {
-  user: SignedInUser;
-  account: MailboxAccount;
-  currentView: MailboxView;
-  currentSurface: MailSurface;
-  memories: MemoryEntry[];
-  invookLabels: InvookLabel[];
-  sidebarCounts: MailboxSidebarCounts;
-  aiConfigured: boolean;
+  sidebarCounts: MailboxSidebarCounts | null;
 }
 
 export function MailSidebar({
-  user,
-  account,
-  currentView,
-  currentSurface,
-  memories,
-  invookLabels,
   sidebarCounts,
-  aiConfigured,
 }: MailSidebarProps) {
+  const { account, aiConfigured, invookLabels, user } = useMailShell();
+  const searchParams = useSearchParams();
+  const requestedSurface = searchParams.get("surface");
+  const currentSurface: MailSurface = searchParams.has("thread")
+    ? "mail"
+    : requestedSurface === "compose" ||
+        requestedSurface === "search" ||
+        requestedSurface === "automations"
+      ? requestedSurface
+      : "mail";
+  const requestedView = searchParams.get("view");
+  const currentView: MailboxView = requestedView?.startsWith("label:")
+    ? (requestedView as `label:${string}`)
+    : requestedView === "important" ||
+        requestedView === "starred" ||
+        requestedView === "drafts" ||
+        requestedView === "sent" ||
+        requestedView === "spam" ||
+        requestedView === "trash"
+      ? requestedView
+      : "all";
   const labels = listSidebarLabels(invookLabels);
   const connectedAccountImage =
     account.image ??
@@ -160,8 +167,6 @@ export function MailSidebar({
         ))}
         <SettingsDialog
           account={account}
-          memories={memories}
-          invookLabels={invookLabels}
           aiConfigured={aiConfigured}
           triggerClassName={navItemClassName(false)}
         />
@@ -183,7 +188,7 @@ export function MailSidebar({
             icon={LabelImportantIcon}
             active={currentSurface === "mail" && currentView === "important"}
             href="/mail?view=important"
-            count={sidebarCounts.views.important}
+            count={sidebarCounts?.views.important}
           />
           {labels.map((label) => {
             const view = `label:${label.id}` as const;
@@ -194,7 +199,7 @@ export function MailSidebar({
                 icon={AiMagicIcon}
                 active={currentSurface === "mail" && currentView === view}
                 href={`/mail?view=${view}`}
-                count={sidebarCounts.labels[label.id] ?? 0}
+                count={sidebarCounts?.labels[label.id]}
               />
             );
           })}
@@ -209,7 +214,7 @@ export function MailSidebar({
             icon={InboxIcon}
             active={currentSurface === "mail" && currentView === "all"}
             href="/mail?view=all"
-            count={sidebarCounts.views.all}
+            count={sidebarCounts?.views.all}
           />
           {mailItems.map((item) => (
             <NavLink
@@ -218,10 +223,16 @@ export function MailSidebar({
               icon={item.icon}
               active={currentSurface === "mail" && currentView === item.view}
               href={`/mail?view=${item.view}`}
-              count={sidebarCounts.views[item.view]}
+              count={sidebarCounts?.views[item.view]}
             />
           ))}
         </nav>
+
+        {!sidebarCounts ? (
+          <p className="mt-3 hidden px-2.5 text-[11px] text-sidebar-foreground/45 lg:block" role="status">
+            Mailbox counts are unavailable.
+          </p>
+        ) : null}
 
         <p className="mb-1.5 mt-5 hidden px-2.5 text-xs font-medium text-sidebar-foreground/35 lg:block">
           Inboxes

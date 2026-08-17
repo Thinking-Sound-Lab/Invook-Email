@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 import fastifyCookie from "@fastify/cookie";
 import Fastify, { type FastifyRequest } from "fastify";
 import { v4 as uuidv4 } from "uuid";
@@ -56,13 +58,20 @@ export async function buildApi(options: {
   });
 
   api.decorateRequest("invookSession", null);
+  api.decorateRequest("invookStartedAt", 0);
   api.decorate("invookAuth", options.auth ?? createAuthService());
   await api.register(fastifyCookie);
 
   api.addHook("onRequest", async (request, reply) => {
+    request.invookStartedAt = performance.now();
     reply.header("cache-control", "no-store");
     reply.header("x-content-type-options", "nosniff");
     reply.header("x-request-id", request.id);
+  });
+  api.addHook("onSend", async (request, reply, payload) => {
+    const duration = Math.max(0, performance.now() - request.invookStartedAt);
+    reply.header("server-timing", `api;dur=${duration.toFixed(1)}`);
+    return payload;
   });
 
   api.removeAllContentTypeParsers();

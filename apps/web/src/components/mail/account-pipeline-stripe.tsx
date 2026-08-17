@@ -1,7 +1,5 @@
 "use client";
 
-import type { AccountSyncStatusEvent } from "@invook/contracts";
-
 import { Progress } from "@/components/ui/progress";
 import { useAccountSyncEvents } from "@/hooks/use-account-sync-events";
 import { cn } from "@/lib/utils";
@@ -10,15 +8,22 @@ import { getAccountPipelinePresentation } from "./account-pipeline-state";
 
 export interface AccountPipelineStripeProps {
   accountEmail: string;
-  initialProgress: AccountSyncStatusEvent;
 }
 
 export function AccountPipelineStripe({
   accountEmail,
-  initialProgress,
 }: AccountPipelineStripeProps) {
-  const progress = useAccountSyncEvents(initialProgress);
-  const presentation = getAccountPipelinePresentation(progress);
+  const stream = useAccountSyncEvents();
+  if (stream.status !== "available") {
+    return (
+      <div role={stream.status === "unavailable" ? "alert" : "status"} className="flex h-10 shrink-0 items-center justify-center bg-sidebar px-4 text-xs text-sidebar-foreground/70">
+        {stream.status === "unavailable"
+          ? `Synchronization status is unavailable for ${accountEmail}.`
+          : `Reading synchronization status for ${accountEmail}…`}
+      </div>
+    );
+  }
+  const presentation = getAccountPipelinePresentation(stream.progress);
   if (!presentation) return null;
 
   return (

@@ -2,7 +2,7 @@
 
 import { StarIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { AccountSyncStage, MailboxWorkspace } from "@invook/contracts";
+import type { MailboxThreadPage } from "@invook/contracts";
 import axios from "axios";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -16,6 +16,7 @@ import { formatMailText, threadPeople } from "./mail-format";
 import { mailLabelColorClassName } from "./mail-label-colors";
 import { LocalMailDate } from "./local-mail-date";
 import { MailNavigationPending } from "./mail-navigation-pending";
+import { useMailShell } from "./mail-shell-provider";
 import { listMailRowLabels, type MailRowLabel } from "./mail-row-labels";
 import { mergeMailboxThreads } from "./mail-thread-pages";
 import type {
@@ -210,13 +211,10 @@ function MailRows({
 }
 
 export interface MailListProps {
-  accountEmail: string;
   currentView: MailboxView;
   initialOlderCursor: string | null;
-  mailSyncState: AccountSyncStage;
   threads: MailThreadSummary[];
   query?: string;
-  title?: string;
 }
 
 interface MailContinuation {
@@ -225,14 +223,17 @@ interface MailContinuation {
 }
 
 export function MailList({
-  accountEmail,
   currentView,
   initialOlderCursor,
-  mailSyncState,
   threads,
   query,
-  title,
 }: MailListProps) {
+  const { account, invookLabels } = useMailShell();
+  const accountEmail = account.email;
+  const mailSyncState = account.syncState.mailSync;
+  const title = currentView.startsWith("label:")
+    ? invookLabels.find((label) => label.id === currentView.slice(6))?.name
+    : undefined;
   const [continuation, setContinuation] = useState<MailContinuation | null>(
     null,
   );
@@ -270,7 +271,7 @@ export function MailList({
     setLoadState("loading");
 
     try {
-      const response = await axios.get<MailboxWorkspace>("/v1/mailbox", {
+      const response = await axios.get<MailboxThreadPage>("/v1/mailbox/threads", {
         params: { view: currentView, cursor: requestedCursor },
         signal: requestController.signal,
       });

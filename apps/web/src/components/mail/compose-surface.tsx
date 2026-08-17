@@ -29,12 +29,11 @@ import {
   updateGmailComposeDraft,
 } from "@/lib/api/compose-drafts";
 import { apiErrorMessage } from "@/lib/http-error";
+import { useMailShell } from "./mail-shell-provider";
 
-interface ComposeSurfaceProps {
-  gmailAccountId: string;
-}
-
-export function ComposeSurface({ gmailAccountId }: ComposeSurfaceProps) {
+export function ComposeSurface() {
+  const { account } = useMailShell();
+  const gmailAccountId = account.id;
   const [state, dispatch] = useReducer(
     composeDraftReducer,
     undefined,
