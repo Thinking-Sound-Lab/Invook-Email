@@ -11,14 +11,20 @@ export interface SubmitThreadReadAttemptInput {
 
 export interface GetThreadReadTrackerKeyInput {
   isUnread: boolean;
+  providerHistoryIds: Array<string | null>;
   threadId: string;
 }
 
 export function getThreadReadTrackerKey({
   isUnread,
+  providerHistoryIds,
   threadId,
 }: GetThreadReadTrackerKeyInput): string {
-  return `${threadId}:${isUnread ? "unread" : "read"}`;
+  const providerHistoryVersion = providerHistoryIds
+    .map((providerHistoryId) => providerHistoryId ?? "")
+    .sort()
+    .join(",");
+  return `${threadId}:${isUnread ? "unread" : "read"}:${providerHistoryVersion}`;
 }
 
 export async function submitThreadReadAttempt({

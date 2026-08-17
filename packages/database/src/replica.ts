@@ -773,6 +773,7 @@ export async function applyGmailHistoryBatch(
     }
 
     const changedThreadIds = new Set<string>();
+    const refreshedThreadIds = new Set<string>();
     const executor = transaction as unknown as Database;
     for (const message of input.messages) {
       const result = await upsertIndexedMessage(message, executor);
@@ -791,8 +792,9 @@ export async function applyGmailHistoryBatch(
         },
         executor,
       );
-      if (result.changed && result.threadId && result.isVisible) {
-        changedThreadIds.add(result.threadId);
+      if (result.threadId && result.isVisible) {
+        refreshedThreadIds.add(result.threadId);
+        if (result.changed) changedThreadIds.add(result.threadId);
       }
     }
     for (const deletion of input.deletedMessageIds) {
@@ -828,7 +830,8 @@ export async function applyGmailHistoryBatch(
       .update(connectedAccounts)
       .set({ lastSyncedAt: new Date(), updatedAt: new Date() })
       .where(eq(connectedAccounts.id, input.accountId));
-    const eventId = changedThreadIds.size > 0
+    for (const threadId of changedThreadIds) refreshedThreadIds.add(threadId);
+    const eventId = refreshedThreadIds.size > 0
       ? await insertMailboxChange(transaction, {
           userId: input.userId,
           accountId: input.accountId,
@@ -836,6 +839,7 @@ export async function applyGmailHistoryBatch(
           payload: {
             historyCursor: input.nextCursor,
             changedThreadIds: Array.from(changedThreadIds),
+            refreshedThreadIds: Array.from(refreshedThreadIds),
           },
         })
       : null;

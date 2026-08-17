@@ -73,7 +73,13 @@ export function ThreadReader({
         </div>
       </header>
       <ThreadReadTracker
-        key={getThreadReadTrackerKey({ threadId: thread.id, isUnread })}
+        key={getThreadReadTrackerKey({
+          threadId: thread.id,
+          isUnread,
+          providerHistoryIds: thread.messages.map(
+            (message) => message.providerHistoryId,
+          ),
+        })}
         threadId={thread.id}
         isUnread={isUnread}
       />

@@ -80,10 +80,12 @@ test("canonical read convergence remounts a later unread attempt", () => {
   const unreadKey = getThreadReadTrackerKey({
     threadId: "thread-id",
     isUnread: true,
+    providerHistoryIds: ["100"],
   });
   const readKey = getThreadReadTrackerKey({
     threadId: "thread-id",
     isUnread: false,
+    providerHistoryIds: ["110"],
   });
 
   assert.notEqual(unreadKey, readKey);
@@ -91,7 +93,23 @@ test("canonical read convergence remounts a later unread attempt", () => {
     getThreadReadTrackerKey({
       threadId: "thread-id",
       isUnread: true,
+      providerHistoryIds: ["100"],
     }),
     unreadKey,
   );
+});
+
+test("coalesced history remounts an unread thread without a boolean transition", () => {
+  const beforeCatchup = getThreadReadTrackerKey({
+    threadId: "thread-id",
+    isUnread: true,
+    providerHistoryIds: ["100", null],
+  });
+  const afterCatchup = getThreadReadTrackerKey({
+    threadId: "thread-id",
+    isUnread: true,
+    providerHistoryIds: ["120", null],
+  });
+
+  assert.notEqual(afterCatchup, beforeCatchup);
 });
