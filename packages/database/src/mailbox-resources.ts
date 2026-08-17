@@ -188,7 +188,8 @@ async function listInvookLabels(
 function threadIsOthersExpression() {
   return sql<boolean>`exists (
     select 1 from ${messages} completed_message
-    where completed_message.thread_id = ${threads.id}
+    where completed_message.thread_id =
+      ${threads}.${sql.identifier(threads.id.name)}
       and completed_message.label_analysis_state = 'complete'
   ) and not exists (
     select 1 from ${messages} other_message
@@ -196,7 +197,8 @@ function threadIsOthersExpression() {
       on other_membership.message_id = other_message.id
     inner join ${labels} other_label
       on other_label.id = other_membership.label_id
-    where other_message.thread_id = ${threads.id}
+    where other_message.thread_id =
+      ${threads}.${sql.identifier(threads.id.name)}
       and other_message.label_analysis_state in ('complete', 'failed')
       and (
         other_label.kind = 'invook'
@@ -211,7 +213,8 @@ function threadIsOthersExpression() {
 function threadHasLabelAnalysisFailureExpression() {
   return sql<boolean>`exists (
     select 1 from ${messages} failed_message
-    where failed_message.thread_id = ${threads.id}
+    where failed_message.thread_id =
+      ${threads}.${sql.identifier(threads.id.name)}
       and failed_message.label_analysis_state = 'failed'
   )`;
 }
@@ -534,7 +537,8 @@ export async function getMailboxThreadDetail(
             select 1 from ${messageLabels} other_membership
             inner join ${labels} other_label
               on other_label.id = other_membership.label_id
-            where other_membership.message_id = ${messages.id}
+            where other_membership.message_id =
+              ${messages}.${sql.identifier(messages.id.name)}
               and (
                 other_label.kind = 'invook'
                 or (
