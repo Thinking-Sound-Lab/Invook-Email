@@ -17,6 +17,7 @@ import {
 import {
   createDailyGmailWatchRenewalStep,
   createGmailWatchRecoveryStep,
+  createImmediateGmailRepairRecoveryStep,
 } from "./gmail-watch-schedule";
 import {
   connectedAccounts,
@@ -28,6 +29,7 @@ import { enqueueWorkflowStep } from "./workflows";
 export {
   createDailyGmailWatchRenewalStep,
   createGmailWatchRecoveryStep,
+  createImmediateGmailRepairRecoveryStep,
 } from "./gmail-watch-schedule";
 
 export function enqueueDailyGmailWatchRenewal(

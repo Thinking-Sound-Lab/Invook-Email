@@ -62,7 +62,7 @@ Watch renewal is a durable daily one-shot action. It persists the renewed watch,
 
 If Gmail rejects an expired history cursor, Invook captures a fresh provider baseline, renews the watch, and creates an exceptional repair-type `mail_sync_run`. Repair uses the same paged discovery, bounded message batches with per-message storage checkpoints, and per-message label-analysis jobs as initial synchronization. Pub/Sub catch-up is serialized under the account lock and may advance the committed cursor while the snapshot proceeds, but keeps the replica in `repairing`. The finalizer still replays from the repair baseline, reconciles the full snapshot, and is the only repair path that marks the replica ready. A reconnect-required account follows the same durable repair-run path after successful OAuth.
 
-Permanent credential rejection atomically marks the account `reconnect_required`, fails active Gmail work, and prevents already-published jobs from reactivating terminal state. Transient provider and transport failures retain bounded workflow retries.
+Permanent credential rejection atomically marks the account `reconnect_required`, fails active Gmail work, and prevents already-published jobs from reactivating terminal state. Transient provider and transport failures retain bounded workflow retries. If an initial synchronization exhausts those retries, the same failure transaction creates one immediate idempotent Gmail control step. That step renews the watch, captures a fresh baseline, and starts a repair run while preserving the highest pending notification cursor. A failed repair does not recursively create another immediate repair; daily watch recovery remains its bounded fallback.
 
 ## Provider writes
 

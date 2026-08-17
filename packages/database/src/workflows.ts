@@ -31,7 +31,10 @@ import {
   temporalCommands,
   workflowSteps,
 } from "./schema";
-import { createGmailWatchRecoveryStep } from "./gmail-watch-schedule";
+import {
+  createGmailWatchRecoveryStep,
+  createImmediateGmailRepairRecoveryStep,
+} from "./gmail-watch-schedule";
 import { hasMailSyncProgressAdvanced } from "./mail-sync-progress";
 import { toPostgresTextProjection } from "./text";
 import type { WorkflowStepInput, WorkflowStepJob } from "./types";
@@ -82,6 +85,7 @@ async function lockMailSyncRun(
       id: mailSyncRuns.id,
       userId: mailSyncRuns.userId,
       accountId: mailSyncRuns.accountId,
+      runType: mailSyncRuns.runType,
       discoveryComplete: mailSyncRuns.discoveryComplete,
     })
     .from(mailSyncRuns)
@@ -98,7 +102,7 @@ async function terminalizeMailSyncRun(
     failedAt: Date;
   },
   database: Database,
-): Promise<{ accountId: string } | null> {
+): Promise<{ accountId: string; runType: "initial" | "repair" } | null> {
   const run = await lockMailSyncRun({ runId: input.runId }, database);
   if (!run) return null;
 
@@ -161,7 +165,35 @@ async function terminalizeMailSyncRun(
       sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: run.accountId, state: account.syncState.indexing })})`,
     );
   }
-  return { accountId: run.accountId };
+  return { accountId: run.accountId, runType: run.runType };
+}
+
+async function enqueueImmediateGmailRepairRecovery(
+  input: { accountId: string; failedRunId: string; failedAt: Date },
+  database: Database,
+): Promise<void> {
+  const [account] = await database
+    .select({ userId: connectedAccounts.userId })
+    .from(connectedAccounts)
+    .where(
+      and(
+        eq(connectedAccounts.id, input.accountId),
+        eq(connectedAccounts.status, "connected"),
+      ),
+    )
+    .limit(1);
+  if (!account) return;
+  await enqueueWorkflowStepsWithExecutor(
+    [
+      createImmediateGmailRepairRecoveryStep({
+        userId: account.userId,
+        accountId: input.accountId,
+        failedRunId: input.failedRunId,
+        now: input.failedAt,
+      }),
+    ],
+    database,
+  );
 }
 
 async function terminalizeGmailAccountForReconnect(
@@ -592,6 +624,47 @@ export async function getActiveRepairMailSyncRunContext(
   return run ?? null;
 }
 
+export async function enqueueFailedInitialGmailRepairRecoveries(
+  database: Database = getDatabase(),
+): Promise<number> {
+  const failedInitialRuns = await database
+    .select({
+      runId: mailSyncRuns.id,
+      userId: connectedAccounts.userId,
+      accountId: connectedAccounts.id,
+    })
+    .from(mailSyncRuns)
+    .innerJoin(
+      connectedAccounts,
+      eq(connectedAccounts.id, mailSyncRuns.accountId),
+    )
+    .innerJoin(
+      gmailReplicaStates,
+      eq(gmailReplicaStates.accountId, connectedAccounts.id),
+    )
+    .where(
+      and(
+        eq(mailSyncRuns.runType, "initial"),
+        eq(mailSyncRuns.status, "failed"),
+        eq(connectedAccounts.status, "connected"),
+        eq(gmailReplicaStates.state, "failed"),
+      ),
+    );
+
+  for (const run of failedInitialRuns) {
+    await enqueueWorkflowStep(
+      createImmediateGmailRepairRecoveryStep({
+        userId: run.userId,
+        accountId: run.accountId,
+        failedRunId: run.runId,
+        now: new Date(),
+      }),
+      database,
+    );
+  }
+  return failedInitialRuns.length;
+}
+
 export async function enqueuePendingGmailHistoryCatchups(
   database: Database = getDatabase(),
 ): Promise<number> {
@@ -997,6 +1070,10 @@ export async function failWorkflowStep(
       .returning({ id: workflowSteps.id });
 
     if (!updatedStep) return false;
+    let failedRun: {
+      accountId: string;
+      runType: "initial" | "repair";
+    } | null = null;
     if (input.terminal && input.step.accountId && input.reconnectRequired) {
       await terminalizeGmailAccountForReconnect(
         {
@@ -1007,10 +1084,20 @@ export async function failWorkflowStep(
         executor,
       );
     } else if (input.terminal && input.step.runId) {
-      await terminalizeMailSyncRun(
+      failedRun = await terminalizeMailSyncRun(
         {
           runId: input.step.runId,
           message,
+          failedAt,
+        },
+        executor,
+      );
+    }
+    if (failedRun?.runType === "initial" && input.step.runId) {
+      await enqueueImmediateGmailRepairRecovery(
+        {
+          accountId: failedRun.accountId,
+          failedRunId: input.step.runId,
           failedAt,
         },
         executor,

@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   createDailyGmailWatchRenewalStep,
   createGmailWatchRecoveryStep,
+  createImmediateGmailRepairRecoveryStep,
 } from "./gmail-watch";
 import {
   createGmailSyncMessageBatchSteps,
@@ -137,6 +138,27 @@ test("terminal watch recovery runs immediately when expiration is within a day",
   });
 
   assert.equal(step.payload?.runAt, "2026-08-13T10:00:00.000Z");
+});
+
+test("terminal initial synchronization failure creates an immediate repair trigger", () => {
+  const step = createImmediateGmailRepairRecoveryStep({
+    userId: "11111111-1111-4111-8111-111111111111",
+    accountId: "22222222-2222-4222-8222-222222222222",
+    failedRunId: "33333333-3333-4333-8333-333333333333",
+    now: new Date("2026-08-13T10:00:00.000Z"),
+  });
+
+  assert.deepEqual(step.payload, {
+    cadence: "recovery",
+    reason: "terminal_sync_failure_recovery",
+    failedRunId: "33333333-3333-4333-8333-333333333333",
+    runAt: "2026-08-13T10:00:00.000Z",
+  });
+  assert.equal(
+    step.idempotencyKey,
+    "gmail-repair-recovery:22222222-2222-4222-8222-222222222222:33333333-3333-4333-8333-333333333333",
+  );
+  assert.equal(activityTaskQueueForStepType(step.stepType), "gmail-control");
 });
 
 test("ready-replica derivations fan out to independent Temporal Activity task queues", () => {

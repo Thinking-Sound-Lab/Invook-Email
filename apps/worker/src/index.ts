@@ -52,6 +52,7 @@ import {
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
   enqueueImplausibleGmailMessageDateRepairs,
+  enqueueFailedInitialGmailRepairRecoveries,
   enqueuePendingGmailHistoryCatchups,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
@@ -2610,6 +2611,7 @@ async function run() {
       ),
     });
     await enqueueMissingMailSyncRuns();
+    await enqueueFailedInitialGmailRepairRecoveries();
     await enqueuePendingGmailHistoryCatchups();
     await enqueueReadyMailSyncFinalizers();
     await ensureDailyGmailWatchRenewals();
