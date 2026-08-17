@@ -110,8 +110,15 @@ services:
       AZURE_OPENAI_BATCH_DEPLOYMENT: ${AZURE_OPENAI_BATCH_DEPLOYMENT:-}
       AZURE_OPENAI_BATCH_INPUT_TOKEN_LIMIT: ${AZURE_OPENAI_BATCH_INPUT_TOKEN_LIMIT:-}
       AZURE_OPENAI_WEBHOOK_SECRET: ${AZURE_OPENAI_WEBHOOK_SECRET:-}
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-invook-mail}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-invook}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-invook-local-secret}
     depends_on:
       migrate:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "node", "-e", "import('./apps/api/node_modules/axios/index.js').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
