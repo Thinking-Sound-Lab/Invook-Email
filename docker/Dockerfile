@@ -13,6 +13,7 @@ COPY packages/auth/package.json ./packages/auth/package.json
 COPY packages/contracts/package.json ./packages/contracts/package.json
 COPY packages/database/package.json ./packages/database/package.json
 COPY packages/gmail/package.json ./packages/gmail/package.json
+COPY packages/mail-content/package.json ./packages/mail-content/package.json
 COPY packages/object-storage/package.json ./packages/object-storage/package.json
 RUN pnpm install --frozen-lockfile
 

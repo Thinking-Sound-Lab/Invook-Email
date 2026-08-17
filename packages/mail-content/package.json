@@ -1,22 +1,22 @@
 {
-  "name": "@invook/worker",
+  "name": "@invook/mail-content",
   "version": "0.2.0",
   "private": true,
   "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
-    "start": "node ../../scripts/run-with-root-env.mjs node_modules/tsx/dist/cli.mjs src/index.ts",
     "test": "node --import tsx --test src/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@invook/ai": "workspace:*",
-    "@invook/contracts": "workspace:*",
     "@invook/database": "workspace:*",
-    "@invook/gmail": "workspace:*",
-    "@invook/mail-content": "workspace:*",
     "@invook/object-storage": "workspace:*",
-    "bullmq": "^5.58.5",
-    "ioredis": "^5.7.0"
+    "axios": "^1.19.0",
+    "htmlparser2": "^12.0.0",
+    "ipaddr.js": "^2.5.0",
+    "postcss-value-parser": "^4.2.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

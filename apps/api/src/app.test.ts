@@ -35,7 +35,7 @@ const remoteImageCapabilitySecret =
   "test-only-remote-image-capability-secret-value";
 const attachmentChecksum = createHash("sha256").update(attachmentBytes).digest("hex");
 let attachmentObjectReadCount = 0;
-let remoteImageFetchCount = 0;
+let remoteImageCacheReadCount = 0;
 
 function getTestSession(headers: Headers): InvookSession | null {
   const cookie = headers.get("cookie") ?? "";
@@ -129,8 +129,9 @@ before(async () => {
             }
           : null,
       getImage: async (source) => {
-        remoteImageFetchCount += 1;
+        remoteImageCacheReadCount += 1;
         assert.match(source, /^https:\/\/images\.example\.com\//);
+        if (source === "https://images.example.com/tile.webp") return null;
         return { bytes: remoteImageBytes, contentType: "image/png" };
       },
     },
@@ -451,8 +452,8 @@ test("remote mail images require authentication and a valid message ID", async (
   assert.equal(invalidMessage.json().title, "Invalid message ID");
 });
 
-test("remote mail images authorize the owned message and exact stored source", async () => {
-  const fetchesBefore = remoteImageFetchCount;
+test("remote mail images serve only cached bytes for an owned exact source", async () => {
+  const readsBefore = remoteImageCacheReadCount;
   const deniedOwner = await api.inject({
     method: "GET",
     url: `/v1/messages/${remoteImageMessageId}/remote-image-capability`,
@@ -479,7 +480,7 @@ test("remote mail images authorize the owned message and exact stored source", a
     url: `/v1/messages/${remoteImageMessageId}/remote-image?${unknownSource.toString()}`,
   });
   assert.equal(deniedSource.statusCode, 404);
-  assert.equal(remoteImageFetchCount, fetchesBefore);
+  assert.equal(remoteImageCacheReadCount, readsBefore);
 
   const invalidCapability = new URLSearchParams({
     capability: `${capability}changed`,
@@ -490,6 +491,17 @@ test("remote mail images authorize the owned message and exact stored source", a
     url: `/v1/messages/${remoteImageMessageId}/remote-image?${invalidCapability.toString()}`,
   });
   assert.equal(deniedCapability.statusCode, 404);
+
+  const uncachedSource = new URLSearchParams({
+    capability,
+    source: "https://images.example.com/tile.webp",
+  });
+  const uncachedResponse = await api.inject({
+    method: "GET",
+    url: `/v1/messages/${remoteImageMessageId}/remote-image?${uncachedSource.toString()}`,
+  });
+  assert.equal(uncachedResponse.statusCode, 404);
+  assert.equal(uncachedResponse.json().title, "Remote image not available");
 
   const validSource = new URLSearchParams({
     capability,
@@ -517,7 +529,7 @@ test("remote mail images authorize the owned message and exact stored source", a
     url: `/v1/messages/${remoteImageMessageId}/remote-image?${imageSetSource.toString()}`,
   });
   assert.equal(imageSetResponse.statusCode, 200);
-  assert.equal(remoteImageFetchCount, fetchesBefore + 2);
+  assert.equal(remoteImageCacheReadCount, readsBefore + 3);
 });
 
 test("unknown routes use the API problem contract", async () => {

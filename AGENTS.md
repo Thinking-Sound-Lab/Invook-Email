@@ -49,6 +49,7 @@ packages/
   contracts/           Shared browser/server product and wire contracts
   database/            Schema, migrations, repositories, replica operations, and workflows
   gmail/               Google OAuth/OIDC, Gmail API, history mapping, and MIME parsing
+  mail-content/        Remote mail image discovery, safe prefetching, and cache access
   object-storage/      S3-compatible raw MIME and attachment storage
 docker/                 Container images and local service orchestration
 docs/                   Product and implementation contracts

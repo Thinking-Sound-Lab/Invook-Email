@@ -1,9 +1,14 @@
 import type { FastifyPluginAsync } from "fastify";
-import { Parser } from "htmlparser2";
-import valueParser from "postcss-value-parser";
 
 import type { RemoteMailImageCapabilityResponse } from "@invook/contracts";
 import { getMailboxMessageBodyForUser } from "@invook/database";
+import {
+  extractRemoteMailImageUrls,
+  getCachedRemoteMailImage,
+  normalizeRemoteMailImageUrl,
+  RemoteMailImageCacheUnavailableError,
+  type RemoteMailImage,
+} from "@invook/mail-content";
 
 import { requireSession, requireUuidParameter } from "../access";
 import { sendProblem } from "../responses";
@@ -11,16 +16,6 @@ import {
   createRemoteMailImageCapability,
   verifyRemoteMailImageCapability,
 } from "../services/remote-mail-image-capability";
-import {
-  normalizeRemoteMailImageUrl,
-  RemoteMailImageUnavailableError,
-  type RemoteMailImage,
-  UnsafeRemoteMailImageUrlError,
-} from "../services/remote-mail-image";
-import {
-  getRemoteMailImage,
-  RemoteMailImageCacheUnavailableError,
-} from "../services/remote-mail-image-cache";
 
 const MAXIMUM_SOURCE_LENGTH = 8_192;
 const MAXIMUM_CAPABILITY_LENGTH = 2_048;
@@ -31,69 +26,7 @@ export interface RemoteMailImageRouteDependencies {
     userId: string;
     messageId: string;
   }) => Promise<{ bodyHtml: string | null } | null>;
-  getImage?: (source: string) => Promise<RemoteMailImage>;
-}
-
-function unquoteCssUrl(value: string): string {
-  const trimmed = value.trim();
-  if (
-    trimmed.length >= 2 &&
-    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-      (trimmed.startsWith("'") && trimmed.endsWith("'")))
-  ) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function collectCssImageUrls(css: string, sources: Set<string>): void {
-  const parsed = valueParser(css);
-  parsed.walk((node) => {
-    if (
-      node.type === "function" &&
-      ["image-set", "-webkit-image-set"].includes(node.value.toLowerCase())
-    ) {
-      for (const imageSetNode of node.nodes) {
-        if (imageSetNode.type !== "string") continue;
-        const source = normalizeRemoteMailImageUrl(imageSetNode.value);
-        if (source) sources.add(source);
-      }
-      return undefined;
-    }
-    if (node.type !== "function" || node.value.toLowerCase() !== "url") {
-      return undefined;
-    }
-    const source = normalizeRemoteMailImageUrl(
-      unquoteCssUrl(valueParser.stringify(node.nodes)),
-    );
-    if (source) sources.add(source);
-    return false;
-  });
-}
-
-export function extractRemoteMailImageUrls(bodyHtml: string): Set<string> {
-  const sources = new Set<string>();
-  let styleDepth = 0;
-  const parser = new Parser(
-    {
-      onopentag: (name, attributes) => {
-        if (name === "style") styleDepth += 1;
-        if (attributes.style) collectCssImageUrls(attributes.style, sources);
-        if (name !== "img") return;
-        const source = normalizeRemoteMailImageUrl(attributes.src ?? "");
-        if (source) sources.add(source);
-      },
-      ontext: (text) => {
-        if (styleDepth > 0) collectCssImageUrls(text, sources);
-      },
-      onclosetag: (name) => {
-        if (name === "style") styleDepth = Math.max(0, styleDepth - 1);
-      },
-    },
-    { decodeEntities: true },
-  );
-  parser.end(bodyHtml);
-  return sources;
+  getImage?: (source: string) => Promise<RemoteMailImage | null>;
 }
 
 export function registerRemoteMailImageRoutes(
@@ -101,7 +34,7 @@ export function registerRemoteMailImageRoutes(
 ): FastifyPluginAsync {
   const getMessageBody =
     dependencies.getMessageBody ?? getMailboxMessageBodyForUser;
-  const getImage = dependencies.getImage ?? getRemoteMailImage;
+  const getImage = dependencies.getImage ?? getCachedRemoteMailImage;
   const capabilitySecret =
     dependencies.capabilitySecret ?? process.env.BETTER_AUTH_SECRET?.trim() ?? "";
 
@@ -206,18 +139,10 @@ export function registerRemoteMailImageRoutes(
           return;
         }
 
-        let image: RemoteMailImage;
+        let image: RemoteMailImage | null;
         try {
           image = await getImage(source);
         } catch (error) {
-          if (error instanceof UnsafeRemoteMailImageUrlError) {
-            await sendProblem(request, reply, 404, "Remote image not found");
-            return;
-          }
-          if (error instanceof RemoteMailImageUnavailableError) {
-            await sendProblem(request, reply, 502, "Remote image is unavailable");
-            return;
-          }
           if (error instanceof RemoteMailImageCacheUnavailableError) {
             await sendProblem(
               request,
@@ -228,6 +153,10 @@ export function registerRemoteMailImageRoutes(
             return;
           }
           throw error;
+        }
+        if (!image) {
+          await sendProblem(request, reply, 404, "Remote image not available");
+          return;
         }
 
         reply

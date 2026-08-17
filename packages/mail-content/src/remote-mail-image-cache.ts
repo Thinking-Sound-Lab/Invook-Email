@@ -14,8 +14,10 @@ import {
   type RemoteMailImage,
   UnsafeRemoteMailImageUrlError,
 } from "./remote-mail-image";
+import { extractRemoteMailImageUrls } from "./remote-mail-image-sources";
 
 const REMOTE_MAIL_IMAGE_CACHE_VERSION = "v1";
+const REMOTE_MAIL_IMAGE_PREFETCH_CONCURRENCY = 4;
 
 export class RemoteMailImageCacheUnavailableError extends Error {}
 
@@ -30,6 +32,15 @@ interface RemoteMailImageCacheDependencies {
     cacheKey: string,
     operation: () => Promise<T>,
   ) => Promise<T>;
+}
+
+interface PrefetchRemoteMailImagesDependencies {
+  cacheImage?: (source: string) => Promise<RemoteMailImage>;
+}
+
+export interface RemoteMailImagePrefetchResult {
+  cachedCount: number;
+  unavailableCount: number;
 }
 
 function remoteMailImageCacheKey(source: string): string {
@@ -48,12 +59,11 @@ function normalizeCachedImage(content: StoredObjectContent): RemoteMailImage {
   return { bytes: content.body, contentType: content.contentType };
 }
 
-export async function getRemoteMailImage(
-  source: string,
-  dependencies: RemoteMailImageCacheDependencies = {},
-): Promise<RemoteMailImage> {
+function createCacheReader(
+  dependencies: Pick<RemoteMailImageCacheDependencies, "readObject">,
+): (source: string) => Promise<RemoteMailImage | null> {
   let objectStorage: ReturnType<typeof createObjectStorage> | null = null;
-  if (!dependencies.readObject || !dependencies.writeObject) {
+  if (!dependencies.readObject) {
     try {
       objectStorage = createObjectStorage();
     } catch {
@@ -66,6 +76,47 @@ export async function getRemoteMailImage(
       if (!objectStorage) throw new RemoteMailImageCacheUnavailableError();
       return objectStorage.getObjectContent(key);
     });
+
+  return async (source) => {
+    try {
+      return normalizeCachedImage(
+        await readObject(remoteMailImageCacheKey(source)),
+      );
+    } catch (error) {
+      if (error instanceof ObjectStorageObjectNotFoundError) return null;
+      if (error instanceof RemoteMailImageCacheUnavailableError) throw error;
+      throw new RemoteMailImageCacheUnavailableError();
+    }
+  };
+}
+
+export async function getCachedRemoteMailImage(
+  source: string,
+  dependencies: Pick<RemoteMailImageCacheDependencies, "readObject"> = {},
+): Promise<RemoteMailImage | null> {
+  return createCacheReader(dependencies)(source);
+}
+
+export async function cacheRemoteMailImage(
+  source: string,
+  dependencies: RemoteMailImageCacheDependencies = {},
+): Promise<RemoteMailImage> {
+  let objectStorage: ReturnType<typeof createObjectStorage> | null = null;
+  if (!dependencies.readObject || !dependencies.writeObject) {
+    try {
+      objectStorage = createObjectStorage();
+    } catch {
+      throw new RemoteMailImageCacheUnavailableError();
+    }
+  }
+  const readCachedImage = createCacheReader({
+    readObject:
+      dependencies.readObject ??
+      ((key) => {
+        if (!objectStorage) throw new RemoteMailImageCacheUnavailableError();
+        return objectStorage.getObjectContent(key);
+      }),
+  });
   const writeObject =
     dependencies.writeObject ??
     (async ({ key, image }: { key: string; image: RemoteMailImage }) => {
@@ -81,22 +132,12 @@ export async function getRemoteMailImage(
     dependencies.withCacheLock ?? withRemoteMailImageCacheLock;
   const cacheKey = remoteMailImageCacheKey(source);
 
-  const readCachedImage = async (): Promise<RemoteMailImage | null> => {
-    try {
-      return normalizeCachedImage(await readObject(cacheKey));
-    } catch (error) {
-      if (error instanceof ObjectStorageObjectNotFoundError) return null;
-      if (error instanceof RemoteMailImageCacheUnavailableError) throw error;
-      throw new RemoteMailImageCacheUnavailableError();
-    }
-  };
-
-  const cachedImage = await readCachedImage();
+  const cachedImage = await readCachedImage(source);
   if (cachedImage) return cachedImage;
 
   try {
     return await withCacheLock(cacheKey, async () => {
-      const imageCachedByAnotherRequest = await readCachedImage();
+      const imageCachedByAnotherRequest = await readCachedImage(source);
       if (imageCachedByAnotherRequest) return imageCachedByAnotherRequest;
 
       const fetchedImage = await fetchImage(source);
@@ -117,4 +158,32 @@ export async function getRemoteMailImage(
     }
     throw new RemoteMailImageCacheUnavailableError();
   }
+}
+
+export async function prefetchRemoteMailImages(
+  bodyHtml: string,
+  dependencies: PrefetchRemoteMailImagesDependencies = {},
+): Promise<RemoteMailImagePrefetchResult> {
+  const sources = [...extractRemoteMailImageUrls(bodyHtml)];
+  const cacheImage = dependencies.cacheImage ?? cacheRemoteMailImage;
+  let cachedCount = 0;
+  let unavailableCount = 0;
+
+  for (
+    let start = 0;
+    start < sources.length;
+    start += REMOTE_MAIL_IMAGE_PREFETCH_CONCURRENCY
+  ) {
+    const results = await Promise.allSettled(
+      sources
+        .slice(start, start + REMOTE_MAIL_IMAGE_PREFETCH_CONCURRENCY)
+        .map((source) => cacheImage(source)),
+    );
+    for (const result of results) {
+      if (result.status === "fulfilled") cachedCount += 1;
+      else unavailableCount += 1;
+    }
+  }
+
+  return { cachedCount, unavailableCount };
 }

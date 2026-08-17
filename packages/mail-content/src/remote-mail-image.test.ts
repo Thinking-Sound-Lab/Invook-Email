@@ -29,7 +29,7 @@ test("remote image URL normalization accepts only ordinary HTTP image origins", 
   );
 });
 
-test("remote image proxy rejects non-public network addresses", async () => {
+test("remote image fetch rejects non-public network addresses", async () => {
   for (const address of [
     "0.0.0.0",
     "10.0.0.1",
@@ -60,7 +60,7 @@ test("remote image proxy rejects non-public network addresses", async () => {
   );
 });
 
-test("remote image proxy applies a fetch deadline signal", async () => {
+test("remote image fetch applies a request deadline signal", async () => {
   let isFetchSignalAborted: boolean | undefined;
   const fetchController = new AbortController();
 
@@ -80,7 +80,7 @@ test("remote image proxy applies a fetch deadline signal", async () => {
   assert.equal(isFetchSignalAborted, false);
 });
 
-test("remote image proxy cancels DNS resolution at the fetch deadline", async () => {
+test("remote image fetch cancels DNS resolution at the deadline", async () => {
   const fetchController = new AbortController();
   let wasResolutionCancelled = false;
 

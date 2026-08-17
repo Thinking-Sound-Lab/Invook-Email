@@ -38,6 +38,9 @@ importers:
       '@invook/gmail':
         specifier: workspace:*
         version: link:../../packages/gmail
+      '@invook/mail-content':
+        specifier: workspace:*
+        version: link:../../packages/mail-content
       '@invook/object-storage':
         specifier: workspace:*
         version: link:../../packages/object-storage
@@ -50,15 +53,6 @@ importers:
       fastify:
         specifier: ^5.11.3
         version: 5.11.3
-      htmlparser2:
-        specifier: ^12.0.0
-        version: 12.0.0
-      ipaddr.js:
-        specifier: ^2.5.0
-        version: 2.5.0
-      postcss-value-parser:
-        specifier: ^4.2.0
-        version: 4.2.0
       standardwebhooks:
         specifier: 1.0.0
         version: 1.0.0
@@ -181,6 +175,9 @@ importers:
       '@invook/gmail':
         specifier: workspace:*
         version: link:../../packages/gmail
+      '@invook/mail-content':
+        specifier: workspace:*
+        version: link:../../packages/mail-content
       '@invook/object-storage':
         specifier: workspace:*
         version: link:../../packages/object-storage
@@ -315,6 +312,37 @@ importers:
       '@types/mailparser':
         specifier: ^3.4.6
         version: 3.4.6
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+      tsx:
+        specifier: ^4.20.0
+        version: 4.23.11
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+
+  packages/mail-content:
+    dependencies:
+      '@invook/database':
+        specifier: workspace:*
+        version: link:../database
+      '@invook/object-storage':
+        specifier: workspace:*
+        version: link:../object-storage
+      axios:
+        specifier: ^1.19.0
+        version: 1.19.0
+      htmlparser2:
+        specifier: ^12.0.0
+        version: 12.0.0
+      ipaddr.js:
+        specifier: ^2.5.0
+        version: 2.5.0
+      postcss-value-parser:
+        specifier: ^4.2.0
+        version: 4.2.0
+    devDependencies:
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.3

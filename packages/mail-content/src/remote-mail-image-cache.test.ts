@@ -4,7 +4,9 @@ import test from "node:test";
 import { ObjectStorageObjectNotFoundError } from "@invook/object-storage";
 
 import {
-  getRemoteMailImage,
+  cacheRemoteMailImage,
+  getCachedRemoteMailImage,
+  prefetchRemoteMailImages,
   RemoteMailImageCacheUnavailableError,
 } from "./remote-mail-image-cache";
 import type { RemoteMailImage } from "./remote-mail-image";
@@ -18,8 +20,8 @@ test("remote image cache fetches each sender resource only once", async () => {
   let fetchCount = 0;
   let lockTail = Promise.resolve();
 
-  const getImage = () =>
-    getRemoteMailImage("https://images.example.com/unique.png", {
+  const cacheImage = () =>
+    cacheRemoteMailImage("https://images.example.com/unique.png", {
       fetchImage: async () => {
         fetchCount += 1;
         return image;
@@ -50,8 +52,8 @@ test("remote image cache fetches each sender resource only once", async () => {
       },
     });
 
-  const [first, second] = await Promise.all([getImage(), getImage()]);
-  const third = await getImage();
+  const [first, second] = await Promise.all([cacheImage(), cacheImage()]);
+  const third = await cacheImage();
 
   assert.deepEqual(first, image);
   assert.deepEqual(second, image);
@@ -60,12 +62,47 @@ test("remote image cache fetches each sender resource only once", async () => {
   assert.equal(storedImages.size, 1);
 });
 
+test("cache-only reads never contact the sender on a miss", async () => {
+  let readCount = 0;
+  const image = await getCachedRemoteMailImage(
+    "https://images.example.com/unique.png",
+    {
+      readObject: async () => {
+        readCount += 1;
+        throw new ObjectStorageObjectNotFoundError();
+      },
+    },
+  );
+
+  assert.equal(image, null);
+  assert.equal(readCount, 1);
+});
+
+test("mail ingestion prefetches every discovered remote image", async () => {
+  const cachedSources: string[] = [];
+  const result = await prefetchRemoteMailImages(
+    '<style>.hero{background:url("https://images.example.com/background.png")}</style><img src="https://images.example.com/banner.png">',
+    {
+      cacheImage: async (source) => {
+        cachedSources.push(source);
+        return { bytes: Buffer.from([1]), contentType: "image/png" };
+      },
+    },
+  );
+
+  assert.deepEqual(cachedSources.sort(), [
+    "https://images.example.com/background.png",
+    "https://images.example.com/banner.png",
+  ]);
+  assert.deepEqual(result, { cachedCount: 2, unavailableCount: 0 });
+});
+
 test("remote image cache fails closed when durable storage is unavailable", async () => {
   let fetchCount = 0;
 
   await assert.rejects(
     () =>
-      getRemoteMailImage("https://images.example.com/unique.png", {
+      cacheRemoteMailImage("https://images.example.com/unique.png", {
         fetchImage: async () => {
           fetchCount += 1;
           return {
@@ -90,7 +127,7 @@ test("remote image cache fails closed when its cross-process lock is unavailable
 
   await assert.rejects(
     () =>
-      getRemoteMailImage("https://images.example.com/unique.png", {
+      cacheRemoteMailImage("https://images.example.com/unique.png", {
         fetchImage: async () => {
           fetchCount += 1;
           return {
