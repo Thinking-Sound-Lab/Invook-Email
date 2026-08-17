@@ -83,7 +83,7 @@ export async function withGmailAccountControlLock<T>(
 
 async function listenForDatabaseNotifications(
   channel:
-    | "invook_queue_outbox"
+    | "invook_temporal_commands"
     | "invook_account_sync"
     | "invook_mailbox_changes",
   onNotification: (payload: string) => void,
@@ -112,8 +112,13 @@ async function listenForDatabaseNotifications(
   };
 }
 
-export function listenForOutboxNotifications(onEntryAvailable: () => void) {
-  return listenForDatabaseNotifications("invook_queue_outbox", onEntryAvailable);
+export function listenForTemporalCommandNotifications(
+  onEntryAvailable: () => void,
+) {
+  return listenForDatabaseNotifications(
+    "invook_temporal_commands",
+    onEntryAvailable,
+  );
 }
 
 export function listenForAccountSyncNotifications(

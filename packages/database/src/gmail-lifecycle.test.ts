@@ -13,7 +13,7 @@ import {
   mailSyncRuns,
   messages,
   profiles,
-  queueOutbox,
+  temporalCommands,
   threads,
   workflowSteps,
 } from "./schema";
@@ -110,10 +110,10 @@ test(
         },
       ]);
       const outbox = await database
-        .select({ queueName: queueOutbox.queueName })
-        .from(queueOutbox)
-        .where(eq(queueOutbox.workflowStepId, steps[0]?.id ?? ""));
-      assert.deepEqual(outbox, [{ queueName: "gmail-control" }]);
+        .select({ activityTaskQueue: temporalCommands.activityTaskQueue })
+        .from(temporalCommands)
+        .where(eq(temporalCommands.workflowStepId, steps[0]?.id ?? ""));
+      assert.deepEqual(outbox, [{ activityTaskQueue: "gmail-control" }]);
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));
       await client.end();

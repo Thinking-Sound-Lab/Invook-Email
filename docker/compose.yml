@@ -17,19 +17,6 @@ services:
       retries: 20
     restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
-    ports:
-      - "${REDIS_PORT:-63790}:6379"
-    volumes:
-      - invook-redis:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 3s
-      retries: 20
-    restart: unless-stopped
-
   minio:
     image: minio/minio:latest
     command: ["server", "/data", "--console-address", ":9001"]
@@ -83,7 +70,7 @@ services:
       dockerfile: docker/Dockerfile
       target: api
     ports:
-      - "4000:4000"
+      - "${API_PORT:-4000}:4000"
     environment:
       APP_URL: ${APP_URL:-http://localhost:3000}
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
@@ -132,7 +119,7 @@ services:
       dockerfile: docker/Dockerfile
       target: runner
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
     environment:
       API_INTERNAL_URL: http://api:4000
     depends_on:
@@ -147,7 +134,10 @@ services:
       target: worker
     environment:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
-      REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
+      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-}
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-}
+      TEMPORAL_API_KEY: ${TEMPORAL_API_KEY:-}
+      TEMPORAL_TASK_QUEUE_PREFIX: ${TEMPORAL_TASK_QUEUE_PREFIX:-}
       GMAIL_MESSAGE_CONCURRENCY: ${GMAIL_MESSAGE_CONCURRENCY:-5}
       MAIL_LABEL_CONCURRENCY: ${MAIL_LABEL_CONCURRENCY:-5}
       GMAIL_GOOGLE_CLIENT_ID: ${GMAIL_GOOGLE_CLIENT_ID:-}
@@ -177,13 +167,10 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
-      redis:
-        condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:
   invook-postgres:
-  invook-redis:
   invook-minio:

@@ -11,6 +11,7 @@ import {
   or,
   sql,
 } from "drizzle-orm";
+import type { WorkflowActivityTaskQueue } from "@invook/workflows";
 
 import {
   getDatabase,
@@ -27,25 +28,23 @@ import {
   gmailSyncPages,
   mailSyncRuns,
   messages,
-  queueOutbox,
+  temporalCommands,
   workflowSteps,
 } from "./schema";
 import { createGmailWatchRecoveryStep } from "./gmail-watch-schedule";
 import { hasMailSyncProgressAdvanced } from "./mail-sync-progress";
-import type {
-  QueueName,
-  WorkflowStepInput,
-  WorkflowStepJob,
-} from "./types";
 import { toPostgresTextProjection } from "./text";
+import type { WorkflowStepInput, WorkflowStepJob } from "./types";
 import {
   MAIL_INDEX_VERSION,
   MEMORY_SCHEMA_VERSION,
 } from "./versions";
 
-export type OutboxJob = WorkflowStepJob & {
-  queueName: QueueName;
+export type TemporalCommandJob = WorkflowStepJob & {
+  activityTaskQueue: WorkflowActivityTaskQueue;
 };
+
+export const TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE = 10;
 
 const gmailConnectedAccountStepTypes = [
   "gmail.sync.page",
@@ -245,7 +244,9 @@ export async function markGmailAccountReconnectRequired(
   );
 }
 
-export function queueNameForStepType(stepType: string): QueueName {
+export function activityTaskQueueForStepType(
+  stepType: string,
+): WorkflowActivityTaskQueue {
   switch (stepType) {
     case "gmail.sync.page":
     case "gmail.sync.finalize":
@@ -279,6 +280,29 @@ export function queueNameForStepType(stepType: string): QueueName {
   }
 }
 
+export function activityTaskQueueForStep(
+  input: Pick<WorkflowStepInput, "stepType" | "payload">,
+): WorkflowActivityTaskQueue {
+  if (
+    input.stepType === "label.message.analyze" &&
+    input.payload?.dispatchClass === "live"
+  ) {
+    return "mail-label-live";
+  }
+  return activityTaskQueueForStepType(input.stepType);
+}
+
+export function temporalCommandPriority(
+  stepType: string,
+  payload: Record<string, unknown> = {},
+): number {
+  if (stepType === "gmail.history.catchup") return 0;
+  if (stepType === "label.message.analyze" && payload.dispatchClass === "live") {
+    return 1;
+  }
+  return 2;
+}
+
 export async function enqueueWorkflowStepsWithExecutor(
   inputs: WorkflowStepInput[],
   database: DatabaseExecutor,
@@ -306,11 +330,11 @@ export async function enqueueWorkflowStepsWithExecutor(
     const byIdempotencyKey = new Map(
       inputs.map((input) => [input.idempotencyKey, input] as const),
     );
-    await database.insert(queueOutbox).values(
+    await database.insert(temporalCommands).values(
       inserted.map((step) => ({
         workflowStepId: step.id,
-        queueName: queueNameForStepType(
-          byIdempotencyKey.get(step.idempotencyKey)!.stepType,
+        activityTaskQueue: activityTaskQueueForStep(
+          byIdempotencyKey.get(step.idempotencyKey)!,
         ),
       })),
     );
@@ -333,12 +357,12 @@ export async function enqueueWorkflowStepWithExecutor(
   if (!existing) throw new Error("The workflow step could not be created.");
   if (existing.status === "queued" || existing.status === "running") {
     await database
-      .insert(queueOutbox)
+      .insert(temporalCommands)
       .values({
         workflowStepId: existing.id,
-        queueName: queueNameForStepType(input.stepType),
+        activityTaskQueue: activityTaskQueueForStep(input),
       })
-      .onConflictDoNothing({ target: queueOutbox.workflowStepId });
+      .onConflictDoNothing({ target: temporalCommands.workflowStepId });
   }
   return existing.id;
 }
@@ -550,7 +574,7 @@ export async function enqueuePendingGmailHistoryCatchups(
     .where(
       and(
         eq(connectedAccounts.status, "connected"),
-        inArray(gmailReplicaStates.state, ["ready", "repairing"]),
+        inArray(gmailReplicaStates.state, ["snapshotting", "ready", "repairing"]),
         not(isNull(gmailReplicaStates.pendingHistoryCursor)),
       ),
     );
@@ -563,7 +587,7 @@ export async function enqueuePendingGmailHistoryCatchups(
         ? await getActiveRepairMailSyncRunContext(account.id, database)
         : null;
     if (account.replicaState === "repairing" && !repairRun) continue;
-    const activation = repairRun?.id ?? "ready";
+    const activation = repairRun?.id ?? account.replicaState;
     await enqueueWorkflowStep(
       {
         userId: account.userId,
@@ -716,15 +740,15 @@ export async function enqueueImplausibleGmailMessageDateRepairs(
   });
 }
 
-export async function publishOutboxBatch(
-  publish: (jobs: OutboxJob[]) => Promise<void>,
+export async function dispatchTemporalCommandBatch(
+  dispatch: (jobs: TemporalCommandJob[]) => Promise<void>,
   database: Database = getDatabase(),
-): Promise<{ published: number; failed: boolean }> {
+): Promise<{ dispatched: number; failed: boolean }> {
   return database.transaction(async (transaction) => {
     const rows = await transaction
       .select({
-        outboxId: queueOutbox.id,
-        queueName: queueOutbox.queueName,
+        commandId: temporalCommands.id,
+        activityTaskQueue: temporalCommands.activityTaskQueue,
         id: workflowSteps.id,
         runId: workflowSteps.runId,
         userId: workflowSteps.userId,
@@ -734,40 +758,46 @@ export async function publishOutboxBatch(
         attempts: workflowSteps.attempts,
         maxAttempts: workflowSteps.maxAttempts,
       })
-      .from(queueOutbox)
-      .innerJoin(workflowSteps, eq(workflowSteps.id, queueOutbox.workflowStepId))
-      .where(isNull(queueOutbox.publishedAt))
-      .orderBy(asc(queueOutbox.createdAt))
-      .limit(100)
+      .from(temporalCommands)
+      .innerJoin(
+        workflowSteps,
+        eq(workflowSteps.id, temporalCommands.workflowStepId),
+      )
+      .where(isNull(temporalCommands.dispatchedAt))
+      .orderBy(
+        sql`case when ${workflowSteps.stepType} = 'gmail.history.catchup' then ${temporalCommandPriority("gmail.history.catchup")} when ${workflowSteps.stepType} = 'label.message.analyze' and ${workflowSteps.input}->>'dispatchClass' = 'live' then ${temporalCommandPriority("label.message.analyze", { dispatchClass: "live" })} else ${temporalCommandPriority("default")} end`,
+        asc(temporalCommands.createdAt),
+      )
+      .limit(TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE)
       .for("update", { skipLocked: true });
 
-    if (rows.length === 0) return { published: 0, failed: false };
-    const jobs = rows.map(({ outboxId: _outboxId, ...job }) => job);
+    if (rows.length === 0) return { dispatched: 0, failed: false };
+    const jobs = rows.map(({ commandId: _commandId, ...job }) => job);
     try {
-      await publish(jobs);
+      await dispatch(jobs);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Queue publication failed";
+      const message = error instanceof Error ? error.name : "TemporalDispatchError";
       await transaction
-        .update(queueOutbox)
+        .update(temporalCommands)
         .set({
-          publishAttempts: sql`${queueOutbox.publishAttempts} + 1`,
+          dispatchAttempts: sql`${temporalCommands.dispatchAttempts} + 1`,
           lastError: message,
           updatedAt: new Date(),
         })
-        .where(inArray(queueOutbox.id, rows.map((row) => row.outboxId)));
-      return { published: 0, failed: true };
+        .where(inArray(temporalCommands.id, rows.map((row) => row.commandId)));
+      return { dispatched: 0, failed: true };
     }
 
     await transaction
-      .update(queueOutbox)
+      .update(temporalCommands)
       .set({
-        publishAttempts: sql`${queueOutbox.publishAttempts} + 1`,
+        dispatchAttempts: sql`${temporalCommands.dispatchAttempts} + 1`,
         lastError: null,
-        publishedAt: new Date(),
+        dispatchedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(inArray(queueOutbox.id, rows.map((row) => row.outboxId)));
-    return { published: rows.length, failed: false };
+      .where(inArray(temporalCommands.id, rows.map((row) => row.commandId)));
+    return { dispatched: rows.length, failed: false };
   });
 }
 
@@ -1332,8 +1362,7 @@ async function enqueueFinalizeIfReady(runId: string, database: Database) {
     .for("update");
   if (
     !run ||
-    (run.status !== "queued" && run.status !== "running") ||
-    !run.discoveryComplete
+    (run.status !== "queued" && run.status !== "running")
   ) {
     return false;
   }
@@ -1360,6 +1389,7 @@ async function enqueueFinalizeIfReady(runId: string, database: Database) {
       sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: run.accountId })})`,
     );
   }
+  if (!run.discoveryComplete) return false;
   if (counts.failed > 0 || counts.complete !== counts.total) return false;
 
   await enqueueWorkflowStep(

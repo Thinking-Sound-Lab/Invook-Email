@@ -41,7 +41,7 @@ import {
   messageLabels,
   messages,
   profiles,
-  queueOutbox,
+  temporalCommands,
   threads,
   workflowSteps,
 } from "./schema";
@@ -607,14 +607,14 @@ test(
 
       const outbox = await database
         .select({
-          workflowStepId: queueOutbox.workflowStepId,
-          queueName: queueOutbox.queueName,
+          workflowStepId: temporalCommands.workflowStepId,
+          activityTaskQueue: temporalCommands.activityTaskQueue,
         })
-        .from(queueOutbox)
-        .where(inArray(queueOutbox.workflowStepId, steps.map((step) => step.id)));
+        .from(temporalCommands)
+        .where(inArray(temporalCommands.workflowStepId, steps.map((step) => step.id)));
       assert.deepEqual(
         outbox
-          .map((entry) => entry.queueName)
+          .map((entry) => entry.activityTaskQueue)
           .sort(),
         ["gmail-control", "gmail-pages"],
       );

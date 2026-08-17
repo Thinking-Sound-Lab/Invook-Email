@@ -183,6 +183,20 @@
       "when": 1786960834863,
       "tag": "0025_opposite_inertia",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1786964107796,
+      "tag": "0026_curvy_glorian",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1786982085921,
+      "tag": "0027_little_virginia_dare",
+      "breakpoints": true
     }
   ]
 }

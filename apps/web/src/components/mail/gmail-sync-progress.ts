@@ -13,13 +13,16 @@ export function getGmailSyncProgressPresentation(
   if (progress.state === "complete") return null;
 
   const isFailed = progress.state === "failed";
-  const percentage = progress.discoveryComplete
-    ? progress.discoveredMessageCount === 0
+  const percentage = progress.discoveredMessageCount === 0
+    ? progress.discoveryComplete
       ? 100
-      : Math.round(
+      : null
+    : Math.min(
+        100,
+        Math.round(
           (progress.processedMessageCount / progress.discoveredMessageCount) * 100,
-        )
-    : null;
+        ),
+      );
 
   if (isFailed) {
     const failedDetail = progress.failedMessageCount
@@ -34,16 +37,21 @@ export function getGmailSyncProgressPresentation(
   }
 
   if (!progress.discoveryComplete) {
+    const isProcessing = progress.processedMessageCount > 0;
     return {
       title:
-        progress.discoveredMessageCount > 0
+        isProcessing
+          ? "Finding and syncing Gmail"
+          : progress.discoveredMessageCount > 0
           ? "Finding Gmail messages"
           : "Preparing Gmail sync",
       detail:
-        progress.discoveredMessageCount > 0
+        isProcessing
+          ? `${progress.processedMessageCount.toLocaleString()} of ${progress.discoveredMessageCount.toLocaleString()} discovered messages synced`
+          : progress.discoveredMessageCount > 0
           ? `${progress.discoveredMessageCount.toLocaleString()} messages found so far`
           : "Waiting for Gmail to report message totals",
-      percentage: null,
+      percentage,
       isFailed,
     };
   }

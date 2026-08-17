@@ -17,7 +17,7 @@ export type GmailHistoryCatchupPlan =
       kind: "apply";
       expectedCursor: string;
       startHistoryId: string;
-      stateAfterApply: "ready" | "repairing";
+      stateAfterApply: "ready" | "snapshotting" | "repairing";
       ingestionMode: "initial" | "incremental";
       shouldRepairExpiredCursor: boolean;
     }
@@ -41,6 +41,16 @@ export function planGmailHistoryCatchup(input: {
       stateAfterApply: "ready",
       ingestionMode: "incremental",
       shouldRepairExpiredCursor: true,
+    };
+  }
+  if (input.replicaState === "snapshotting") {
+    return {
+      kind: "apply",
+      expectedCursor,
+      startHistoryId: expectedCursor,
+      stateAfterApply: "snapshotting",
+      ingestionMode: "initial",
+      shouldRepairExpiredCursor: false,
     };
   }
   if (input.replicaState === "repairing" && input.repairStartingHistoryCursor) {

@@ -112,6 +112,7 @@ export async function enqueueMessageLabelAnalysisWithExecutor(
     messageId: string;
     contentHash: string;
     analysisVersion: number;
+    isLiveDelivery?: boolean;
   },
   database: DatabaseExecutor,
 ): Promise<{ stepId: string; definitionHash: string }> {
@@ -126,6 +127,7 @@ export async function enqueueMessageLabelAnalysisWithExecutor(
         contentHash: input.contentHash,
         analysisVersion: input.analysisVersion,
         definitionHash: snapshot.definitionHash,
+        ...(input.isLiveDelivery ? { dispatchClass: "live" } : {}),
       },
       idempotencyKey: `label.message.analyze:${input.messageId}:${input.analysisVersion}:${input.contentHash}:${snapshot.definitionHash}`,
     },

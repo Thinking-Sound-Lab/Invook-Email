@@ -41,7 +41,7 @@ import {
   messageLabels,
   messages,
   profiles,
-  queueOutbox,
+  temporalCommands,
   workflowSteps,
 } from "./schema";
 import * as schema from "./schema";
@@ -231,15 +231,15 @@ test(
         .select({
           id: workflowSteps.id,
           input: workflowSteps.input,
-          queueName: queueOutbox.queueName,
+          activityTaskQueue: temporalCommands.activityTaskQueue,
         })
-        .from(queueOutbox)
-        .innerJoin(workflowSteps, eq(workflowSteps.id, queueOutbox.workflowStepId))
+        .from(temporalCommands)
+        .innerJoin(workflowSteps, eq(workflowSteps.id, temporalCommands.workflowStepId))
         .where(eq(workflowSteps.stepType, "label.message.analyze"));
       const initialOutbox = initialSteps.find(
         (step) => step.input.messageId === initial.messageId,
       );
-      assert.equal(initialOutbox?.queueName, "mail-label-submit");
+      assert.equal(initialOutbox?.activityTaskQueue, "mail-label-submit");
 
       const initialReady = await beginMessageLabelAnalysis(
         { userId, accountId, checkpoint: initialCheckpoint },

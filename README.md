@@ -43,7 +43,7 @@ See [Configuration](#configuration) before signing in or connecting Gmail.
 1. Better Auth handles global Google Identity sign-in and database-backed browser sessions. It requests identity scopes only, never Gmail access.
 2. A signed-in user separately connects a Gmail mailbox. The Fastify API validates the mailbox, encrypts its credentials, registers a Gmail watch, and creates durable synchronization work.
 3. Workers copy Gmail data into PostgreSQL and store raw MIME and attachments in S3-compatible object storage.
-4. PostgreSQL owns workflow state and publishes work through a transactional outbox. BullMQ and Redis execute and retry that work.
+4. PostgreSQL owns product state and transactionally records Temporal commands. Temporal Cloud durably schedules, executes, and retries worker Activities.
 5. The mail reader sanitizes stored HTML and renders it inside an isolated Shadow DOM. Sender-hosted images load directly from their original URLs, so opening mail can disclose the request time and browser IP address to the image host.
 6. AI jobs classify labels, index search content, learn Memory, and create drafts. The Next.js app reads the resulting local replica through the API.
 
@@ -53,10 +53,10 @@ Provider-owned changes are written to Gmail first and then converge locally thro
 Browser -> Next.js -> Fastify API -> Better Auth / PostgreSQL
                          |                    |
                          v                    v
-                       Gmail          workflow outbox
+                       Gmail        temporal_commands
                                               |
                                               v
-                                    BullMQ / Redis -> Worker
+                                    Temporal Cloud -> Worker
                                               |        |
                                               v        v
                                         S3 storage   AI providers
@@ -77,6 +77,7 @@ For the detailed synchronization and ownership rules, read the [Gmail mailbox re
 | `packages/database` | Drizzle schema, migrations, repositories, and workflows |
 | `packages/gmail` | Gmail OAuth, Gmail API, history mapping, and MIME parsing |
 | `packages/object-storage` | S3-compatible raw MIME and attachment storage |
+| `packages/workflows` | Deterministic Temporal Workflows and shared execution contracts |
 | `docker` | Local services and application images |
 | `docs` | Product and implementation contracts |
 
@@ -124,6 +125,10 @@ AI configuration is feature-specific:
 
 When the Docker worker calls a model running on the host, use a host-reachable URL such as `http://host.docker.internal:11434/v1`. See [`.env.example`](./.env.example) for every setting and its local default.
 
+### Temporal Cloud
+
+Create a Temporal Cloud namespace and API key, then configure `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_API_KEY`, and `TEMPORAL_TASK_QUEUE_PREFIX`. Use a different lowercase task-queue prefix for every environment. Invook does not start a local Temporal server.
+
 ## Local services
 
 `make dev` builds the applications, applies database migrations, and starts:
@@ -133,7 +138,6 @@ When the Docker worker calls a model running on the host, use a host-reachable U
 | Web | [localhost:3000](http://localhost:3000) | Invook UI |
 | API | [localhost:4000](http://localhost:4000) | Fastify API |
 | PostgreSQL | `localhost:54322` | Mailbox, product, and workflow state |
-| Redis | `localhost:63790` | BullMQ execution and retries |
 | MinIO API | [localhost:9000](http://localhost:9000) | Raw MIME and attachment objects |
 | MinIO console | [localhost:9001](http://localhost:9001) | Local object-storage administration |
 
@@ -152,20 +156,20 @@ Named Docker volumes preserve local data across `make down`.
 | `make verify` | Run typechecking, linting, tests, and the production web build |
 | `make reset-local` | Clear local Invook data while keeping schemas, buckets, and Docker volumes |
 
-For a source-based development loop, keep PostgreSQL, Redis, and MinIO available, apply migrations, run `pnpm dev`, and run `pnpm worker` in a second terminal.
+For a source-based development loop, keep PostgreSQL and MinIO available, configure Temporal Cloud, apply migrations, run `pnpm dev`, and run `pnpm worker` in a second terminal.
 
 `make reset-local` is intentionally guarded and destructive to local application data. Read [Reset local signup and mailbox data](./docs/local-development-reset.md) before using it.
 
 ## Tech stack
 
 <details>
-<summary>Next.js · React · Fastify · Better Auth · PostgreSQL · BullMQ · Redis · MinIO</summary>
+<summary>Next.js · React · Fastify · Better Auth · PostgreSQL · Temporal · MinIO</summary>
 
 - **Language:** TypeScript
 - **Web:** Next.js 16, React 19, Tailwind CSS, shadcn/ui, Zustand
 - **API:** Fastify 5 and Better Auth
 - **Database:** PostgreSQL 17 with pgvector and Drizzle ORM
-- **Jobs:** BullMQ with persistent Redis execution state and a PostgreSQL transactional outbox
+- **Jobs:** Temporal Cloud Workflows and Activities with a PostgreSQL transactional command handoff
 - **Storage:** S3-compatible object storage; MinIO locally
 - **Mail:** Gmail API, Google OAuth, and Gmail Pub/Sub notifications
 - **AI:** Vercel AI SDK, OpenAI-compatible models, OpenAI Batch, or Azure OpenAI Batch

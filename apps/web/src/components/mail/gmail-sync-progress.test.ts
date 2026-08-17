@@ -21,7 +21,7 @@ test("active Gmail synchronization shows durable counts and percentage", () => {
   );
 });
 
-test("message discovery stays honest while Gmail has not reported a total", () => {
+test("message discovery shows processed progress against the messages found so far", () => {
   assert.deepEqual(
     getGmailSyncProgressPresentation({
       state: "running",
@@ -31,9 +31,9 @@ test("message discovery stays honest while Gmail has not reported a total", () =
       failedMessageCount: 0,
     }),
     {
-      title: "Finding Gmail messages",
-      detail: "3,400 messages found so far",
-      percentage: null,
+      title: "Finding and syncing Gmail",
+      detail: "1,200 of 3,400 discovered messages synced",
+      percentage: 35,
       isFailed: false,
     },
   );

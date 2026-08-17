@@ -12,7 +12,7 @@ import {
   messageAttachments,
   messages,
   profiles,
-  queueOutbox,
+  temporalCommands,
   threads,
   workflowSteps,
 } from "./schema";
@@ -115,9 +115,9 @@ test(
       assert.equal(step.maxAttempts, 10);
       const [outbox] = await database
         .select()
-        .from(queueOutbox)
-        .where(eq(queueOutbox.workflowStepId, step.id));
-      assert.equal(outbox?.queueName, "gmail-control");
+        .from(temporalCommands)
+        .where(eq(temporalCommands.workflowStepId, step.id));
+      assert.equal(outbox?.activityTaskQueue, "gmail-control");
 
       await database
         .update(connectedAccounts)

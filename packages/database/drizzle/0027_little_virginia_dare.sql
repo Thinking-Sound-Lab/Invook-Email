@@ -1,0 +1,2 @@
+ALTER TABLE "temporal_commands" DROP CONSTRAINT "temporal_commands_activity_task_queue_check";--> statement-breakpoint
+ALTER TABLE "temporal_commands" ADD CONSTRAINT "temporal_commands_activity_task_queue_check" CHECK ("temporal_commands"."activity_task_queue" in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-live', 'mail-label-submit'));

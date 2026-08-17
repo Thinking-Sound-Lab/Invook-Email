@@ -29,7 +29,16 @@ export function hasMailSyncProgressAdvanced(input: {
   previousProcessedMessageCount: number;
   processedMessageCount: number;
 }): boolean {
-  if (!input.discoveryComplete || input.discoveredMessageCount <= 0) return false;
+  if (input.discoveredMessageCount <= 0) return false;
+
+  const previousInterval = Math.floor(
+    input.previousProcessedMessageCount / MAIL_SYNC_NOTIFICATION_INTERVAL,
+  );
+  const interval = Math.floor(
+    input.processedMessageCount / MAIL_SYNC_NOTIFICATION_INTERVAL,
+  );
+  if (interval > previousInterval) return true;
+  if (!input.discoveryComplete) return false;
 
   const previousPercentage = Math.floor(
     (input.previousProcessedMessageCount / input.discoveredMessageCount) * 100,
@@ -37,11 +46,5 @@ export function hasMailSyncProgressAdvanced(input: {
   const percentage = Math.floor(
     (input.processedMessageCount / input.discoveredMessageCount) * 100,
   );
-  const previousInterval = Math.floor(
-    input.previousProcessedMessageCount / MAIL_SYNC_NOTIFICATION_INTERVAL,
-  );
-  const interval = Math.floor(
-    input.processedMessageCount / MAIL_SYNC_NOTIFICATION_INTERVAL,
-  );
-  return percentage > previousPercentage || interval > previousInterval;
+  return percentage > previousPercentage;
 }

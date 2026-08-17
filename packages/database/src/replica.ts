@@ -754,7 +754,7 @@ export async function applyGmailHistoryBatch(
       gmailLabels: Array<{ providerLabelId: string; name: string }>;
     }>;
     deletedMessageIds: Array<{ providerMessageId: string; providerHistoryId: string | null }>;
-    stateAfterApply?: "ready" | "replaying" | "repairing";
+    stateAfterApply?: "ready" | "snapshotting" | "replaying" | "repairing";
     continuationSourceStepId?: string;
   },
   database: Database = getDatabase(),

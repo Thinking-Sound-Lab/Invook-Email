@@ -17,6 +17,10 @@ const authenticationMigrationUrl = new URL(
   "../drizzle/0024_yielding_talisman.sql",
   import.meta.url,
 );
+const temporalMigrationUrl = new URL(
+  "../drizzle/0026_curvy_glorian.sql",
+  import.meta.url,
+);
 const schemaUrl = new URL("./schema.ts", import.meta.url);
 const migrationsUrl = new URL("../drizzle/", import.meta.url);
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -65,6 +69,26 @@ test("the auth user contract backfills real identity data before enforcing requi
     "Cannot enforce Better Auth user requirements",
     'ALTER TABLE "profiles" ALTER COLUMN "email" SET NOT NULL',
   );
+});
+
+test("the Temporal migration preserves commands and redrives unfinished work", async () => {
+  const migration = await readFile(temporalMigrationUrl, "utf8");
+
+  assert.match(
+    migration,
+    /ALTER TABLE "queue_outbox" RENAME TO "temporal_commands"/,
+  );
+  assertBefore(
+    migration,
+    'DROP TRIGGER IF EXISTS "queue_outbox_notify_worker"',
+    'CREATE TRIGGER "temporal_commands_notify_worker"',
+  );
+  assert.match(migration, /pg_notify\('invook_temporal_commands'/);
+  assert.match(
+    migration,
+    /"workflow_steps"\."status" IN \('queued', 'running'\)/,
+  );
+  assert.doesNotMatch(migration, /DROP TABLE "queue_outbox"/);
 });
 
 test("the consolidation migration backfills durable state before removing legacy tables", async () => {

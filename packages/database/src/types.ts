@@ -27,17 +27,6 @@ export type WorkflowStepInput = {
   idempotencyKey: string;
 };
 
-export type QueueName =
-  | "gmail-pages"
-  | "gmail-messages"
-  | "gmail-control"
-  | "mail-indexing-batch"
-  | "mail-indexing-live"
-  | "mail-memory-submit"
-  | "mail-memory-events"
-  | "mail-memory-feedback"
-  | "mail-label-submit";
-
 export type MailboxMessage = {
   userId: string;
   accountId: string;
@@ -65,6 +54,7 @@ export type MailboxMessage = {
   } | null;
   isMemoryEligible: boolean;
   ingestionMode: "initial" | "incremental";
+  isLiveDelivery?: boolean;
   memoryContactEmails: string[];
   attachments: Array<{
     providerAttachmentId: string | null;

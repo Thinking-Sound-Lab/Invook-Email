@@ -1099,14 +1099,14 @@ export const embeddingBatchSubmissions = pgTable(
   ],
 );
 
-export const queueOutbox = pgTable(
-  "queue_outbox",
+export const temporalCommands = pgTable(
+  "temporal_commands",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     workflowStepId: uuid("workflow_step_id")
       .notNull()
       .references(() => workflowSteps.id, { onDelete: "cascade" }),
-    queueName: text("queue_name")
+    activityTaskQueue: text("activity_task_queue")
       .$type<
         | "gmail-pages"
         | "gmail-messages"
@@ -1116,12 +1116,13 @@ export const queueOutbox = pgTable(
         | "mail-memory-submit"
         | "mail-memory-events"
         | "mail-memory-feedback"
+        | "mail-label-live"
         | "mail-label-submit"
       >()
       .notNull(),
-    publishAttempts: integer("publish_attempts").notNull().default(0),
+    dispatchAttempts: integer("dispatch_attempts").notNull().default(0),
     lastError: text("last_error"),
-    publishedAt: timestampWithTimezone("published_at"),
+    dispatchedAt: timestampWithTimezone("dispatched_at"),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -1129,14 +1130,17 @@ export const queueOutbox = pgTable(
       .$onUpdate(() => new Date()),
   },
   (table) => [
-    uniqueIndex("queue_outbox_workflow_step_idx").on(table.workflowStepId),
-    index("queue_outbox_unpublished_idx")
+    uniqueIndex("temporal_commands_workflow_step_idx").on(table.workflowStepId),
+    index("temporal_commands_undispatched_idx")
       .on(table.createdAt)
-      .where(sql`${table.publishedAt} is null`),
-    check("queue_outbox_publish_attempts_check", sql`${table.publishAttempts} >= 0`),
+      .where(sql`${table.dispatchedAt} is null`),
     check(
-      "queue_outbox_queue_name_check",
-      sql`${table.queueName} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit')`,
+      "temporal_commands_dispatch_attempts_check",
+      sql`${table.dispatchAttempts} >= 0`,
+    ),
+    check(
+      "temporal_commands_activity_task_queue_check",
+      sql`${table.activityTaskQueue} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-live', 'mail-label-submit')`,
     ),
   ],
 );

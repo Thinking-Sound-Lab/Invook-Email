@@ -1591,6 +1591,7 @@ export async function upsertIndexedMessage(
             messageId,
             contentHash: storedMessage.contentHash,
             analysisVersion: storedMessage.labelAnalysisVersion,
+            isLiveDelivery: input.isLiveDelivery,
           },
           transaction,
         );

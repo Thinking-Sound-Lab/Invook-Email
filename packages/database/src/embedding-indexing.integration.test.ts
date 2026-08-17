@@ -19,7 +19,7 @@ import {
   messageEmbeddings,
   messages,
   profiles,
-  queueOutbox,
+  temporalCommands,
   threads,
   workflowSteps,
 } from "./schema";
@@ -266,9 +266,9 @@ test(
           ),
         );
       const [outboxEntries] = await database
-        .select({ value: count(queueOutbox.id) })
-        .from(queueOutbox)
-        .where(eq(queueOutbox.workflowStepId, continuationJobId));
+        .select({ value: count(temporalCommands.id) })
+        .from(temporalCommands)
+        .where(eq(temporalCommands.workflowStepId, continuationJobId));
       assert.equal(continuations?.value, 1);
       assert.equal(outboxEntries?.value, 1);
     } finally {

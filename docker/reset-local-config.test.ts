@@ -5,7 +5,6 @@ import { validateLocalResetConfiguration } from "./reset-local-config.ts";
 
 const localEnvironment = {
   databaseUrl: "postgresql://invook:invook@127.0.0.1:54322/invook",
-  redisUrl: "redis://127.0.0.1:63790",
   s3Bucket: "invook-mail",
   s3Endpoint: "http://localhost:9000",
 };
@@ -52,17 +51,10 @@ function createComposeConfig() {
         ],
       },
       "minio-init": { environment: { S3_BUCKET: "invook-mail" } },
-      redis: {
-        ports: [port(6379, "63790")],
-        volumes: [
-          { source: "invook-redis", target: "/data", type: "volume" },
-        ],
-      },
       web: { ports: [port(3000, "3000")] },
       worker: {
         environment: {
           DATABASE_URL: databaseUrl,
-          REDIS_URL: "redis://redis:6379",
           S3_BUCKET: "invook-mail",
           S3_ENDPOINT: "http://minio:9000",
         },
@@ -71,7 +63,6 @@ function createComposeConfig() {
     volumes: {
       "invook-minio": { name: "invook_invook-minio" },
       "invook-postgres": { name: "invook_invook-postgres" },
-      "invook-redis": { name: "invook_invook-redis" },
     },
   };
 }
@@ -91,17 +82,6 @@ describe("validateLocalResetConfiguration", () => {
           databaseUrl: "postgresql://invook:invook@db.example.com:5432/invook",
         }),
       /known Invook PostgreSQL service/,
-    );
-  });
-
-  it("rejects a nonzero Redis database", () => {
-    assert.throws(
-      () =>
-        validateLocalResetConfiguration(createComposeConfig(), {
-          ...localEnvironment,
-          redisUrl: "redis://127.0.0.1:63790/1",
-        }),
-      /database 0/,
     );
   });
 
@@ -129,16 +109,6 @@ describe("validateLocalResetConfiguration", () => {
     assert.throws(
       () => validateLocalResetConfiguration(composeConfig, localEnvironment),
       /known local named volume/,
-    );
-  });
-
-  it("rejects a worker pointed at another Redis service", () => {
-    const composeConfig = createComposeConfig();
-    composeConfig.services.worker.environment.REDIS_URL =
-      "redis://shared-redis:6379";
-    assert.throws(
-      () => validateLocalResetConfiguration(composeConfig, localEnvironment),
-      /known local REDIS_URL/,
     );
   });
 

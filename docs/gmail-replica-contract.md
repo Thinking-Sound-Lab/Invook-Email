@@ -14,7 +14,7 @@ The shared `labels` table distinguishes recognized Gmail system labels from Invo
 
 The shared `drafts` table distinguishes Gmail resources from local Invook drafts. A Gmail draft retains provider identifiers and metadata. A local draft retains editable text, model provenance, feedback, and Memory evidence without becoming a Gmail resource until the user explicitly promotes it. `gmail_draft_write_operations` is the idempotency and ambiguous-result ledger for Gmail draft create, update, and send operations.
 
-PostgreSQL stores normalized replica state, durable runs, workflow steps, and the transactional queue outbox. S3-compatible object storage owns raw MIME and attachment bytes. BullMQ and Redis execute and retry work but are not the durable source of work.
+PostgreSQL stores normalized replica state, durable operation checkpoints, and the transactional `temporal_commands` handoff. S3-compatible object storage owns raw MIME and attachment bytes. Temporal Cloud owns Workflow history, schedules, Activity task delivery, and retries.
 
 ## Initial synchronization
 
@@ -25,9 +25,9 @@ Embedding backfill and initial Memory wait for the watch-first sequence to compl
 3. Create one durable initial `mail_sync_run`.
 4. Discover all message IDs, including Spam and Trash.
 5. Process each message in its own idempotent workflow job. Message concurrency is configured by `GMAIL_MESSAGE_CONCURRENCY` and defaults to five.
-6. Upload raw MIME and attachment bytes, persist normalized message state, and create the `label.message.analyze` workflow step and `mail-label-submit` outbox record in the same transaction.
+6. Upload raw MIME and attachment bytes, persist normalized message state, and create the `label.message.analyze` operation checkpoint and bulk `mail-label-submit` Temporal command in the same transaction.
 7. Synchronize Gmail Draft resources.
-8. Under the account advisory lock, replay history from H0 and continue while a newer pending notification cursor exists.
+8. Under the account advisory lock, apply authenticated notification history from H0 while the snapshot proceeds, then perform a final replay and continue while a newer pending notification cursor exists.
 9. Atomically mark the replica ready at the final applied cursor.
 10. Only then publish embedding and initial Memory derivation work. Initial sync never triggers a final label backfill; the separate user-confirmed recent-mail scan is the only historical label application path.
 
@@ -39,7 +39,7 @@ A successful normal synchronization does not run a separate full-replica audit.
 
 Google Pub/Sub sends OIDC-authenticated pushes to `/v1/webhooks/google-pubsub`. The API validates the audience, service-account identity, exact subscription, envelope, email address, and decimal history ID.
 
-For a matching connected account, one PostgreSQL transaction locks replica state, retains only the highest pending history cursor, and creates an idempotent `gmail.history.catchup` workflow step plus queue-outbox record. Duplicate and reordered notifications coalesce through the pending cursor and workflow idempotency key. The raw Pub/Sub payload, message ID, email address, and delivery event are not persisted. The route returns `204` without calling Gmail inline. Notifications received during an initial snapshot remain pending for its final H0 replay. During repair, catch-up applies notifications immediately from the repair run's fresh baseline so newly changed messages can be used while the repair continues.
+For a matching connected account, one PostgreSQL transaction locks replica state, retains only the highest pending history cursor, and creates an idempotent `gmail.history.catchup` operation checkpoint plus Temporal command. Duplicate and reordered notifications coalesce through the pending cursor and workflow idempotency key. The raw Pub/Sub payload, message ID, email address, and delivery event are not persisted. The route returns `204` without calling Gmail inline. During an initial snapshot, catch-up applies notifications immediately from H0 without marking the replica ready, so newly changed messages can be used while the full snapshot continues. During repair, catch-up applies notifications immediately from the repair run's fresh baseline with the same state-preserving behavior.
 
 ## Incremental catch-up
 
@@ -54,7 +54,7 @@ History work is operation-specific:
 - A content upsert creates the same durable per-message label-analysis step used by initial synchronization. Queue payloads contain identifiers and content/definition checkpoints only.
 - A message visibility event is emitted only in the transaction that commits label decisions and `complete`, or the explicit terminal `failed` state.
 
-Duplicate execution is safe through provider identifiers, expected-cursor checks, unique constraints, workflow idempotency keys, and transactional outbox publication. A crashed worker retries from durable state.
+Duplicate execution is safe through provider identifiers, expected-cursor checks, unique constraints, workflow idempotency keys, and stable Temporal Workflow IDs. A crashed worker resumes from Temporal history and canonical PostgreSQL state.
 
 ## Watch renewal and repair
 
@@ -70,7 +70,7 @@ Explicit user actions for read/unread, star, archive, Trash, and Gmail Draft edi
 
 ## Per-message label analysis
 
-The `mail-label-submit` worker rereads the owned canonical stored message and the current Newsletter plus custom Invook definitions. One structured classifier call may return zero or more independent matches. It never receives raw MIME, HTML, attachments, provider payloads, Important, or Others. Before commit, PostgreSQL locks the message and verifies the content hash, analysis version, definition hash, and every definition version. Superseded work no-ops or creates a newer durable step; retries reuse the stable message/content/definition identity and cannot duplicate decisions or visible memberships.
+The label worker rereads the owned canonical stored message and the current Newsletter plus custom Invook definitions. Snapshot analysis uses the bounded `mail-label-submit` queue, while live history delivery uses the independently bounded `mail-label-live` queue so backfill cannot starve new mail. One structured classifier call may return zero or more independent matches. It never receives raw MIME, HTML, attachments, provider payloads, Important, or Others. Before commit, PostgreSQL locks the message and verifies the content hash, analysis version, definition hash, and every definition version. Superseded work no-ops or creates a newer durable step; retries reuse the stable message/content/definition identity and cannot duplicate decisions or visible memberships.
 
 Creating a custom label previews against canonical stored mail and, only after explicit confirmation, may enqueue per-message application work for the last 7, 30, or 90 days. The queue payload contains identifiers and content/definition checkpoints; the worker rereads the stored message and applies only the new label without hiding already-visible mail. Without that choice, and when editing a definition, already-complete messages remain unchanged. A definition created before an in-flight message commits is included by safely superseding the stale work. Decisions, visible AI memberships, completion state, and the mailbox-change event commit atomically. Explicit user applications and suppressions win over AI output.
 
