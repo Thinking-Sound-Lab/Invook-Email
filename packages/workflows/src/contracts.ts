@@ -1,6 +1,7 @@
 export const workflowActivityTaskQueues = [
   "gmail-pages",
   "gmail-messages",
+  "gmail-message-batches",
   "gmail-control",
   "mail-indexing-batch",
   "mail-indexing-live",

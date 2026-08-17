@@ -6,9 +6,11 @@ import {
   createGmailWatchRecoveryStep,
 } from "./gmail-watch";
 import {
+  createGmailSyncMessageBatchSteps,
   createPostSyncDerivationSteps,
   activityTaskQueueForStep,
   activityTaskQueueForStepType,
+  GMAIL_SYNC_MESSAGE_BATCH_SIZE,
   TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE,
   temporalCommandPriority,
 } from "./workflows";
@@ -29,7 +31,11 @@ test("live Gmail work dispatches ahead of bulk synchronization work", () => {
   );
   assert.equal(
     temporalCommandPriority("label.message.analyze"),
-    temporalCommandPriority("gmail.sync.message"),
+    temporalCommandPriority("gmail.sync.message.batch"),
+  );
+  assert.equal(
+    activityTaskQueueForStepType("gmail.sync.message.batch"),
+    "gmail-message-batches",
   );
   assert.equal(
     activityTaskQueueForStep({
@@ -44,6 +50,40 @@ test("live Gmail work dispatches ahead of bulk synchronization work", () => {
       payload: {},
     }),
     "mail-label-submit",
+  );
+});
+
+test("Gmail synchronization pages create stable bounded message batches", () => {
+  const providerMessageIds = Array.from(
+    { length: GMAIL_SYNC_MESSAGE_BATCH_SIZE * 2 + 3 },
+    (_, index) => `message-${index + 1}`,
+  );
+  const steps = createGmailSyncMessageBatchSteps({
+    runId: "11111111-1111-4111-8111-111111111111",
+    userId: "22222222-2222-4222-8222-222222222222",
+    accountId: "33333333-3333-4333-8333-333333333333",
+    pageNumber: 4,
+    providerMessageIds,
+  });
+
+  assert.deepEqual(
+    steps.map((step) => step.idempotencyKey),
+    [
+      "gmail-message-batch:11111111-1111-4111-8111-111111111111:4:1",
+      "gmail-message-batch:11111111-1111-4111-8111-111111111111:4:2",
+      "gmail-message-batch:11111111-1111-4111-8111-111111111111:4:3",
+    ],
+  );
+  assert.deepEqual(
+    steps.map((step) => step.payload?.providerMessageIds),
+    [
+      providerMessageIds.slice(0, GMAIL_SYNC_MESSAGE_BATCH_SIZE),
+      providerMessageIds.slice(
+        GMAIL_SYNC_MESSAGE_BATCH_SIZE,
+        GMAIL_SYNC_MESSAGE_BATCH_SIZE * 2,
+      ),
+      providerMessageIds.slice(GMAIL_SYNC_MESSAGE_BATCH_SIZE * 2),
+    ],
   );
 });
 

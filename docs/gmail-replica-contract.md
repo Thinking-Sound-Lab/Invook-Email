@@ -2,7 +2,7 @@
 
 **Status:** Implemented contract
 **Canonical provider:** Gmail
-**Updated:** August 15, 2026
+**Updated:** August 17, 2026
 
 ## Scope and ownership
 
@@ -24,14 +24,14 @@ Embedding backfill and initial Memory wait for the watch-first sequence to compl
 2. Register and persist the Gmail watch immediately.
 3. Create one durable initial `mail_sync_run`.
 4. Discover all message IDs, including Spam and Trash.
-5. Process each message in its own idempotent workflow job. Message concurrency is configured by `GMAIL_MESSAGE_CONCURRENCY` and defaults to five.
+5. Group discovered message IDs into idempotent Temporal activities of at most 25 messages. Each activity fetches at most `GMAIL_MESSAGE_CONCURRENCY` messages concurrently, which defaults to five, and checkpoints every message independently in PostgreSQL. A retry skips completed messages and retries only unfinished work in the batch.
 6. Upload raw MIME and attachment bytes, persist normalized message state, and create the `label.message.analyze` operation checkpoint and bulk `mail-label-submit` Temporal command in the same transaction.
 7. Synchronize Gmail Draft resources.
 8. Under the account advisory lock, apply authenticated notification history from H0 while the snapshot proceeds, then perform a final replay and continue while a newer pending notification cursor exists.
 9. Atomically mark the replica ready at the final applied cursor.
 10. Only then publish embedding and initial Memory derivation work. Initial sync never triggers a final label backfill; the separate user-confirmed recent-mail scan is the only historical label application path.
 
-A connected account's stored messages become usable while this sequence is in progress after their required label analysis reaches `complete` or terminal `failed`. `pending` and `running` messages are excluded from normal mailbox, search, agent, attachment, and reply-draft results. A terminal failure is visible with its real Gmail-owned state and an explicit failure indicator, but no fabricated AI match. Missing rows stay unavailable, semantic indexing is not a prerequisite, and Gmail fetching continues independently with separately bounded `GMAIL_MESSAGE_CONCURRENCY` and `MAIL_LABEL_CONCURRENCY`. The final H0 replay remains the only path that marks the replica ready.
+A connected account's stored messages become usable while this sequence is in progress after their required label analysis reaches `complete` or terminal `failed`. `pending` and `running` messages are excluded from normal mailbox, search, agent, attachment, and reply-draft results. A terminal failure is visible with its real Gmail-owned state and an explicit failure indicator, but no fabricated AI match. Missing rows stay unavailable, semantic indexing is not a prerequisite, and Gmail fetching continues independently with per-batch `GMAIL_MESSAGE_CONCURRENCY` and separately bounded `MAIL_LABEL_CONCURRENCY`. The final H0 replay remains the only path that marks the replica ready.
 
 A successful normal synchronization does not run a separate full-replica audit.
 
@@ -60,7 +60,7 @@ Duplicate execution is safe through provider identifiers, expected-cursor checks
 
 Watch renewal is a durable daily one-shot action. It persists the renewed watch, schedules its successor, and performs stored-cursor catch-up as a safety net. It does not poll or run a routine full-mailbox audit.
 
-If Gmail rejects an expired history cursor, Invook captures a fresh provider baseline, renews the watch, and creates an exceptional repair-type `mail_sync_run`. Repair uses the same paged discovery, per-message storage, and per-message label-analysis jobs as initial synchronization. Pub/Sub catch-up is serialized under the account lock and may advance the committed cursor while the snapshot proceeds, but keeps the replica in `repairing`. The finalizer still replays from the repair baseline, reconciles the full snapshot, and is the only repair path that marks the replica ready. A reconnect-required account follows the same durable repair-run path after successful OAuth.
+If Gmail rejects an expired history cursor, Invook captures a fresh provider baseline, renews the watch, and creates an exceptional repair-type `mail_sync_run`. Repair uses the same paged discovery, bounded message batches with per-message storage checkpoints, and per-message label-analysis jobs as initial synchronization. Pub/Sub catch-up is serialized under the account lock and may advance the committed cursor while the snapshot proceeds, but keeps the replica in `repairing`. The finalizer still replays from the repair baseline, reconciles the full snapshot, and is the only repair path that marks the replica ready. A reconnect-required account follows the same durable repair-run path after successful OAuth.
 
 Permanent credential rejection atomically marks the account `reconnect_required`, fails active Gmail work, and prevents already-published jobs from reactivating terminal state. Transient provider and transport failures retain bounded workflow retries.
 

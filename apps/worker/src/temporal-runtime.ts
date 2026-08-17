@@ -116,6 +116,8 @@ function activityConcurrency(
       return gmailControlConcurrency;
     case "gmail-messages":
       return gmailMessageConcurrency;
+    case "gmail-message-batches":
+      return 1;
     case "mail-indexing-live":
       return 5;
     case "mail-label-live":

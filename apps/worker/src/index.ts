@@ -148,6 +148,10 @@ import {
 } from "./temporal-runtime";
 import { classifyGmailWorkflowFailure } from "./gmail-workflow-failure";
 import {
+  parseGmailMessageBatchPayload,
+  processGmailMessageBatch,
+} from "./gmail-message-batch";
+import {
   applyGmailHistoryWithExpiredCursorRepair,
   shouldRepairNonReadyGmailReplica,
 } from "./gmail-history-recovery";
@@ -727,6 +731,54 @@ async function runGmailPage(job: WorkflowStepJob) {
   };
 }
 
+async function processInitialGmailMessage(input: {
+  job: WorkflowStepJob;
+  runId: string;
+  providerMessageId: string;
+  account: { id: string; userId: string; email: string };
+  credential: GoogleCredential;
+}): Promise<"complete" | "current" | "gone" | "inactive"> {
+  const shouldProcess = await markMailSyncItemRunning(
+    input.runId,
+    input.account.id,
+    input.providerMessageId,
+    input.job.attempts,
+  );
+  if (!shouldProcess) return "current";
+  let gmailMessage;
+  try {
+    gmailMessage = await getGmailMessage(
+      input.credential.accessToken,
+      input.providerMessageId,
+    );
+  } catch (error) {
+    if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+    const completed = await completeMailSyncItem(
+      input.runId,
+      input.providerMessageId,
+    );
+    return completed ? "gone" : "inactive";
+  }
+  try {
+    await storeMessage({
+      userId: input.account.userId,
+      accountId: input.account.id,
+      accountEmail: input.account.email,
+      ingestionMode: "initial",
+      message: await parseGmailMessage(gmailMessage),
+      activeRunId: input.runId,
+    });
+  } catch (error) {
+    if (!(error instanceof InactiveMailSyncRunError)) throw error;
+    return "inactive";
+  }
+  const completed = await completeMailSyncItem(
+    input.runId,
+    input.providerMessageId,
+  );
+  return completed ? "complete" : "inactive";
+}
+
 async function runGmailMessage(job: WorkflowStepJob) {
   if (!job.accountId || !job.runId) {
     throw new Error("The Gmail message job is missing its synchronization run.");
@@ -736,46 +788,73 @@ async function runGmailMessage(job: WorkflowStepJob) {
     job.payload.providerMessageId,
     "Gmail message ID",
   );
-  const shouldProcess = await markMailSyncItemRunning(
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  const status = await processInitialGmailMessage({
+    job,
     runId,
-    job.accountId,
     providerMessageId,
-    job.attempts,
-  );
-  if (!shouldProcess) {
-    return { status: "current", runId, providerMessageId };
+    account,
+    credential,
+  });
+  return {
+    status,
+    runId,
+    providerMessageId,
+  };
+}
+
+async function runGmailMessageBatch(job: WorkflowStepJob) {
+  if (!job.accountId || !job.runId) {
+    throw new Error("The Gmail message batch is missing its synchronization run.");
+  }
+  const { runId, providerMessageIds } = parseGmailMessageBatchPayload(job.payload);
+  if (runId !== job.runId) {
+    throw new Error("The Gmail message batch run ID does not match its workflow.");
   }
   const { account, credential } = await getMailSyncContext(job.accountId);
-  let gmailMessage;
-  try {
-    gmailMessage = await getGmailMessage(credential.accessToken, providerMessageId);
-  } catch (error) {
-    if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
-    const completed = await completeMailSyncItem(runId, providerMessageId);
-    return {
-      status: completed ? "gone" : "inactive",
-      runId,
-      providerMessageId,
-    };
+  const outcome = await processGmailMessageBatch({
+    providerMessageIds,
+    concurrency: gmailMessageConcurrency,
+    processMessage: async (providerMessageId) => {
+      await processInitialGmailMessage({
+        job,
+        runId,
+        providerMessageId,
+        account,
+        credential,
+      });
+    },
+  });
+  if (outcome.failures.length > 0) {
+    const classifiedFailures = outcome.failures.map((failure) => ({
+      ...failure,
+      classification: classifyGmailWorkflowFailure(failure.error, {
+        attempt: job.attempts,
+        maxAttempts: job.maxAttempts,
+      }),
+    }));
+    const terminalFailure = classifiedFailures.find(
+      (failure) =>
+        failure.classification.isReconnectRequired ||
+        failure.classification.isTerminal,
+    );
+    if (terminalFailure) throw terminalFailure.error;
+    for (const failure of classifiedFailures) {
+      await failMailSyncItem({
+        runId,
+        providerMessageId: failure.providerMessageId,
+        attempt: job.attempts,
+        message: failure.classification.persistedMessage,
+        terminal: false,
+        reconnectRequired: false,
+      });
+    }
+    throw classifiedFailures[0]?.error ?? new Error("Gmail message batch failed.");
   }
-  try {
-    await storeMessage({
-      userId: account.userId,
-      accountId: account.id,
-      accountEmail: account.email,
-      ingestionMode: "initial",
-      message: await parseGmailMessage(gmailMessage),
-      activeRunId: runId,
-    });
-  } catch (error) {
-    if (!(error instanceof InactiveMailSyncRunError)) throw error;
-    return { status: "inactive", runId, providerMessageId };
-  }
-  const completed = await completeMailSyncItem(runId, providerMessageId);
   return {
-    status: completed ? "complete" : "inactive",
+    status: "complete",
     runId,
-    providerMessageId,
+    messageCount: providerMessageIds.length,
   };
 }
 
@@ -2281,6 +2360,8 @@ async function runWorkflowStepHandler(
         return runGmailPage(job);
       case "gmail.sync.message":
         return runGmailMessage(job);
+      case "gmail.sync.message.batch":
+        return runGmailMessageBatch(job);
       case "gmail.sync.finalize":
         return runGmailFinalize(job);
       case "gmail.history.catchup":
@@ -2422,6 +2503,7 @@ function enabledActivityTaskQueues(): Set<WorkflowActivityTaskQueue> {
   const taskQueues = new Set<WorkflowActivityTaskQueue>([
     "gmail-pages",
     "gmail-messages",
+    "gmail-message-batches",
     "gmail-control",
     "mail-label-live",
     "mail-label-submit",

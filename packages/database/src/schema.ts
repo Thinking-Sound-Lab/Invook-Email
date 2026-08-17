@@ -1110,6 +1110,7 @@ export const temporalCommands = pgTable(
       .$type<
         | "gmail-pages"
         | "gmail-messages"
+        | "gmail-message-batches"
         | "gmail-control"
         | "mail-indexing-batch"
         | "mail-indexing-live"
@@ -1140,7 +1141,7 @@ export const temporalCommands = pgTable(
     ),
     check(
       "temporal_commands_activity_task_queue_check",
-      sql`${table.activityTaskQueue} in ('gmail-pages', 'gmail-messages', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-live', 'mail-label-submit')`,
+      sql`${table.activityTaskQueue} in ('gmail-pages', 'gmail-messages', 'gmail-message-batches', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-live', 'mail-label-submit')`,
     ),
   ],
 );

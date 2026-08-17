@@ -197,6 +197,13 @@
       "when": 1786982085921,
       "tag": "0027_little_virginia_dare",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1786987905187,
+      "tag": "0028_heavy_outlaw_kid",
+      "breakpoints": true
     }
   ]
 }

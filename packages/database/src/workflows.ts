@@ -45,10 +45,12 @@ export type TemporalCommandJob = WorkflowStepJob & {
 };
 
 export const TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE = 10;
+export const GMAIL_SYNC_MESSAGE_BATCH_SIZE = 25;
 
 const gmailConnectedAccountStepTypes = [
   "gmail.sync.page",
   "gmail.sync.message",
+  "gmail.sync.message.batch",
   "gmail.sync.finalize",
   "gmail.message.refresh",
   "gmail.history.catchup",
@@ -253,6 +255,8 @@ export function activityTaskQueueForStepType(
       return "gmail-pages";
     case "gmail.sync.message":
       return "gmail-messages";
+    case "gmail.sync.message.batch":
+      return "gmail-message-batches";
     case "gmail.history.catchup":
     case "gmail.message.refresh":
     case "gmail.watch.renew":
@@ -301,6 +305,38 @@ export function temporalCommandPriority(
     return 1;
   }
   return 2;
+}
+
+export function createGmailSyncMessageBatchSteps(input: {
+  runId: string;
+  userId: string;
+  accountId: string;
+  pageNumber: number;
+  providerMessageIds: string[];
+}): WorkflowStepInput[] {
+  const steps: WorkflowStepInput[] = [];
+  for (
+    let offset = 0;
+    offset < input.providerMessageIds.length;
+    offset += GMAIL_SYNC_MESSAGE_BATCH_SIZE
+  ) {
+    const batchNumber = Math.floor(offset / GMAIL_SYNC_MESSAGE_BATCH_SIZE) + 1;
+    steps.push({
+      runId: input.runId,
+      userId: input.userId,
+      accountId: input.accountId,
+      stepType: "gmail.sync.message.batch",
+      payload: {
+        runId: input.runId,
+        providerMessageIds: input.providerMessageIds.slice(
+          offset,
+          offset + GMAIL_SYNC_MESSAGE_BATCH_SIZE,
+        ),
+      },
+      idempotencyKey: `gmail-message-batch:${input.runId}:${input.pageNumber}:${batchNumber}`,
+    });
+  }
+  return steps;
 }
 
 export async function enqueueWorkflowStepsWithExecutor(
@@ -1232,19 +1268,20 @@ export async function recordMailSyncPage(
           })
           .returning({ providerMessageId: gmailSyncItems.providerMessageId })
       : [];
+    const insertedMessageIds = new Set(
+      insertedItems.map((item) => item.providerMessageId),
+    );
 
     await enqueueWorkflowStepsWithExecutor(
-      insertedItems.map((item) => ({
+      createGmailSyncMessageBatchSteps({
         runId: input.runId,
         userId: input.userId,
         accountId: input.accountId,
-        stepType: "gmail.sync.message",
-        payload: {
-          runId: input.runId,
-          providerMessageId: item.providerMessageId,
-        },
-        idempotencyKey: `gmail-message:${input.runId}:${item.providerMessageId}`,
-      })),
+        pageNumber: input.pageNumber,
+        providerMessageIds: uniqueMessageIds.filter((providerMessageId) =>
+          insertedMessageIds.has(providerMessageId),
+        ),
+      }),
       executor,
     );
 
