@@ -5,7 +5,6 @@ export {
   listenForOutboxNotifications,
   listenForMailboxChangeNotifications,
   withGmailAccountControlLock,
-  withRemoteMailImageCacheLock,
   type Database,
 } from "./client";
 export {

@@ -112,15 +112,6 @@ function normalizeRemoteImageUrl(value: string): string | null {
   }
 }
 
-function remoteImageProxyPath(
-  messageId: string,
-  source: string,
-  capability: string,
-): string {
-  const query = new URLSearchParams({ capability, source });
-  return `/v1/messages/${encodeURIComponent(messageId)}/remote-image?${query.toString()}`;
-}
-
 function unquoteCssUrl(value: string): string {
   const trimmed = value.trim();
   if (
@@ -133,11 +124,7 @@ function unquoteCssUrl(value: string): string {
   return trimmed;
 }
 
-function rewriteCssRemoteImages(
-  css: string,
-  messageId: string,
-  capability: string | null,
-): string {
+function rewriteCssRemoteImages(css: string): string {
   const parsed = valueParser(css);
   parsed.walk((node) => {
     if (
@@ -147,13 +134,9 @@ function rewriteCssRemoteImages(
       for (const imageSetNode of node.nodes) {
         if (imageSetNode.type !== "string") continue;
         const source = normalizeRemoteImageUrl(imageSetNode.value);
-        if (source && capability) {
-          imageSetNode.value = remoteImageProxyPath(
-            messageId,
-            source,
-            capability,
-          );
-        } else if (source || /^(?:https?:)?\/\//i.test(imageSetNode.value)) {
+        if (source) {
+          imageSetNode.value = source;
+        } else if (/^(?:https?:)?\/\//i.test(imageSetNode.value)) {
           imageSetNode.value = "data:,";
         }
       }
@@ -164,25 +147,19 @@ function rewriteCssRemoteImages(
     }
     const originalSource = unquoteCssUrl(valueParser.stringify(node.nodes));
     const source = normalizeRemoteImageUrl(originalSource);
-    if (!source || !capability) {
+    if (!source) {
       if (!/^data:/i.test(originalSource) && !originalSource.startsWith("#")) {
         node.nodes = valueParser('"data:,"').nodes;
       }
       return false;
     }
-    node.nodes = valueParser(
-      JSON.stringify(remoteImageProxyPath(messageId, source, capability)),
-    ).nodes;
+    node.nodes = valueParser(JSON.stringify(source)).nodes;
     return false;
   });
   return parsed.toString();
 }
 
-function sanitizeEmailHtml(
-  bodyHtml: string,
-  messageId: string,
-  capability: string | null,
-): string {
+function sanitizeEmailHtml(bodyHtml: string): string {
   const sanitizedBodyHtml = sanitizeHtml(bodyHtml, {
     allowedTags: [...EMAIL_HTML_TAGS],
     allowedAttributes: {
@@ -247,9 +224,7 @@ function sanitizeEmailHtml(
           tagName: "img",
           attribs: {
             ...attributes,
-            src: capability
-              ? remoteImageProxyPath(messageId, source, capability)
-              : "data:,",
+            src: source,
           },
         };
       },
@@ -258,11 +233,7 @@ function sanitizeEmailHtml(
         attribs: attributes.style
           ? {
               ...attributes,
-              style: rewriteCssRemoteImages(
-                attributes.style,
-                messageId,
-                capability,
-              ),
+              style: rewriteCssRemoteImages(attributes.style),
             }
           : attributes,
       }),
@@ -271,11 +242,7 @@ function sanitizeEmailHtml(
   return sanitizedBodyHtml.replace(
     /<style\b([^>]*)>([\s\S]*?)<\/style>/gi,
     (_match, attributes: string, stylesheet: string) =>
-      `<style${attributes}>${rewriteCssRemoteImages(
-        stylesheet,
-        messageId,
-        capability,
-      )}</style>`,
+      `<style${attributes}>${rewriteCssRemoteImages(stylesheet)}</style>`,
   );
 }
 
@@ -354,10 +321,9 @@ function serializeEmailHtmlDocument(
 export function buildEmailHtmlDocument(
   bodyHtml: string,
   frameId: string,
-  remoteImageCapability: string | null = null,
 ): string {
   return serializeEmailHtmlDocument(
-    sanitizeEmailHtml(bodyHtml, frameId, remoteImageCapability),
+    sanitizeEmailHtml(bodyHtml),
     frameId,
   );
 }

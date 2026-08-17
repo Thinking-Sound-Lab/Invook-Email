@@ -16,7 +16,6 @@
     "@invook/contracts": "workspace:*",
     "@invook/database": "workspace:*",
     "@invook/gmail": "workspace:*",
-    "@invook/mail-content": "workspace:*",
     "@invook/object-storage": "workspace:*",
     "ai": "^7.0.58",
     "axios": "^1.19.0",

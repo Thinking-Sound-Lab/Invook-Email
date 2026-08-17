@@ -6,7 +6,6 @@ import type { FastifyInstance } from "fastify";
 import { validate as validateUuid } from "uuid";
 
 import type { InvookSession } from "@invook/auth";
-import type { RemoteMailImageCapabilityResponse } from "@invook/contracts";
 import { composePlainTextGmailReply } from "@invook/gmail";
 import { ObjectStorageObjectNotFoundError } from "@invook/object-storage";
 
@@ -28,14 +27,9 @@ const otherUserId = "22222222-2222-4222-8222-222222222222";
 const attachmentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const missingObjectAttachmentId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const absentAttachmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-const remoteImageMessageId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const attachmentBytes = Buffer.from([0, 1, 2, 253, 254, 255]);
-const remoteImageBytes = Buffer.from([137, 80, 78, 71]);
-const remoteImageCapabilitySecret =
-  "test-only-remote-image-capability-secret-value";
 const attachmentChecksum = createHash("sha256").update(attachmentBytes).digest("hex");
 let attachmentObjectReadCount = 0;
-let remoteImageCacheReadCount = 0;
 
 function getTestSession(headers: Headers): InvookSession | null {
   const cookie = headers.get("cookie") ?? "";
@@ -117,22 +111,6 @@ before(async () => {
           throw new ObjectStorageObjectNotFoundError();
         }
         return attachmentBytes;
-      },
-    },
-    remoteMailImageRoutes: {
-      capabilitySecret: remoteImageCapabilitySecret,
-      getMessageBody: async ({ userId, messageId }) =>
-        userId === attachmentOwnerId && messageId === remoteImageMessageId
-          ? {
-              bodyHtml:
-                '<img src="https://images.example.com/banner.png?delivery=abc&amp;user=123"><div style="background-image:url(\'https://images.example.com/tile.webp\');content:image-set(\'https://images.example.com/retina.avif\' 2x)"></div>',
-            }
-          : null,
-      getImage: async (source) => {
-        remoteImageCacheReadCount += 1;
-        assert.match(source, /^https:\/\/images\.example\.com\//);
-        if (source === "https://images.example.com/tile.webp") return null;
-        return { bytes: remoteImageBytes, contentType: "image/png" };
       },
     },
   });
@@ -434,102 +412,6 @@ test("attachment ETags revalidate after authorization without reading storage", 
   assert.equal(response.statusCode, 304);
   assert.equal(response.headers.etag, `"${attachmentChecksum}"`);
   assert.equal(attachmentObjectReadCount, readsBefore);
-});
-
-test("remote mail images require authentication and a valid message ID", async () => {
-  const anonymous = await api.inject({
-    method: "GET",
-    url: `/v1/messages/${remoteImageMessageId}/remote-image-capability`,
-  });
-  assert.equal(anonymous.statusCode, 401);
-
-  const invalidMessage = await api.inject({
-    method: "GET",
-    url: "/v1/messages/not-a-uuid/remote-image-capability",
-    headers: { cookie: await sessionCookie(attachmentOwnerId) },
-  });
-  assert.equal(invalidMessage.statusCode, 400);
-  assert.equal(invalidMessage.json().title, "Invalid message ID");
-});
-
-test("remote mail images serve only cached bytes for an owned exact source", async () => {
-  const readsBefore = remoteImageCacheReadCount;
-  const deniedOwner = await api.inject({
-    method: "GET",
-    url: `/v1/messages/${remoteImageMessageId}/remote-image-capability`,
-    headers: { cookie: await sessionCookie(otherUserId) },
-  });
-  assert.equal(deniedOwner.statusCode, 404);
-
-  const capabilityResponse = await api.inject({
-    method: "GET",
-    url: `/v1/messages/${remoteImageMessageId}/remote-image-capability`,
-    headers: { cookie: await sessionCookie(attachmentOwnerId) },
-  });
-  assert.equal(capabilityResponse.statusCode, 200);
-  assert.equal(capabilityResponse.headers["cache-control"], "no-store");
-  const { capability } =
-    capabilityResponse.json<RemoteMailImageCapabilityResponse>();
-
-  const unknownSource = new URLSearchParams({
-    capability,
-    source: "https://images.example.com/not-in-message.png",
-  });
-  const deniedSource = await api.inject({
-    method: "GET",
-    url: `/v1/messages/${remoteImageMessageId}/remote-image?${unknownSource.toString()}`,
-  });
-  assert.equal(deniedSource.statusCode, 404);
-  assert.equal(remoteImageCacheReadCount, readsBefore);
-
-  const invalidCapability = new URLSearchParams({
-    capability: `${capability}changed`,
-    source: "https://images.example.com/banner.png?delivery=abc&user=123",
-  });
-  const deniedCapability = await api.inject({
-    method: "GET",
-    url: `/v1/messages/${remoteImageMessageId}/remote-image?${invalidCapability.toString()}`,
-  });
-  assert.equal(deniedCapability.statusCode, 404);
-
-  const uncachedSource = new URLSearchParams({
-    capability,
-    source: "https://images.example.com/tile.webp",
-  });
-  const uncachedResponse = await api.inject({
-    method: "GET",
-    url: `/v1/messages/${remoteImageMessageId}/remote-image?${uncachedSource.toString()}`,
-  });
-  assert.equal(uncachedResponse.statusCode, 404);
-  assert.equal(uncachedResponse.json().title, "Remote image not available");
-
-  const validSource = new URLSearchParams({
-    capability,
-    source: "https://images.example.com/banner.png?delivery=abc&user=123",
-  });
-  const response = await api.inject({
-    method: "GET",
-    url: `/v1/messages/${remoteImageMessageId}/remote-image?${validSource.toString()}`,
-  });
-  assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.rawPayload, remoteImageBytes);
-  assert.equal(response.headers["content-type"], "image/png");
-  assert.equal(
-    response.headers["cache-control"],
-    "private, max-age=31536000, immutable",
-  );
-  assert.equal(response.headers["cross-origin-resource-policy"], "cross-origin");
-
-  const imageSetSource = new URLSearchParams({
-    capability,
-    source: "https://images.example.com/retina.avif",
-  });
-  const imageSetResponse = await api.inject({
-    method: "GET",
-    url: `/v1/messages/${remoteImageMessageId}/remote-image?${imageSetSource.toString()}`,
-  });
-  assert.equal(imageSetResponse.statusCode, 200);
-  assert.equal(remoteImageCacheReadCount, readsBefore + 3);
 });
 
 test("unknown routes use the API problem contract", async () => {

@@ -98,43 +98,6 @@ export async function getGmailMessageMutationContext(
   return message ?? null;
 }
 
-export async function getMailboxMessageBodyForUser(
-  input: { userId: string; messageId: string },
-  database: Database = getDatabase(),
-): Promise<{ bodyHtml: string | null } | null> {
-  const [message] = await database
-    .select({ bodyHtml: messages.bodyHtml })
-    .from(messages)
-    .where(
-      and(
-        eq(messages.id, input.messageId),
-        eq(messages.userId, input.userId),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
-      ),
-    )
-    .limit(1);
-  return message ?? null;
-}
-
-export async function listRemoteMailImageBackfillBodies(
-  input: { afterMessageId?: string; limit: number },
-  database: Database = getDatabase(),
-): Promise<Array<{ id: string; bodyHtml: string }>> {
-  const conditions = [isNotNull(messages.bodyHtml)];
-  if (input.afterMessageId) {
-    conditions.push(gt(messages.id, input.afterMessageId));
-  }
-  const rows = await database
-    .select({ id: messages.id, bodyHtml: messages.bodyHtml })
-    .from(messages)
-    .where(and(...conditions))
-    .orderBy(asc(messages.id))
-    .limit(input.limit);
-  return rows.flatMap((message) =>
-    message.bodyHtml ? [{ id: message.id, bodyHtml: message.bodyHtml }] : [],
-  );
-}
-
 export async function getGmailDraftResourceForUser(
   input: { userId: string; gmailDraftId: string },
   database: Database = getDatabase(),

@@ -2,7 +2,6 @@ import type {
   MailboxView,
   MailboxWorkspace,
   MailSearchResult,
-  RemoteMailImageCapabilityResponse,
   SessionState,
 } from "@invook/contracts";
 import axios from "axios";
@@ -61,19 +60,4 @@ export async function searchMailbox(query: string): Promise<MailSearchResult[]> 
     throw new Error(`The mail search API returned ${response.status}.`);
   }
   return response.data.results;
-}
-
-export async function getRemoteMailImageCapability(
-  messageId: string,
-): Promise<string | null> {
-  const response = await apiRequest<RemoteMailImageCapabilityResponse>(
-    `/v1/messages/${encodeURIComponent(messageId)}/remote-image-capability`,
-  );
-  if (response.status < 200 || response.status >= 300) return null;
-  const capability = response.data.capability;
-  return typeof capability === "string" &&
-    capability.length > 0 &&
-    capability.length <= 2_048
-    ? capability
-    : null;
 }

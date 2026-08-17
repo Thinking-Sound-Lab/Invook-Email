@@ -80,7 +80,6 @@ import {
   listenForOutboxNotifications,
   MAIL_INDEX_VERSION,
   listGmailObjectKeysForAccount,
-  listRemoteMailImageBackfillBodies,
   markGmailAccountCleanupRunning,
   listSubmittedEmbeddingBatchIds,
   markGmailReplicaReady,
@@ -135,7 +134,6 @@ import {
   stopGmailWatch,
   type ParsedGmailMessage,
 } from "@invook/gmail";
-import { prefetchRemoteMailImages } from "@invook/mail-content";
 import { createObjectStorage } from "@invook/object-storage";
 
 import {
@@ -169,7 +167,6 @@ const googleClientSecret = process.env.GMAIL_GOOGLE_CLIENT_SECRET ?? "";
 const feedbackBatchSize = 24;
 const embeddingBatchRequestLimit = 2_000;
 const embeddingBatchAttemptLimit = 3;
-const remoteMailImageBackfillBatchSize = 100;
 const batchWorkerLockDuration = 5 * 60 * 1_000;
 const credentialRenewalWindowMs = 5 * 60 * 1_000;
 const objectStorage = createObjectStorage();
@@ -315,10 +312,6 @@ async function prepareMessage(options: {
       };
     }),
   );
-  if (message.bodyHtml) {
-    await prefetchRemoteMailImages(message.bodyHtml);
-  }
-
   return {
     userId,
     accountId,
@@ -2514,52 +2507,6 @@ async function reconcileSubmittedEmbeddingBatches() {
   }
 }
 
-async function backfillRemoteMailImageCache(
-  isStopped: () => boolean,
-): Promise<void> {
-  let afterMessageId: string | undefined;
-  let messageCount = 0;
-  let cachedImageCount = 0;
-  let unavailableImageCount = 0;
-
-  while (!isStopped()) {
-    const messages = await listRemoteMailImageBackfillBodies({
-      afterMessageId,
-      limit: remoteMailImageBackfillBatchSize,
-    });
-    if (messages.length === 0) break;
-
-    for (
-      let start = 0;
-      start < messages.length && !isStopped();
-      start += gmailMessageConcurrency
-    ) {
-      const results = await Promise.all(
-        messages
-          .slice(start, start + gmailMessageConcurrency)
-          .map((message) => prefetchRemoteMailImages(message.bodyHtml)),
-      );
-      messageCount += results.length;
-      cachedImageCount += results.reduce(
-        (total, result) => total + result.cachedCount,
-        0,
-      );
-      unavailableImageCount += results.reduce(
-        (total, result) => total + result.unavailableCount,
-        0,
-      );
-    }
-    afterMessageId = messages.at(-1)?.id;
-    if (!afterMessageId) break;
-  }
-
-  console.info("worker: remote mail image cache backfill finished", {
-    messageCount,
-    cachedImageCount,
-    unavailableImageCount,
-  });
-}
-
 async function runOutboxLoop(
   signal: ReturnType<typeof createJobSignal>,
   isStopped: () => boolean,
@@ -2609,20 +2556,8 @@ async function run() {
     await enqueuePostSyncWorkflowSteps();
     await enqueuePendingAnalysisWorkflowSteps();
     await reconcileSubmittedEmbeddingBatches();
-    const remoteMailImageCacheBackfill = backfillRemoteMailImageCache(
-      () => stopRequested,
-    ).catch((error: unknown) => {
-      console.error("worker: remote mail image cache backfill failed", {
-        name: error instanceof Error ? error.name : "UnknownError",
-      });
-    });
     outboxSignal.notify();
-    try {
-      await runOutboxLoop(outboxSignal, () => stopRequested, runtime);
-    } finally {
-      requestStop();
-      await remoteMailImageCacheBackfill;
-    }
+    await runOutboxLoop(outboxSignal, () => stopRequested, runtime);
     if (fatalError) throw fatalError;
   } finally {
     process.removeListener("SIGINT", requestStop);

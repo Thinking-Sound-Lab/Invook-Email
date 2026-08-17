@@ -19,7 +19,7 @@ test("email HTML preserves sender presentation while removing active content", (
         <img src="https://example.com/banner.jpg" onerror="alert('unsafe')">
       </body>
     </html>
-  `, "message-1", "signed-capability");
+  `, "message-1");
 
   assert.match(
     document,
@@ -32,7 +32,7 @@ test("email HTML preserves sender presentation while removing active content", (
   assert.match(document, /href="https:\/\/example\.com\/path"/);
   assert.match(
     document,
-    /src="\/v1\/messages\/message-1\/remote-image\?capability=signed-capability&amp;source=https%3A%2F%2Fexample\.com%2Fbanner\.jpg"/,
+    /src="https:\/\/example\.com\/banner\.jpg"/,
   );
   assert.doesNotMatch(document, /Duplicated subject/);
   assert.equal(document.match(/<script/g)?.length, 1);
@@ -44,7 +44,6 @@ test("email HTML loads remote images while blocking active capabilities", () => 
   const document = buildEmailHtmlDocument(
     '<a href="javascript:alert(1)">Unsafe</a><img src="https://example.com/banner.jpg">',
     "message-2",
-    "signed-capability",
   );
 
   assert.match(document, /default-src 'none'/);
@@ -54,9 +53,8 @@ test("email HTML loads remote images while blocking active capabilities", () => 
   assert.match(document, /<meta name="referrer" content="no-referrer">/);
   assert.match(
     document,
-    /src="\/v1\/messages\/message-2\/remote-image\?capability=signed-capability&amp;source=https%3A%2F%2Fexample\.com%2Fbanner\.jpg"/,
+    /src="https:\/\/example\.com\/banner\.jpg"/,
   );
-  assert.doesNotMatch(document, /src="https:\/\//);
   assert.doesNotMatch(document, /display: none !important/);
   assert.doesNotMatch(document, /javascript:/);
 });
@@ -79,7 +77,6 @@ test("email HTML removes one-pixel tracking images without removing visible imag
       <img src="https://example.com/banner.jpg" width="600" height="240">
     `,
     "message-3",
-    "signed-capability",
   );
 
   assert.doesNotMatch(document, /tracker\.gif/);
@@ -95,26 +92,24 @@ test("email HTML preserves self-contained images", () => {
   assert.match(document, /data:image\/png;base64,iVBORw0KGgo=/);
 });
 
-test("email HTML proxies remote CSS images without changing data images", () => {
+test("email HTML preserves remote CSS images without changing data images", () => {
   const document = buildEmailHtmlDocument(
     `
       <style class="mail-theme">.hero { background-image: url("https://example.com/hero.png"); }</style>
       <div style="background: url(data:image/png;base64,iVBORw0KGgo=), url('//example.com/tile.png'); content: image-set('https://example.com/retina.png' 2x)"></div>
     `,
     "message-5",
-    "signed-capability",
   );
 
-  assert.doesNotMatch(document, /url\(["']?https?:\/\//);
+  assert.match(document, /https:\/\/example\.com\/hero\.png/);
+  assert.match(document, /https:\/\/example\.com\/tile\.png/);
+  assert.match(document, /https:\/\/example\.com\/retina\.png/);
   assert.doesNotMatch(document, /url\(["']?\/\//);
   assert.match(document, /<style class="mail-theme">/);
-  assert.match(document, /source=https%3A%2F%2Fexample\.com%2Fhero\.png/);
-  assert.match(document, /source=https%3A%2F%2Fexample\.com%2Ftile\.png/);
-  assert.match(document, /source=https%3A%2F%2Fexample\.com%2Fretina\.png/);
   assert.match(document, /data:image\/png;base64,iVBORw0KGgo=/);
 });
 
-test("email HTML never falls back to a direct remote image URL", () => {
+test("email HTML rejects credentialed and non-default-port image URLs", () => {
   const document = buildEmailHtmlDocument(
     `
       <img src="https://user@example.com/private.png">
@@ -127,15 +122,14 @@ test("email HTML never falls back to a direct remote image URL", () => {
   assert.equal(document.match(/src="data:,"/g)?.length, 2);
 });
 
-test("email HTML withholds remote images until a capability is available", () => {
+test("email HTML loads remote images directly without an API capability", () => {
   const document = buildEmailHtmlDocument(
     '<img src="https://example.com/banner.png"><div style="background:url(https://example.com/tile.png)"></div>',
     "message-7",
   );
 
-  assert.doesNotMatch(document, /example\.com/);
-  assert.match(document, /src="data:,"/);
-  assert.match(document, /background:url\(&quot;data:,&quot;\)/);
+  assert.match(document, /src="https:\/\/example\.com\/banner\.png"/);
+  assert.match(document, /https:\/\/example\.com\/tile\.png/);
 });
 
 test("email HTML preserves sender color rules and legacy color attributes", () => {
