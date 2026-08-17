@@ -24,10 +24,17 @@ type MailboxEventStream = {
 };
 
 function writeEvent(response: EventResponse, event: StoredMailboxChangeEvent) {
+  const changedThreadIds = Array.isArray(event.payload.changedThreadIds)
+    ? event.payload.changedThreadIds.filter(
+        (threadId): threadId is string =>
+          typeof threadId === "string" && isUuid(threadId),
+      )
+    : [];
   const payload: MailboxChangeEvent = {
     id: event.id,
     accountId: event.accountId,
     changeType: event.changeType,
+    changedThreadIds,
     createdAt: event.createdAt.toISOString(),
   };
   response.write(

@@ -312,7 +312,6 @@ async function prepareMessage(options: {
       };
     }),
   );
-
   return {
     userId,
     accountId,
