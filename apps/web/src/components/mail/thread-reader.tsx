@@ -22,8 +22,8 @@ import {
   initials,
 } from "./mail-format";
 import { DraftComposer } from "./draft-composer";
-import { buildEmailHtmlDocument } from "./email-html-document";
-import { EmailHtmlFrame } from "./email-html-frame";
+import { EmailHtmlContent } from "./email-html-content";
+import { buildEmailHtmlContent } from "./email-html-sanitizer";
 import { LocalMailDate } from "./local-mail-date";
 import { MessageStarButton } from "./message-star-button";
 import { SmartLabelControls } from "./smart-label-controls";
@@ -131,8 +131,8 @@ export async function ThreadReader({
               );
               const senderLabel =
                 message.direction === "outgoing" ? "You" : senderName;
-              const emailHtmlDocument = message.bodyHtml
-                ? buildEmailHtmlDocument(message.bodyHtml, message.id)
+              const emailHtml = message.bodyHtml
+                ? buildEmailHtmlContent(message.bodyHtml)
                 : null;
               return (
                 <article
@@ -204,12 +204,11 @@ export async function ThreadReader({
                         </div>
                       </div>
 
-                      {emailHtmlDocument ? (
+                      {emailHtml ? (
                         <div className="mt-7 flex justify-center">
-                          <EmailHtmlFrame
+                          <EmailHtmlContent
                             className="max-w-[720px]"
-                            document={emailHtmlDocument}
-                            frameId={message.id}
+                            sanitizedHtml={emailHtml}
                           />
                         </div>
                       ) : (

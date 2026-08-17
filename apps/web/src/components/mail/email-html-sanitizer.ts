@@ -69,34 +69,6 @@ const EMAIL_HTML_TAGS = [
   "var",
 ] as const;
 
-function parsePixelDimension(value: string | undefined): number | null {
-  if (!value) return null;
-  const match = /^\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*$/i.exec(value);
-  return match ? Number(match[1]) : null;
-}
-
-function getInlinePixelDimension(
-  style: string | undefined,
-  property: "height" | "width",
-): number | null {
-  if (!style) return null;
-  const declaration = new RegExp(
-    `(?:^|;)\\s*${property}\\s*:\\s*(\\d+(?:\\.\\d+)?)px\\s*(?:;|$)`,
-    "i",
-  ).exec(style);
-  return declaration ? Number(declaration[1]) : null;
-}
-
-function isTrackingPixel(attributes: Record<string, string>): boolean {
-  const width =
-    parsePixelDimension(attributes.width) ??
-    getInlinePixelDimension(attributes.style, "width");
-  const height =
-    parsePixelDimension(attributes.height) ??
-    getInlinePixelDimension(attributes.style, "height");
-  return width !== null && height !== null && width <= 1 && height <= 1;
-}
-
 function normalizeRemoteImageUrl(value: string): string | null {
   try {
     const trimmed = value.trim();
@@ -181,7 +153,7 @@ function sanitizeEmailHtml(bodyHtml: string): string {
       ],
       a: ["href", "name", "rel", "target"],
       col: ["span"],
-      img: ["alt", "src"],
+      img: ["alt", "referrerpolicy", "src"],
       ol: ["start", "type"],
       table: ["border", "cellpadding", "cellspacing", "summary"],
       td: ["colspan", "rowspan"],
@@ -189,23 +161,19 @@ function sanitizeEmailHtml(bodyHtml: string): string {
       ul: ["type"],
     },
     allowedSchemes: ["data", "http", "https", "mailto", "tel"],
-    // Email presentation depends on embedded CSS. It remains confined to a
-    // sandboxed iframe; remote images load without receiving the app referrer.
+    // Email presentation depends on embedded CSS. The rendered content is
+    // isolated from the application stylesheet by a Shadow DOM boundary.
     allowVulnerableTags: true,
     allowProtocolRelative: false,
     disallowedTagsMode: "discard",
     enforceHtmlBoundary: true,
     nonTextTags: ["script", "style", "textarea", "option", "xmp", "title"],
-    exclusiveFilter: (frame) => {
-      if (frame.tag !== "img") return false;
-      return isTrackingPixel(frame.attribs);
-    },
     transformTags: {
       a: (_tagName, attributes) => ({
         tagName: "a",
         attribs: {
           ...attributes,
-          rel: "noopener noreferrer",
+          rel: "noopener noreferrer nofollow",
           target: "_blank",
         },
       }),
@@ -224,6 +192,7 @@ function sanitizeEmailHtml(bodyHtml: string): string {
           tagName: "img",
           attribs: {
             ...attributes,
+            referrerpolicy: "no-referrer",
             src: source,
           },
         };
@@ -246,84 +215,40 @@ function sanitizeEmailHtml(bodyHtml: string): string {
   );
 }
 
-function serializeFrameId(frameId: string): string {
-  return JSON.stringify(frameId).replaceAll("<", "\\u003c");
-}
+const EMAIL_CONTENT_STYLES = `
+  :host {
+    color-scheme: only light;
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+  .invook-email-body {
+    all: initial;
+    display: flow-root;
+    min-width: 0;
+    width: 100%;
+    color: #202124;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    -webkit-text-size-adjust: 100%;
+  }
+  .invook-email-body img {
+    border: 0;
+    height: auto;
+    max-width: 100%;
+  }
+  .invook-email-body table {
+    max-width: 100%;
+  }
+  .invook-email-body pre {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+`;
 
-function buildEmailContentSecurityPolicy(): string {
-  return [
-    "default-src 'none'",
-    "base-uri 'none'",
-    "connect-src 'none'",
-    "font-src data:",
-    "form-action 'none'",
-    "frame-src 'none'",
-    "img-src data: http: https:",
-    "media-src 'none'",
-    "object-src 'none'",
-    "script-src 'nonce-invook-email-size'",
-    "style-src 'unsafe-inline'",
-  ].join("; ");
-}
-
-function serializeEmailHtmlDocument(
-  bodyHtml: string,
-  frameId: string,
-): string {
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="${buildEmailContentSecurityPolicy()}">
-    <meta name="referrer" content="no-referrer">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-      :root { color-scheme: light only; }
-      *, *::before, *::after { box-sizing: border-box; }
-      html, body { margin: 0; min-width: 0; padding: 0; width: 100%; background: transparent; color: #202124; }
-      html { overflow: auto; }
-      body { overflow-wrap: anywhere; font-family: "Plus Jakarta Sans", Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.5; }
-      #invook-email-root { display: flow-root; min-width: 0; width: 100%; background: #fff; }
-      img { border: 0; height: auto; max-width: 100%; }
-      table { max-width: 100%; }
-      pre { max-width: 100%; overflow-wrap: anywhere; white-space: pre-wrap; }
-      a { color: #1155cc; }
-    </style>
-  </head>
-  <body>
-    <div id="invook-email-root" role="document">${bodyHtml}</div>
-    <script nonce="invook-email-size">
-      (() => {
-        const frameId = ${serializeFrameId(frameId)};
-        const reportHeight = () => {
-          const root = document.getElementById("invook-email-root");
-          if (!root) return;
-          const rootBounds = root.getBoundingClientRect();
-          const bodyPaddingBottom = Number.parseFloat(
-            getComputedStyle(document.body).paddingBottom,
-          ) || 0;
-          const height = Math.ceil(
-            Math.max(root.scrollHeight, rootBounds.height, rootBounds.bottom + scrollY) +
-              bodyPaddingBottom,
-          );
-          parent.postMessage({ type: "invook-email-height", frameId, height }, "*");
-        };
-        const observer = new ResizeObserver(reportHeight);
-        const root = document.getElementById("invook-email-root");
-        if (root) observer.observe(root);
-        reportHeight();
-      })();
-    </script>
-  </body>
-</html>`;
-}
-
-export function buildEmailHtmlDocument(
-  bodyHtml: string,
-  frameId: string,
-): string {
-  return serializeEmailHtmlDocument(
-    sanitizeEmailHtml(bodyHtml),
-    frameId,
-  );
+export function buildEmailHtmlContent(bodyHtml: string): string {
+  return `<style>${EMAIL_CONTENT_STYLES}</style><div class="invook-email-body" role="document">${sanitizeEmailHtml(bodyHtml)}</div>`;
 }
