@@ -1251,7 +1251,7 @@ export const mailboxChangeEvents = pgTable(
       .notNull()
       .references(() => connectedAccounts.id, { onDelete: "cascade" }),
     changeType: text("change_type")
-      .$type<"replica_ready" | "history_applied" | "repair_complete" | "drafts_changed" | "labels_changed">()
+      .$type<"replica_ready" | "history_applied" | "drafts_changed" | "labels_changed">()
       .notNull(),
     payload: jsonb("payload").$type<JsonObject>().notNull().default({}),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
@@ -1263,7 +1263,7 @@ export const mailboxChangeEvents = pgTable(
     ),
     check(
       "mailbox_change_events_type_check",
-      sql`${table.changeType} in ('replica_ready', 'history_applied', 'repair_complete', 'drafts_changed', 'labels_changed')`,
+      sql`${table.changeType} in ('replica_ready', 'history_applied', 'drafts_changed', 'labels_changed')`,
     ),
   ],
 );

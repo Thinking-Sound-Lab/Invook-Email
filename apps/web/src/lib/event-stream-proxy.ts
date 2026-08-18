@@ -12,9 +12,7 @@ export async function proxyEventStream(request: Request, path: string): Promise<
     accept: "text/event-stream",
   };
   const cookie = request.headers.get("cookie");
-  const lastEventId = request.headers.get("last-event-id");
   if (cookie) headers.cookie = cookie;
-  if (lastEventId) headers["last-event-id"] = lastEventId;
 
   let upstream: AxiosResponse<Readable>;
   try {

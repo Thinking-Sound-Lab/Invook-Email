@@ -176,6 +176,13 @@
       "when": 1786864892154,
       "tag": "0024_yielding_talisman",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1786960834863,
+      "tag": "0025_opposite_inertia",
+      "breakpoints": true
     }
   ]
 }

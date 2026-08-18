@@ -1,19 +1,12 @@
-import { GoogleIcon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
 import { redirect } from "next/navigation";
-import { connection } from "next/server";
-import { validate as validateUuid } from "uuid";
+import { v4 as uuidv4, validate as validateUuid } from "uuid";
 
 import { mailboxViews } from "@invook/contracts";
 
-import { AccountPipelineStripe } from "@/components/mail/account-pipeline-stripe";
 import { AgentPanel } from "@/components/mail/agent-panel";
 import { ComposeSurface } from "@/components/mail/compose-surface";
 import { MailList } from "@/components/mail/mail-list";
-import { MailboxEventSubscriber } from "@/components/mail/mailbox-event-subscriber";
-import { MailSidebar } from "@/components/mail/mail-sidebar";
 import { ThreadReader } from "@/components/mail/thread-reader";
-import { Button } from "@/components/ui/button";
 import type {
   MailboxView,
   MailSurface,
@@ -26,7 +19,11 @@ import {
   SearchResultsSurface,
   SearchSurface,
 } from "@/components/mail/workspace-surface";
-import { getMailboxWorkspace, searchMailbox } from "@/lib/api";
+import {
+  getMailboxThreadDetail,
+  getMailboxThreadPage,
+  searchMailbox,
+} from "@/lib/api";
 
 interface MailPageProps {
   searchParams: Promise<{
@@ -65,7 +62,6 @@ function normalizeSurface(value: string | undefined): MailSurface {
 }
 
 export default async function MailPage({ searchParams }: MailPageProps) {
-  await connection();
   const params = await searchParams;
 
   const requestedThreadId = firstValue(params.thread);
@@ -75,50 +71,16 @@ export default async function MailPage({ searchParams }: MailPageProps) {
   const mailboxCursor = firstValue(params.cursor)?.trim() || undefined;
   const currentView = normalizeView(firstValue(params.view));
 
-  const workspace = await getMailboxWorkspace({
-    cursor: mailboxCursor,
-    selectedThreadId: requestedThreadId,
-    view: currentView,
-  });
-  if (!workspace) redirect("/");
-  if (workspace.account.status === "reconnect_required") {
-    return (
-      <main className="grid min-h-dvh place-items-center bg-background px-6">
-        <div className="flex w-full max-w-sm flex-col items-center text-center">
-          <h1 className="text-2xl font-semibold tracking-[-0.035em]">
-            Reconnect Gmail
-          </h1>
-          <p className="mt-3 text-sm leading-6 text-muted-foreground">
-            Google no longer accepts the stored Gmail credential. Your local
-            mailbox remains preserved and synchronization will resume only
-            after Google authorization succeeds.
-          </p>
-          <form
-            action="/v1/connections/gmail/start"
-            method="get"
-            className="mt-7 w-full"
-          >
-            <input type="hidden" name="accountId" value={workspace.account.id} />
-            <Button type="submit" size="lg" className="h-11 w-full gap-2.5">
-              <HugeiconsIcon icon={GoogleIcon} size={18} strokeWidth={1.7} />
-              Reconnect Gmail
-            </Button>
-          </form>
-        </div>
-      </main>
-    );
-  }
-  const currentLabelId = currentView.startsWith("label:")
-    ? currentView.slice("label:".length)
-    : null;
-  const currentLabel = currentLabelId
-    ? workspace.invookLabels.find((label) => label.id === currentLabelId)
-    : null;
-
-  const mailboxThreads = workspace.threads as MailThreadSummary[];
-  const selectedThread = workspace.selectedThread as SelectedThread | null;
-  const searchResults =
-    currentSurface === "search" && query ? await searchMailbox(query) : [];
+  const [threadDetail, threadPage, searchResults] = await Promise.all([
+    requestedThreadId ? getMailboxThreadDetail(requestedThreadId) : null,
+    currentSurface === "mail" && !requestedThreadId
+      ? getMailboxThreadPage({ cursor: mailboxCursor, view: currentView })
+      : null,
+    currentSurface === "search" && query ? searchMailbox(query) : [],
+  ]);
+  if (requestedThreadId && !threadDetail) redirect(`/mail?view=${currentView}`);
+  if (currentSurface === "mail" && !requestedThreadId && !threadPage) redirect("/");
+  const selectedThread = threadDetail?.thread as SelectedThread | undefined;
 
   let centerPane: React.ReactNode;
   if (selectedThread) {
@@ -127,13 +89,11 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         thread={selectedThread}
         currentView={currentView}
         mailboxCursor={mailboxCursor}
-        accountEmail={workspace.account.email}
-        aiConfigured={workspace.aiConfigured}
-        availableLabels={workspace.invookLabels}
+        availableLabels={threadDetail?.invookLabels ?? []}
       />
     );
   } else if (currentSurface === "compose") {
-    centerPane = <ComposeSurface gmailAccountId={workspace.account.id} />;
+    centerPane = <ComposeSurface />;
   } else if (currentSurface === "search" && !query) {
     centerPane = <SearchSurface />;
   } else if (currentSurface === "search" && query) {
@@ -144,52 +104,28 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     centerPane = (
       <MailList
         key={currentView}
-        accountEmail={workspace.account.email}
+        canonicalPageVersion={uuidv4()}
         currentView={currentView}
-        initialOlderCursor={workspace.pagination.olderCursor}
-        mailSyncState={workspace.account.syncState.mailSync}
-        title={currentLabel?.name}
-        threads={mailboxThreads}
+        initialOlderCursor={threadPage?.pagination.olderCursor ?? null}
+        threads={(threadPage?.threads ?? []) as MailThreadSummary[]}
         query={currentSurface === "search" ? query : undefined}
       />
     );
   }
 
   return (
-    <main className="flex h-dvh flex-col overflow-hidden bg-background">
-      <MailboxEventSubscriber selectedThreadId={selectedThread?.id} />
-      <div className="grid min-h-0 flex-1 grid-cols-[64px_minmax(0,1fr)] lg:grid-cols-[240px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(520px,1fr)_360px]">
-        <MailSidebar
-          user={workspace.user}
-          account={workspace.account}
-          currentView={currentView}
-          currentSurface={currentSurface}
-          memories={workspace.memories}
-          invookLabels={workspace.invookLabels}
-          sidebarCounts={workspace.sidebarCounts}
-          aiConfigured={workspace.aiConfigured}
-        />
-        <div
-          data-slot="mail-workspace-content"
-          className="min-h-0 min-w-0 overflow-hidden [&>*]:h-full"
-        >
-          {centerPane}
-        </div>
-        <AgentPanel
-          key={selectedThread?.id ?? "mailbox"}
-          openThreadId={selectedThread?.id}
-          openThreadSubject={selectedThread?.subject || undefined}
-          aiConfigured={workspace.aiConfigured}
-        />
+    <>
+      <div
+        data-slot="mail-workspace-content"
+        className="min-h-0 min-w-0 overflow-hidden [&>*]:h-full"
+      >
+        {centerPane}
       </div>
-      <AccountPipelineStripe
-        accountEmail={workspace.account.email}
-        initialProgress={{
-          mailSync: workspace.account.mailSyncProgress,
-          indexing: workspace.account.indexingProgress,
-          memory: workspace.account.syncState.memory,
-        }}
+      <AgentPanel
+        key={selectedThread?.id ?? "mailbox"}
+        openThreadId={selectedThread?.id}
+        openThreadSubject={selectedThread?.subject || undefined}
       />
-    </main>
+    </>
   );
 }

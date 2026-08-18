@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, gt, inArray, isNotNull, not, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, not, or } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 
 import { getDatabase, type Database } from "./client";
+import { insertMailboxChange } from "./mailbox-change-events";
 import {
   deleteIndexedMessage,
   replaceGmailMessageLabels,
@@ -228,32 +229,6 @@ export async function getAiReplyDraftForGmailSave(
   return { ...draft, replyTarget: replyTarget ?? null };
 }
 
-async function insertMailboxChange(
-  transaction: DatabaseTransaction,
-  input: {
-    userId: string;
-    accountId: string;
-    changeType:
-      | "replica_ready"
-      | "history_applied"
-      | "repair_complete"
-      | "drafts_changed"
-      | "labels_changed";
-    payload?: Record<string, unknown>;
-  },
-) {
-  const [event] = await transaction
-    .insert(mailboxChangeEvents)
-    .values({
-      userId: input.userId,
-      accountId: input.accountId,
-      changeType: input.changeType,
-      payload: input.payload ?? {},
-    })
-    .returning({ id: mailboxChangeEvents.id });
-  return event?.id ?? null;
-}
-
 export async function recordMailboxMessageRefresh(
   input: { userId: string; accountId: string; threadId: string },
   database: Database = getDatabase(),
@@ -277,11 +252,31 @@ export async function recordMailboxMessageRefresh(
       changeType: "history_applied",
       payload: {
         changedThreadIds: [input.threadId],
+        refreshedThreadIds: [input.threadId],
         reason: "message_refresh",
       },
     });
     return true;
   });
+}
+
+async function listLocalThreadIdsForProviderThreadIds(
+  transaction: DatabaseTransaction,
+  input: { userId: string; accountId: string; providerThreadIds: string[] },
+): Promise<string[]> {
+  const providerThreadIds = [...new Set(input.providerThreadIds)];
+  if (providerThreadIds.length === 0) return [];
+  const rows = await transaction
+    .select({ id: threads.id })
+    .from(threads)
+    .where(
+      and(
+        eq(threads.userId, input.userId),
+        eq(threads.accountId, input.accountId),
+        inArray(threads.providerThreadId, providerThreadIds),
+      ),
+    );
+  return rows.map((thread) => thread.id);
 }
 
 export async function replaceGmailDraftResources(
@@ -306,6 +301,16 @@ export async function replaceGmailDraftResources(
       .for("update")
       .limit(1);
     if (!account) return false;
+    const existingDrafts = await transaction
+      .select({ providerThreadId: drafts.providerThreadId })
+      .from(drafts)
+      .where(
+        and(
+          eq(drafts.userId, input.userId),
+          eq(drafts.accountId, input.accountId),
+          eq(drafts.kind, "gmail"),
+        ),
+      );
     const providerDraftIds = input.drafts.map((draft) => draft.providerDraftId);
     if (providerDraftIds.length === 0) {
       await transaction
@@ -358,11 +363,24 @@ export async function replaceGmailDraftResources(
         });
     }
     if (input.notify) {
+      const affectedThreadIds = await listLocalThreadIdsForProviderThreadIds(
+        transaction,
+        {
+          userId: input.userId,
+          accountId: input.accountId,
+          providerThreadIds: [
+            ...existingDrafts.flatMap((draft) =>
+              draft.providerThreadId ? [draft.providerThreadId] : [],
+            ),
+            ...input.drafts.map((draft) => draft.providerThreadId),
+          ],
+        },
+      );
       await insertMailboxChange(transaction, {
         userId: input.userId,
         accountId: input.accountId,
         changeType: "drafts_changed",
-        payload: { draftCount: input.drafts.length },
+        payload: { kind: "snapshot", affectedThreadIds },
       });
     }
   });
@@ -410,11 +428,19 @@ export async function saveGmailDraftResource(
         },
       });
     if (input.notify) {
+      const affectedThreadIds = await listLocalThreadIdsForProviderThreadIds(
+        transaction,
+        {
+          userId: input.userId,
+          accountId: input.accountId,
+          providerThreadIds: [input.draft.providerThreadId],
+        },
+      );
       await insertMailboxChange(transaction, {
         userId: input.userId,
         accountId: input.accountId,
         changeType: "drafts_changed",
-        payload: { providerMessageId: input.draft.providerMessageId },
+        payload: { kind: "upsert", affectedThreadIds },
       });
     }
   });
@@ -434,13 +460,23 @@ export async function deleteGmailDraftResourceByMessageId(
           eq(drafts.providerMessageId, input.providerMessageId),
         ),
       )
-      .returning({ id: drafts.id });
+      .returning({ providerThreadId: drafts.providerThreadId });
     if (deleted.length > 0) {
+      const affectedThreadIds = await listLocalThreadIdsForProviderThreadIds(
+        transaction,
+        {
+          userId: input.userId,
+          accountId: input.accountId,
+          providerThreadIds: deleted.flatMap((draft) =>
+            draft.providerThreadId ? [draft.providerThreadId] : [],
+          ),
+        },
+      );
       await insertMailboxChange(transaction, {
         userId: input.userId,
         accountId: input.accountId,
         changeType: "drafts_changed",
-        payload: { providerMessageId: input.providerMessageId },
+        payload: { kind: "delete", affectedThreadIds },
       });
     }
   });
@@ -837,7 +873,7 @@ export async function applyGmailHistoryBatch(
           accountId: input.accountId,
           changeType: "history_applied",
           payload: {
-            historyCursor: input.nextCursor,
+            reason: "history_catchup",
             changedThreadIds: Array.from(changedThreadIds),
             refreshedThreadIds: Array.from(refreshedThreadIds),
           },
@@ -910,7 +946,7 @@ export async function markGmailReplicaReady(
       userId: input.userId,
       accountId: input.accountId,
       changeType: "replica_ready",
-      payload: { historyCursor: input.historyCursor },
+      payload: {},
     });
     if (pendingHistoryCursor) {
       await enqueueWorkflowStep(
@@ -926,56 +962,6 @@ export async function markGmailReplicaReady(
     }
     return true;
   });
-}
-
-export async function getMailboxChangeEventsForUser(
-  input: { userId: string; afterEventId?: string | null; limit?: number },
-  database: Database = getDatabase(),
-) {
-  let afterCreatedAt: Date | null = null;
-  let anchoredEventId: string | null = null;
-  if (input.afterEventId) {
-    const [after] = await database
-      .select({
-        id: mailboxChangeEvents.id,
-        createdAt: mailboxChangeEvents.createdAt,
-      })
-      .from(mailboxChangeEvents)
-      .where(
-        and(
-          eq(mailboxChangeEvents.id, input.afterEventId),
-          eq(mailboxChangeEvents.userId, input.userId),
-        ),
-      )
-      .limit(1);
-    afterCreatedAt = after?.createdAt ?? null;
-    anchoredEventId = after?.id ?? null;
-  }
-  return database
-    .select({
-      id: mailboxChangeEvents.id,
-      accountId: mailboxChangeEvents.accountId,
-      changeType: mailboxChangeEvents.changeType,
-      payload: mailboxChangeEvents.payload,
-      createdAt: mailboxChangeEvents.createdAt,
-    })
-    .from(mailboxChangeEvents)
-    .where(
-      and(
-        eq(mailboxChangeEvents.userId, input.userId),
-        afterCreatedAt && anchoredEventId
-          ? or(
-              gt(mailboxChangeEvents.createdAt, afterCreatedAt),
-              and(
-                eq(mailboxChangeEvents.createdAt, afterCreatedAt),
-                gt(mailboxChangeEvents.id, anchoredEventId),
-              ),
-            )
-          : undefined,
-      ),
-    )
-    .orderBy(asc(mailboxChangeEvents.createdAt), asc(mailboxChangeEvents.id))
-    .limit(input.limit ?? 100);
 }
 
 export async function getMailboxChangeEvent(

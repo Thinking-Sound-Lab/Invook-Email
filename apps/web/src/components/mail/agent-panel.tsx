@@ -17,19 +17,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 import { formatMailText } from "./mail-format";
+import { useMailShell } from "./mail-shell-provider";
 type MailAgentUIMessage = UIMessage;
 
 export interface AgentPanelProps {
   openThreadId?: string;
   openThreadSubject?: string;
-  aiConfigured: boolean;
 }
 
 export function AgentPanel({
   openThreadId,
   openThreadSubject,
-  aiConfigured,
 }: AgentPanelProps) {
+  const { aiConfigured } = useMailShell();
   const transport = useMemo(
     () =>
       new DefaultChatTransport({

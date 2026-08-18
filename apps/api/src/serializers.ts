@@ -1,76 +1,21 @@
-import {
-  isAiConfigured,
-  isMemoryBatchConfigured,
-} from "@invook/ai";
+import { isAiConfigured } from "@invook/ai";
 import type {
-  MailboxWorkspace,
+  MailboxShell,
   MemoryEntry,
   AiReplyDraft,
   SignedInUser,
 } from "@invook/contracts";
-import {
-  getIndexingProgressForAccount,
-  getMailSyncProgressForAccount,
-  getMailboxWorkspace,
-  MAIL_INDEX_VERSION,
-} from "@invook/database";
+import type { getMailboxShellData } from "@invook/database";
 
-export async function serializeWorkspace(
-  workspace: NonNullable<Awaited<ReturnType<typeof getMailboxWorkspace>>>,
+export function serializeMailboxShell(
+  shell: NonNullable<Awaited<ReturnType<typeof getMailboxShellData>>>,
   user: SignedInUser,
-): Promise<MailboxWorkspace> {
-  const [mailSyncProgress, indexingProgress] = await Promise.all([
-    getMailSyncProgressForAccount({ accountId: workspace.account.id }),
-    getIndexingProgressForAccount({
-      accountId: workspace.account.id,
-      modelId: process.env.OPENAI_EMBEDDING_MODEL?.trim() || null,
-      indexVersion: MAIL_INDEX_VERSION,
-    }),
-  ]);
-  if (!mailSyncProgress || !indexingProgress) {
-    throw new Error("The account synchronization state is unavailable.");
-  }
+): MailboxShell {
   return {
     aiConfigured: isAiConfigured(),
-    batchConfigured: isMemoryBatchConfigured(),
     user,
-    account: {
-      id: workspace.account.id,
-      email: workspace.account.email,
-      image: workspace.account.image,
-      status: workspace.account.status,
-      syncState: {
-        ...workspace.account.syncState,
-        indexing: indexingProgress.state,
-      },
-      mailSyncProgress,
-      indexingProgress,
-      lastSyncedAt: workspace.account.lastSyncedAt?.toISOString() ?? null,
-      replica: {
-        state: workspace.account.replicaState,
-        readyAt: workspace.account.replicaReadyAt?.toISOString() ?? null,
-      },
-    },
-    memories: workspace.memories,
-    invookLabels: workspace.invookLabels,
-    sidebarCounts: workspace.sidebarCounts,
-    pagination: workspace.pagination,
-    threads: workspace.threads.map((thread) => ({
-      ...thread,
-      latestMessageAt: thread.latestMessageAt?.toISOString() ?? null,
-    })),
-    selectedThread: workspace.selectedThread
-      ? {
-          ...workspace.selectedThread,
-          latestMessageAt:
-            workspace.selectedThread.latestMessageAt?.toISOString() ?? null,
-          messages: workspace.selectedThread.messages.map((message) => ({
-            ...message,
-            internalDate: message.internalDate.toISOString(),
-            sentAt: message.sentAt.toISOString(),
-          })),
-        }
-      : null,
+    account: shell.account,
+    invookLabels: shell.invookLabels,
   };
 }
 

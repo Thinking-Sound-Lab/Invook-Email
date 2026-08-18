@@ -163,6 +163,7 @@ test("liveness uses the existing response contract", async () => {
   assert.equal(response.headers["cache-control"], "no-store");
   assert.equal(response.headers["x-content-type-options"], "nosniff");
   assert.equal(validateUuid(response.headers["x-request-id"] ?? ""), true);
+  assert.match(String(response.headers["server-timing"] ?? ""), /^api;dur=\d+\.\d$/);
 });
 
 test("the reverse proxy request ID and trailing slash are preserved", async () => {
@@ -278,6 +279,20 @@ test("mailbox refresh requires an authenticated session", async () => {
 
   assert.equal(response.statusCode, 401);
   assert.equal(response.json().title, "Authentication required");
+});
+
+test("focused mailbox reads require authentication and the workspace route is absent", async () => {
+  for (const url of [
+    "/v1/mailbox/shell",
+    "/v1/mailbox/sidebar-counts",
+    "/v1/mailbox/threads?view=all",
+    "/v1/mailbox/settings",
+  ]) {
+    const response = await api.inject({ method: "GET", url });
+    assert.equal(response.statusCode, 401, url);
+  }
+  const legacy = await api.inject({ method: "GET", url: "/v1/mailbox" });
+  assert.equal(legacy.statusCode, 404);
 });
 
 test("Gmail add and callback routes require a Better Auth session", async () => {

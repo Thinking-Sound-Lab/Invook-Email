@@ -2,7 +2,7 @@
 
 import { StarIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { AccountSyncStage, MailboxWorkspace } from "@invook/contracts";
+import type { MailboxThreadPage } from "@invook/contracts";
 import axios from "axios";
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -16,8 +16,13 @@ import { formatMailText, threadPeople } from "./mail-format";
 import { mailLabelColorClassName } from "./mail-label-colors";
 import { LocalMailDate } from "./local-mail-date";
 import { MailNavigationPending } from "./mail-navigation-pending";
+import { useMailShell } from "./mail-shell-provider";
 import { listMailRowLabels, type MailRowLabel } from "./mail-row-labels";
-import { mergeMailboxThreads } from "./mail-thread-pages";
+import {
+  mergeMailboxThreads,
+  resolveMailThreadPaginationState,
+  type MailThreadPaginationState,
+} from "./mail-thread-pages";
 import type {
   MailboxView,
   MailThreadSummary,
@@ -210,45 +215,48 @@ function MailRows({
 }
 
 export interface MailListProps {
-  accountEmail: string;
+  canonicalPageVersion: string;
   currentView: MailboxView;
   initialOlderCursor: string | null;
-  mailSyncState: AccountSyncStage;
   threads: MailThreadSummary[];
   query?: string;
-  title?: string;
-}
-
-interface MailContinuation {
-  threads: MailThreadSummary[];
-  olderCursor: string | null;
 }
 
 export function MailList({
-  accountEmail,
+  canonicalPageVersion,
   currentView,
   initialOlderCursor,
-  mailSyncState,
   threads,
   query,
-  title,
 }: MailListProps) {
-  const [continuation, setContinuation] = useState<MailContinuation | null>(
-    null,
-  );
-  const [loadState, setLoadState] = useState<"idle" | "loading" | "error">(
-    "idle",
+  const { account, invookLabels } = useMailShell();
+  const accountEmail = account.email;
+  const mailSyncState = account.syncState.mailSync;
+  const title = currentView.startsWith("label:")
+    ? invookLabels.find((label) => label.id === currentView.slice(6))?.name
+    : undefined;
+  const [storedPaginationState, setStoredPaginationState] =
+    useState<MailThreadPaginationState>(
+      {
+        canonicalPageVersion,
+        continuationThreads: [],
+        loadState: "idle",
+        olderCursor: initialOlderCursor,
+      },
+    );
+  const paginationState = resolveMailThreadPaginationState({
+    canonicalPageVersion,
+    initialOlderCursor,
+    state: storedPaginationState,
+  });
+  const { loadState, olderCursor } = paginationState;
+  const loadedThreads = mergeMailboxThreads(
+    threads,
+    paginationState.continuationThreads,
   );
   const isLoadingRef = useRef(false);
   const requestControllerRef = useRef<AbortController | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
-  const loadedThreads = mergeMailboxThreads(
-    threads,
-    continuation?.threads ?? [],
-  );
-  const olderCursor = continuation
-    ? continuation.olderCursor
-    : initialOlderCursor;
   const noMail = loadedThreads.length === 0;
   const syncing = mailSyncState === "pending" || mailSyncState === "running";
 
@@ -259,6 +267,12 @@ export function MailList({
     [],
   );
 
+  useEffect(() => {
+    requestControllerRef.current?.abort();
+    requestControllerRef.current = null;
+    isLoadingRef.current = false;
+  }, [canonicalPageVersion]);
+
   const loadMoreMail = useCallback(async (): Promise<void> => {
     if (!olderCursor || isLoadingRef.current) return;
 
@@ -267,33 +281,42 @@ export function MailList({
     requestControllerRef.current?.abort();
     requestControllerRef.current = requestController;
     isLoadingRef.current = true;
-    setLoadState("loading");
+    setStoredPaginationState({
+      ...paginationState,
+      loadState: "loading",
+    });
 
     try {
-      const response = await axios.get<MailboxWorkspace>("/v1/mailbox", {
+      const response = await axios.get<MailboxThreadPage>("/v1/mailbox/threads", {
         params: { view: currentView, cursor: requestedCursor },
         signal: requestController.signal,
       });
       if (requestController.signal.aborted) return;
 
-      setContinuation((currentContinuation) => ({
-        threads: mergeMailboxThreads(
-          currentContinuation?.threads ?? threads,
+      setStoredPaginationState((currentState) => ({
+        canonicalPageVersion,
+        continuationThreads: mergeMailboxThreads(
+          currentState.canonicalPageVersion === canonicalPageVersion
+            ? currentState.continuationThreads
+            : [],
           response.data.threads,
         ),
+        loadState: "idle",
         olderCursor: response.data.pagination.olderCursor,
       }));
-      setLoadState("idle");
     } catch (error: unknown) {
       if (axios.isCancel(error) || requestController.signal.aborted) return;
-      setLoadState("error");
+      setStoredPaginationState({
+        ...paginationState,
+        loadState: "error",
+      });
     } finally {
       if (requestControllerRef.current === requestController) {
         requestControllerRef.current = null;
+        isLoadingRef.current = false;
       }
-      isLoadingRef.current = false;
     }
-  }, [currentView, olderCursor, threads]);
+  }, [canonicalPageVersion, currentView, olderCursor, paginationState]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;

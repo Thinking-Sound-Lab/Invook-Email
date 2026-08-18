@@ -87,16 +87,26 @@ async function listenForDatabaseNotifications(
     | "invook_account_sync"
     | "invook_mailbox_changes",
   onNotification: (payload: string) => void,
+  onSubscribed?: () => void,
+  onSubscriptionLost?: () => void,
 ) {
   const databaseUrl = process.env.DATABASE_URL ?? "";
   if (!databaseUrl) {
     throw new Error("DATABASE_URL is required for database notifications.");
   }
 
-  const client = postgres(databaseUrl, { max: 1, prepare: false });
-  const listener = await client.listen(channel, onNotification);
+  let isStopping = false;
+  const client = postgres(databaseUrl, {
+    max: 1,
+    prepare: false,
+    onclose: () => {
+      if (!isStopping) onSubscriptionLost?.();
+    },
+  });
+  const listener = await client.listen(channel, onNotification, onSubscribed);
 
   return async () => {
+    isStopping = true;
     await listener.unlisten();
     await client.end();
   };
@@ -113,10 +123,16 @@ export function listenForAccountSyncNotifications(
 }
 
 export function listenForMailboxChangeNotifications(
-  onMailboxChange: (eventId: string) => void,
+  input: {
+    onNotification: (payload: string) => void;
+    onSubscribed: () => void;
+    onSubscriptionLost: () => void;
+  },
 ) {
   return listenForDatabaseNotifications(
     "invook_mailbox_changes",
-    onMailboxChange,
+    input.onNotification,
+    input.onSubscribed,
+    input.onSubscriptionLost,
   );
 }

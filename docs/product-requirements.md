@@ -247,7 +247,11 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `POST` | `/v1/auth/sign-out` | Revoke the current Better Auth session |
 | `GET` | `/v1/connections/gmail/start` | Begin an authenticated Gmail add or reconnect flow |
 | `GET` | `/v1/connections/gmail/callback` | Consume the user-bound Gmail OAuth callback |
-| `GET` | `/v1/mailbox` | Return the connected mailbox workspace |
+| `GET` | `/v1/mailbox/shell` | Return the authenticated mailbox shell and account state |
+| `GET` | `/v1/mailbox/sidebar-counts` | Return focused sidebar counts for the connected mailbox |
+| `GET` | `/v1/mailbox/threads` | Return one cursor-bounded mailbox thread page for a validated view |
+| `GET` | `/v1/mailbox/threads/:threadId` | Return one authorized stored thread and its messages |
+| `GET` | `/v1/mailbox/settings` | Return mailbox Memory and Invook label settings on demand |
 | `POST` | `/v1/mailbox/sync` | Durably queue Gmail history catch-up from the stored replica cursor |
 | `DELETE` | `/v1/mailbox/account` | Stop the watch, clean object storage, then delete the connected account |
 | `GET` | `/v1/attachments/:id/download` | Authorize the attachment and download its private stored bytes |

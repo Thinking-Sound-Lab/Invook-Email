@@ -21,18 +21,18 @@ import {
 } from "@/lib/api/drafts";
 import { apiErrorMessage } from "@/lib/http-error";
 import { useDraftEditor } from "@/hooks/use-draft-editor";
+import { useMailShell } from "./mail-shell-provider";
 
 export interface DraftComposerProps {
   threadId: string;
   initialDraft: AiReplyDraft | null;
-  aiConfigured: boolean;
 }
 
 export function DraftComposer({
   threadId,
   initialDraft,
-  aiConfigured,
 }: DraftComposerProps) {
+  const { aiConfigured } = useMailShell();
   const router = useRouter();
   const { draft, text, hasUnsavedChanges, setText, acceptDraft } = useDraftEditor({
     threadId,

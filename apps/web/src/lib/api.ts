@@ -1,6 +1,10 @@
 import type {
+  MailboxSettings,
+  MailboxShell,
+  MailboxSidebarCounts,
+  MailboxThreadDetail,
+  MailboxThreadPage,
   MailboxView,
-  MailboxWorkspace,
   MailSearchResult,
   SessionState,
 } from "@invook/contracts";
@@ -14,9 +18,13 @@ function getApiOrigin(): string {
 async function apiRequest<T>(path: string) {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
+  const requestId = requestHeaders.get("x-request-id");
 
   return axios.get<T>(`${getApiOrigin()}${path}`, {
-    headers: cookie ? { cookie } : undefined,
+    headers: {
+      ...(cookie ? { cookie } : {}),
+      ...(requestId ? { "x-request-id": requestId } : {}),
+    },
     validateStatus: () => true,
   });
 }
@@ -29,23 +37,62 @@ export async function getSessionState(): Promise<SessionState> {
   return response.data;
 }
 
-export async function getMailboxWorkspace(
-  input: {
-    cursor?: string;
-    selectedThreadId?: string;
-    view: MailboxView;
-  },
-): Promise<MailboxWorkspace | null> {
+export async function getMailboxShell(): Promise<MailboxShell | null> {
+  const response = await apiRequest<MailboxShell>("/v1/mailbox/shell");
+  if (response.status === 401 || response.status === 404) return null;
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`The mailbox shell API returned ${response.status}.`);
+  }
+  return response.data;
+}
+
+export async function getMailboxSidebarCounts(): Promise<MailboxSidebarCounts | null> {
+  const response = await apiRequest<MailboxSidebarCounts>(
+    "/v1/mailbox/sidebar-counts",
+  );
+  if (response.status === 401 || response.status === 404) return null;
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`The mailbox sidebar API returned ${response.status}.`);
+  }
+  return response.data;
+}
+
+export async function getMailboxThreadPage(input: {
+  cursor?: string;
+  view: MailboxView;
+}): Promise<MailboxThreadPage | null> {
   const query = new URLSearchParams();
   query.set("view", input.view);
   if (input.cursor) query.set("cursor", input.cursor);
-  if (input.selectedThreadId) query.set("thread", input.selectedThreadId);
-  const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  const response = await apiRequest<MailboxWorkspace>(`/v1/mailbox${suffix}`);
+  const response = await apiRequest<MailboxThreadPage>(
+    `/v1/mailbox/threads?${query.toString()}`,
+  );
 
   if (response.status === 401 || response.status === 404) return null;
   if (response.status < 200 || response.status >= 300) {
-    throw new Error(`The mailbox API returned ${response.status}.`);
+    throw new Error(`The mailbox thread list API returned ${response.status}.`);
+  }
+  return response.data;
+}
+
+export async function getMailboxThreadDetail(
+  threadId: string,
+): Promise<MailboxThreadDetail | null> {
+  const response = await apiRequest<MailboxThreadDetail>(
+    `/v1/mailbox/threads/${encodeURIComponent(threadId)}`,
+  );
+  if (response.status === 401 || response.status === 404) return null;
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`The mailbox thread API returned ${response.status}.`);
+  }
+  return response.data;
+}
+
+export async function getMailboxSettings(): Promise<MailboxSettings | null> {
+  const response = await apiRequest<MailboxSettings>("/v1/mailbox/settings");
+  if (response.status === 401 || response.status === 404) return null;
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`The mailbox settings API returned ${response.status}.`);
   }
   return response.data;
 }

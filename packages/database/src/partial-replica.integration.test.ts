@@ -9,6 +9,12 @@ import { v4 as uuidv4 } from "uuid";
 import type { Database } from "./client";
 import { queryInvookMailbox } from "./mailbox-query";
 import {
+  getMailboxShellData,
+  getMailboxSidebarCounts,
+  getMailboxThreadDetail,
+  listMailboxThreads,
+} from "./mailbox-resources";
+import {
   applyGmailHistoryBatch,
   enqueueGmailHistoryCatchup,
   getAiReplyDraftForGmailSave,
@@ -20,7 +26,6 @@ import {
 import {
   createMessageContentHash,
   getMailboxThreadForAgent,
-  getMailboxWorkspace,
   getReplyDraftContext,
   listMailboxThreadAttachments,
   searchMailbox,
@@ -277,18 +282,19 @@ test(
       } = fixture;
       const missingThreadId = uuidv4();
 
-      const workspace = await getMailboxWorkspace(
-        userId,
-        { selectedThreadId: threadId },
-        database,
-      );
-      assert.equal(workspace?.account.replicaState, "snapshotting");
-      assert.deepEqual(workspace?.threads.map((thread) => thread.id), [threadId]);
+      const [shell, threadPage, threadDetail, sidebarCounts] = await Promise.all([
+        getMailboxShellData(userId, database),
+        listMailboxThreads(userId, {}, database),
+        getMailboxThreadDetail(userId, threadId, database),
+        getMailboxSidebarCounts(userId, database),
+      ]);
+      assert.equal(shell?.account.replica.state, "snapshotting");
+      assert.deepEqual(threadPage?.threads.map((thread) => thread.id), [threadId]);
       assert.deepEqual(
-        workspace?.selectedThread?.messages.map((message) => message.id),
+        threadDetail?.thread.messages.map((message) => message.id),
         [messageId],
       );
-      assert.deepEqual(workspace?.sidebarCounts.views, {
+      assert.deepEqual(sidebarCounts?.views, {
         all: 1,
         important: 0,
         starred: 0,
@@ -297,10 +303,10 @@ test(
         spam: 0,
         trash: 0,
       });
-      assert.equal(workspace?.sidebarCounts.labels[invookLabelId], 1);
+      assert.equal(sidebarCounts?.labels[invookLabelId], 1);
       assert.deepEqual(
         (
-          await getMailboxWorkspace(userId, { view: "drafts" }, database)
+          await listMailboxThreads(userId, { view: "drafts" }, database)
         )?.threads.map((thread) => thread.id),
         [threadId],
       );
@@ -541,21 +547,17 @@ test(
         .from(mailboxChangeEvents)
         .where(eq(mailboxChangeEvents.id, result.eventId));
       assert.deepEqual(event?.payload, {
-        historyCursor: "120",
+        reason: "history_catchup",
         changedThreadIds: [],
         refreshedThreadIds: [threadId],
       });
-      const workspace = await getMailboxWorkspace(
-        userId,
-        { selectedThreadId: threadId },
-        database,
-      );
+      const threadDetail = await getMailboxThreadDetail(userId, threadId, database);
       assert.equal(
-        workspace?.selectedThread?.messages[0]?.providerHistoryId,
+        threadDetail?.thread.messages[0]?.providerHistoryId,
         "120",
       );
       assert.equal(
-        workspace?.selectedThread?.gmailLabels.some(
+        threadDetail?.thread.gmailLabels.some(
           (label) => label.providerLabelId === "UNREAD",
         ),
         true,
