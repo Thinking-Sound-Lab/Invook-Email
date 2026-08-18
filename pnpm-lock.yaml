@@ -44,9 +44,6 @@ importers:
       ai:
         specifier: ^7.0.58
         version: 7.0.58(zod@4.4.3)
-      axios:
-        specifier: ^1.19.0
-        version: 1.19.0
       fastify:
         specifier: ^5.11.3
         version: 5.11.3
@@ -111,6 +108,9 @@ importers:
       sanitize-html:
         specifier: ^2.17.6
         version: 2.17.6
+      server-only:
+        specifier: 0.0.1
+        version: 0.0.1
       shadcn:
         specifier: ^4.16.2
         version: 4.16.2(typescript@5.9.3)
@@ -163,9 +163,6 @@ importers:
       '@invook/ai':
         specifier: workspace:*
         version: link:../../packages/ai
-      '@invook/contracts':
-        specifier: workspace:*
-        version: link:../../packages/contracts
       '@invook/database':
         specifier: workspace:*
         version: link:../../packages/database
@@ -188,9 +185,6 @@ importers:
         specifier: 1.22.0
         version: 1.22.0
       '@temporalio/worker':
-        specifier: 1.22.0
-        version: 1.22.0
-      '@temporalio/workflow':
         specifier: 1.22.0
         version: 1.22.0
     devDependencies:
@@ -5224,6 +5218,9 @@ packages:
   serve-static@2.2.1:
     resolution: {integrity: sha512-xRXBn0pPqQTVQiC8wyQrKs2MOlX24zQ0POGaj0kultvoOCstBQM5yvOhAVSUwOMjQtTvsPWoNCHfPGwaaQJhTw==}
     engines: {node: '>= 18'}
+
+  server-only@0.0.1:
+    resolution: {integrity: sha512-qepMx2JxAa5jjfzxG79yPPq+8BuFToHd1hm7kI+Z4zAq1ftQiP7HcxMhDDItrbtwVeLg/cY2JnKnrcFkmiswNA==}
 
   set-cookie-parser@2.7.2:
     resolution: {integrity: sha512-oeM1lpU/UvhTxw+g3cIfxXHyJRc/uidd3yK1P242gzHds0udQBYzs3y8j4gCCW+ZJ7ad0yctld8RYO+bdurlvw==}
@@ -10601,6 +10598,8 @@ snapshots:
       send: 1.2.1
     transitivePeerDependencies:
       - supports-color
+
+  server-only@0.0.1: {}
 
   set-cookie-parser@2.7.2: {}
 

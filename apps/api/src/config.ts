@@ -56,10 +56,6 @@ export function getPublicAppOrigin(): string {
   return url.origin;
 }
 
-export function usesSecureCookies(): boolean {
-  return getPublicAppOrigin().startsWith("https://");
-}
-
 export function getApiHost(): string {
   return "0.0.0.0";
 }

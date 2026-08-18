@@ -1,4 +1,4 @@
-export function extractEmail(value: string): string {
+function extractEmail(value: string): string {
   const angleAddress = value.match(/<([^>]+)>/);
   return (angleAddress?.[1] ?? value).trim().toLowerCase();
 }

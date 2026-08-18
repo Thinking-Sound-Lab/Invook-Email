@@ -6,7 +6,7 @@ import { insertMailboxChange } from "./mailbox-change-events";
 import {
   deleteIndexedMessage,
   replaceGmailMessageLabels,
-  upsertIndexedMessage,
+  upsertMailboxMessage,
 } from "./repositories";
 import {
   connectedAccounts,
@@ -812,7 +812,7 @@ export async function applyGmailHistoryBatch(
     const refreshedThreadIds = new Set<string>();
     const executor = transaction as unknown as Database;
     for (const message of input.messages) {
-      const result = await upsertIndexedMessage(message, executor);
+      const result = await upsertMailboxMessage(message, executor);
       if (result.changed && !result.analysisQueued) {
         changedThreadIds.add(result.threadId);
       }

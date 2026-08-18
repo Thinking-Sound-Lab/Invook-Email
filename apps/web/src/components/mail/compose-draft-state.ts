@@ -1,6 +1,6 @@
 import type { GmailComposeDraft } from "@invook/contracts";
 
-export type ComposeDraftStatus =
+type ComposeDraftStatus =
   | "editing"
   | "saving"
   | "saved"

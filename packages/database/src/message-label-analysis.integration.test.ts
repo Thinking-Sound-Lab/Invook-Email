@@ -29,7 +29,7 @@ import {
 import {
   createInvookLabel,
   updateInvookLabel,
-  upsertIndexedMessage,
+  upsertMailboxMessage,
 } from "./repositories";
 import {
   connectedAccounts,
@@ -194,7 +194,7 @@ test(
       assert.ok(travel);
       assert.ok(receipts);
 
-      const initial = await upsertIndexedMessage(
+      const initial = await upsertMailboxMessage(
         indexedMessage({
           userId,
           accountId,
@@ -343,7 +343,7 @@ test(
         .where(eq(mailboxChangeEvents.accountId, accountId));
       assert.deepEqual(eventsAfterRetry, eventsAfter);
 
-      const pendingDraftMessage = await upsertIndexedMessage(
+      const pendingDraftMessage = await upsertMailboxMessage(
         indexedMessage({
           userId,
           accountId,
@@ -561,7 +561,7 @@ test(
         false,
       );
 
-      const othersMessage = await upsertIndexedMessage(
+      const othersMessage = await upsertMailboxMessage(
         indexedMessage({
           userId,
           accountId,
@@ -610,7 +610,7 @@ test(
       );
       assert.equal(othersDetail?.thread.messages[0]?.isOthers, true);
 
-      const staleMessage = await upsertIndexedMessage(
+      const staleMessage = await upsertMailboxMessage(
         indexedMessage({
           userId,
           accountId,
@@ -684,7 +684,7 @@ test(
         database,
       );
       assert.equal(supersedingReady.status, "ready");
-      await upsertIndexedMessage(
+      await upsertMailboxMessage(
         indexedMessage({
           userId,
           accountId,
@@ -752,7 +752,7 @@ test(
         readyAt: new Date(),
       });
       await ensureBuiltInInvookLabels({ userId, accountId }, database);
-      const stored = await upsertIndexedMessage(
+      const stored = await upsertMailboxMessage(
         indexedMessage({
           userId,
           accountId,

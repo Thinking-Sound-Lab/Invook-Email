@@ -3,7 +3,6 @@ import { ApplicationFailure } from "@temporalio/common";
 
 import {
   AiConfigurationError,
-  deleteBatchFiles,
   buildEmbeddingInput,
   createEmbeddingBatch,
   deleteEmbeddingBatchInputFile,
@@ -2192,7 +2191,7 @@ async function runMemoryBatchEvent(job: WorkflowStepJob) {
     await setMemorySyncStage(submission.accountId, "complete");
   }
 
-  const cleanupFailures = await deleteBatchFiles({
+  const cleanupFailures = await deleteMemoryBatchFiles({
     provider: details.provider,
     inputFileId: details.inputFileId,
     outputFileId: batch.outputFileId,

@@ -16,13 +16,13 @@ import {
   type WorkflowStepExecution,
 } from "@invook/workflows";
 
-export const gmailControlConcurrency = 5;
+const gmailControlConcurrency = 5;
 export const gmailMessageConcurrency = parsePositiveInteger(
   process.env.GMAIL_MESSAGE_CONCURRENCY,
   5,
   "GMAIL_MESSAGE_CONCURRENCY",
 );
-export const mailLabelConcurrency = parsePositiveInteger(
+const mailLabelConcurrency = parsePositiveInteger(
   process.env.MAIL_LABEL_CONCURRENCY,
   5,
   "MAIL_LABEL_CONCURRENCY",

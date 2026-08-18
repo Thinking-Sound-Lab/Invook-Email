@@ -20,7 +20,7 @@ export const requireSession: onRequestHookHandler = async (request, reply) => {
   request.invookSession = session;
 };
 
-export const requireAllowedMutationOrigin: onRequestHookHandler = async (
+const requireAllowedMutationOrigin: onRequestHookHandler = async (
   request,
   reply,
 ) => {

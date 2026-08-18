@@ -7,7 +7,6 @@ import { z } from "zod";
 
 export const batchProviders = ["openai", "azure-openai"] as const;
 export type BatchProvider = (typeof batchProviders)[number];
-export const memoryBatchProviders = batchProviders;
 export type MemoryBatchProvider = BatchProvider;
 
 const OPENAI_BATCH_MODEL = "gpt-5.4-nano-2026-03-17";
@@ -142,13 +141,6 @@ export type MemoryBatchSubmission = {
 export type MemoryBatchScopeSelection = {
   mode: "global" | "contact";
   contactEmail: string | null;
-};
-
-export type MemoryBatchRequestProgress = {
-  state: Batch["status"];
-  completedRequestCount: number | null;
-  failedRequestCount: number | null;
-  totalRequestCount: number | null;
 };
 
 type MemoryScope = {
@@ -955,24 +947,6 @@ export async function readMemoryBatch(input: {
   };
 }
 
-export async function getMemoryBatchRequestProgress(input: {
-  provider: BatchProvider;
-  providerBatchId: string;
-}): Promise<MemoryBatchRequestProgress> {
-  const config = providerConfig(input.provider);
-  const client = getClient(config);
-  const batch = await providerCall(config, () =>
-    client.batches.retrieve(input.providerBatchId),
-  );
-
-  return {
-    state: batch.status,
-    completedRequestCount: batch.request_counts?.completed ?? null,
-    failedRequestCount: batch.request_counts?.failed ?? null,
-    totalRequestCount: batch.request_counts?.total ?? null,
-  };
-}
-
 export async function deleteMemoryBatchFiles(input: {
   provider: BatchProvider;
   inputFileId: string;
@@ -997,6 +971,3 @@ export async function deleteMemoryBatchFiles(input: {
   }
   return failures;
 }
-
-export const getBatchRequestProgress = getMemoryBatchRequestProgress;
-export const deleteBatchFiles = deleteMemoryBatchFiles;

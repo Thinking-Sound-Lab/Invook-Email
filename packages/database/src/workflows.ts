@@ -1631,31 +1631,6 @@ export async function failMailSyncItem(
   });
 }
 
-export async function failMailSyncRun(
-  input: { runId: string; message: string; reconnectRequired: boolean },
-  database: Database = getDatabase(),
-) {
-  const message = toPostgresTextProjection(input.message);
-  await database.transaction(async (transaction) => {
-    const executor = transaction as unknown as Database;
-    const failedAt = new Date();
-    const run = await terminalizeMailSyncRun(
-      {
-        runId: input.runId,
-        message,
-        failedAt,
-      },
-      executor,
-    );
-    if (run && input.reconnectRequired) {
-      await terminalizeGmailAccountForReconnect(
-        { accountId: run.accountId, message, failedAt },
-        executor,
-      );
-    }
-  });
-}
-
 export async function completeMailSyncRun(
   input: { runId: string; finalHistoryCursor: string },
   database: Database = getDatabase(),

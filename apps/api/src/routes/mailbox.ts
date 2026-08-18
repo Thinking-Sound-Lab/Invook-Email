@@ -1,6 +1,10 @@
 import type { FastifyPluginAsync } from "fastify";
 
-import { mailboxViews, type MailboxView } from "@invook/contracts";
+import {
+  mailboxViews,
+  type AcceptedMailboxSyncResponse,
+  type MailboxView,
+} from "@invook/contracts";
 import {
   enqueueGmailHistoryCatchupForUser,
   getMailboxSettings,
@@ -153,10 +157,11 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
         );
         return;
       }
-      await sendJson(reply, 202, {
+      const response: AcceptedMailboxSyncResponse = {
         accepted: true,
         stepId: result.stepId,
-      });
+      };
+      await sendJson(reply, 202, response);
     },
   );
 
