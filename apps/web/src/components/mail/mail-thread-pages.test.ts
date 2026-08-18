@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mergeMailboxThreads } from "./mail-thread-pages";
+import {
+  mergeMailboxThreads,
+  resolveMailThreadPaginationState,
+} from "./mail-thread-pages";
 import type { MailThreadSummary } from "./types";
 
 function thread(id: string, subject = id): MailThreadSummary {
@@ -42,5 +45,43 @@ test("refreshed first-page summaries replace stale stored summaries", () => {
       ["existing", "Updated subject"],
       ["older", "older"],
     ],
+  );
+});
+
+test("a canonical same-view refresh discards continuation pages and their cursor", () => {
+  const state = resolveMailThreadPaginationState({
+    canonicalPageVersion: "refreshed-page",
+    initialOlderCursor: "refreshed-cursor",
+    state: {
+      canonicalPageVersion: "previous-page",
+      continuationThreads: [thread("stale-continuation")],
+      loadState: "error",
+      olderCursor: "stale-cursor",
+    },
+  });
+
+  assert.deepEqual(state, {
+    canonicalPageVersion: "refreshed-page",
+    continuationThreads: [],
+    loadState: "idle",
+    olderCursor: "refreshed-cursor",
+  });
+});
+
+test("pagination state remains available within one canonical page generation", () => {
+  const currentState = {
+    canonicalPageVersion: "current-page",
+    continuationThreads: [thread("continuation")],
+    loadState: "idle" as const,
+    olderCursor: "next-cursor",
+  };
+
+  assert.equal(
+    resolveMailThreadPaginationState({
+      canonicalPageVersion: "current-page",
+      initialOlderCursor: "initial-cursor",
+      state: currentState,
+    }),
+    currentState,
   );
 });

@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { validate as validateUuid } from "uuid";
+import { v4 as uuidv4, validate as validateUuid } from "uuid";
 
 import { mailboxViews } from "@invook/contracts";
 
@@ -104,6 +104,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
     centerPane = (
       <MailList
         key={currentView}
+        canonicalPageVersion={uuidv4()}
         currentView={currentView}
         initialOlderCursor={threadPage?.pagination.olderCursor ?? null}
         threads={(threadPage?.threads ?? []) as MailThreadSummary[]}

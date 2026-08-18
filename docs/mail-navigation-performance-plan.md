@@ -1,7 +1,7 @@
 # Mail navigation performance plan
 
 **Status:** Implemented for locally verifiable slices; real-mailbox acceptance measurements pending
-**Updated:** August 17, 2026
+**Updated:** August 18, 2026
 **Scope:** Mail workspace navigation, mailbox API reads, PostgreSQL queries, and mailbox event invalidation
 
 ## Implementation record
@@ -13,6 +13,10 @@ Implemented on August 17, 2026:
 - Replaced open event payloads with one typed insertion boundary and an allowlisted browser projection. Draft events resolve internal thread identifiers before publication. `repair_complete` was removed with generated migration `0025_opposite_inertia.sql`.
 - Replaced UUID-and-timestamp replay with the resolved Decision D lifecycle. The internal PostgreSQL notification now carries `eventId`, `userId`, and `accountId`; scoped failures invalidate only the proved user, while malformed or mismatched scope uses the broader fallback.
 - Added privacy-safe `Server-Timing: api;dur=...` instrumentation and propagation of an incoming request identifier from Next.js to Fastify. It records no mailbox content or provider identifiers.
+
+Review correction implemented on August 18, 2026:
+
+- Scoped client continuation pages and cursors to a server-issued canonical page generation. A same-view `router.refresh()` now discards every previously loaded continuation page immediately, returns to the refreshed first page and cursor, and aborts an in-flight continuation request. This preserves cursor ordering and membership correctness while Next.js retains the mounted client component.
 
 No signed-in mailbox, `DATABASE_URL`, `TEST_DATABASE_URL`, or running local services were available in this worktree. Therefore no real browser/Gmail p50, p95, threshold-exceedance rate, payload-size, query-plan, or before/after navigation sample is recorded, and the target acceptance criteria remain externally unverified. The implementation deliberately retains the measured page-size hypothesis of 100 and adds no speculative SQL index, denormalized count projection, private-data cache, thread prefetch, or progress projection without those measurements.
 
