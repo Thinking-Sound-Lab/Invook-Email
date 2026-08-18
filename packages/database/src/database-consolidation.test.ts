@@ -21,6 +21,10 @@ const temporalMigrationUrl = new URL(
   "../drizzle/0026_curvy_glorian.sql",
   import.meta.url,
 );
+const rebasedMailboxEventMigrationUrl = new URL(
+  "../drizzle/0029_rebased_mailbox_event_contract.sql",
+  import.meta.url,
+);
 const schemaUrl = new URL("./schema.ts", import.meta.url);
 const migrationsUrl = new URL("../drizzle/", import.meta.url);
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -89,6 +93,20 @@ test("the Temporal migration preserves commands and redrives unfinished work", a
     /"workflow_steps"\."status" IN \('queued', 'running'\)/,
   );
   assert.doesNotMatch(migration, /DROP TABLE "queue_outbox"/);
+});
+
+test("the post-rebase migration reconciles existing mailbox event databases", async () => {
+  const migration = await readFile(rebasedMailboxEventMigrationUrl, "utf8");
+
+  assertBefore(
+    migration,
+    "WHERE \"change_type\" = 'repair_complete'",
+    "ADD CONSTRAINT \"mailbox_change_events_type_check\"",
+  );
+  assert.match(migration, /CREATE OR REPLACE FUNCTION notify_invook_mailbox_change/);
+  assert.match(migration, /'eventId', NEW\.id/);
+  assert.match(migration, /'userId', NEW\.user_id/);
+  assert.match(migration, /'accountId', NEW\.account_id/);
 });
 
 test("the consolidation migration backfills durable state before removing legacy tables", async () => {
