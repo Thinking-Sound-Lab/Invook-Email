@@ -44,6 +44,9 @@ importers:
       ai:
         specifier: ^7.0.58
         version: 7.0.58(zod@4.4.3)
+      axios:
+        specifier: ^1.19.0
+        version: 1.19.0
       fastify:
         specifier: ^5.11.3
         version: 5.11.3
@@ -185,6 +188,9 @@ importers:
         specifier: 1.22.0
         version: 1.22.0
       '@temporalio/worker':
+        specifier: 1.22.0
+        version: 1.22.0
+      '@temporalio/workflow':
         specifier: 1.22.0
         version: 1.22.0
     devDependencies:
