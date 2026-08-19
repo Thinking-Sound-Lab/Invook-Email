@@ -17,7 +17,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type {
   InvookSystemLabelKey,
-  MessageLabelAnalysisState,
+  ThreadLabelAnalysisState,
 } from "@invook/contracts";
 
 import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
@@ -282,6 +282,8 @@ export const labels = pgTable(
     description: text("description").notNull().default(""),
     systemKey: text("system_key").$type<InvookSystemLabelKey>(),
     definitionVersion: integer("definition_version").notNull().default(1),
+    isEnabled: boolean("is_enabled").notNull().default(true),
+    disabledAt: timestampWithTimezone("disabled_at"),
     providerType: text("provider_type").$type<"system">(),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
@@ -292,8 +294,8 @@ export const labels = pgTable(
   (table) => [
     uniqueIndex("labels_account_provider_idx")
       .on(
-      table.accountId,
-      table.providerLabelId,
+        table.accountId,
+        table.providerLabelId,
       )
       .where(sql`${table.providerLabelId} is not null`),
     uniqueIndex("labels_account_invook_name_idx")
@@ -316,7 +318,11 @@ export const labels = pgTable(
     ),
     check(
       "labels_system_key_check",
-      sql`${table.systemKey} is null or ${table.systemKey} = 'newsletter'`,
+      sql`${table.systemKey} is null or ${table.systemKey} in ('important', 'newsletter', 'billing', 'others')`,
+    ),
+    check(
+      "labels_enabled_contract_check",
+      sql`${table.isEnabled} or ${table.systemKey} is distinct from 'others'`,
     ),
     check("labels_definition_version_check", sql`${table.definitionVersion} > 0`),
   ],
@@ -339,6 +345,14 @@ export const threads = pgTable(
     latestMessageAt: timestampWithTimezone("latest_message_at"),
     messageCount: integer("message_count").notNull().default(0),
     contentVersion: integer("content_version").notNull().default(1),
+    labelAnalysisState: text("label_analysis_state")
+      .$type<ThreadLabelAnalysisState>()
+      .notNull()
+      .default("pending"),
+    labelAnalysisVersion: integer("label_analysis_version").notNull().default(1),
+    labelAnalysisDefinitionHash: text("label_analysis_definition_hash"),
+    labelAnalysisError: text("label_analysis_error"),
+    labelAnalyzedAt: timestampWithTimezone("label_analyzed_at"),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -351,8 +365,78 @@ export const threads = pgTable(
       table.providerThreadId,
     ),
     index("threads_user_latest_idx").on(table.userId, table.latestMessageAt),
+    index("threads_account_label_analysis_idx").on(
+      table.accountId,
+      table.labelAnalysisState,
+      table.latestMessageAt,
+    ),
     check("threads_message_count_check", sql`${table.messageCount} >= 0`),
     check("threads_content_version_check", sql`${table.contentVersion} > 0`),
+    check(
+      "threads_label_analysis_state_check",
+      sql`${table.labelAnalysisState} in ('pending', 'running', 'complete', 'failed')`,
+    ),
+    check(
+      "threads_label_analysis_version_check",
+      sql`${table.labelAnalysisVersion} > 0`,
+    ),
+    check(
+      "threads_label_analysis_definition_hash_check",
+      sql`${table.labelAnalysisDefinitionHash} is null or ${table.labelAnalysisDefinitionHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);
+
+export const threadLabelAssignments = pgTable(
+  "thread_label_assignments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    threadId: uuid("thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => labels.id),
+    source: text("source").$type<"ai" | "user">().notNull(),
+    confidence: numeric("confidence", { precision: 5, scale: 2 }),
+    modelId: text("model_id"),
+    definitionVersion: integer("definition_version").notNull(),
+    assignmentVersion: integer("assignment_version").notNull().default(1),
+    assignedAt: timestampWithTimezone("assigned_at").notNull().defaultNow(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("thread_label_assignments_thread_idx").on(table.threadId),
+    index("thread_label_assignments_account_label_idx").on(
+      table.accountId,
+      table.labelId,
+    ),
+    check(
+      "thread_label_assignments_source_check",
+      sql`${table.source} in ('ai', 'user')`,
+    ),
+    check(
+      "thread_label_assignments_confidence_check",
+      sql`${table.confidence} is null or ${table.confidence} between 0 and 100`,
+    ),
+    check(
+      "thread_label_assignments_definition_version_check",
+      sql`${table.definitionVersion} > 0`,
+    ),
+    check(
+      "thread_label_assignments_assignment_version_check",
+      sql`${table.assignmentVersion} > 0`,
+    ),
   ],
 );
 
@@ -386,14 +470,6 @@ export const messages = pgTable(
     snippet: text("snippet").notNull().default(""),
     bodyText: text("body_text").notNull().default(""),
     embeddingContentHash: text("embedding_content_hash").notNull(),
-    labelAnalysisState: text("label_analysis_state")
-      .$type<MessageLabelAnalysisState>()
-      .notNull()
-      .default("pending"),
-    labelAnalysisVersion: integer("label_analysis_version").notNull().default(1),
-    labelAnalysisDefinitionHash: text("label_analysis_definition_hash"),
-    labelAnalysisError: text("label_analysis_error"),
-    labelAnalyzedAt: timestampWithTimezone("label_analyzed_at"),
     bodyHtml: text("body_html"),
     rawObjectKey: text("raw_object_key"),
     rawChecksumSha256: text("raw_checksum_sha256"),
@@ -423,11 +499,6 @@ export const messages = pgTable(
     ),
     index("messages_thread_sent_idx").on(table.threadId, table.sentAt),
     index("messages_account_provider_idx").on(table.accountId, table.providerMessageId),
-    index("messages_account_label_analysis_idx").on(
-      table.accountId,
-      table.labelAnalysisState,
-      table.sentAt,
-    ),
     index("messages_search_idx").using("gin", table.searchDocument),
     index("messages_metadata_search_idx").using(
       "gin",
@@ -451,18 +522,6 @@ export const messages = pgTable(
       "messages_embedding_content_hash_check",
       sql`${table.embeddingContentHash} ~ '^[0-9a-f]{64}$'`,
     ),
-    check(
-      "messages_label_analysis_state_check",
-      sql`${table.labelAnalysisState} in ('pending', 'running', 'complete', 'failed')`,
-    ),
-    check(
-      "messages_label_analysis_version_check",
-      sql`${table.labelAnalysisVersion} > 0`,
-    ),
-    check(
-      "messages_label_analysis_definition_hash_check",
-      sql`${table.labelAnalysisDefinitionHash} is null or ${table.labelAnalysisDefinitionHash} ~ '^[0-9a-f]{64}$'`,
-    ),
   ],
 );
 
@@ -482,7 +541,7 @@ export const messageLabels = pgTable(
     labelId: uuid("label_id")
       .notNull()
       .references(() => labels.id, { onDelete: "cascade" }),
-    source: text("source").$type<"gmail" | "ai" | "user">().notNull(),
+    source: text("source").$type<"gmail">().notNull(),
     createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
     updatedAt: timestampWithTimezone("updated_at")
       .notNull()
@@ -498,58 +557,7 @@ export const messageLabels = pgTable(
       table.accountId,
       table.labelId,
     ),
-    check("message_labels_source_check", sql`${table.source} in ('gmail', 'ai', 'user')`),
-  ],
-);
-
-export const messageLabelDecisions = pgTable(
-  "message_label_decisions",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => profiles.id, { onDelete: "cascade" }),
-    accountId: uuid("account_id")
-      .notNull()
-      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
-    messageId: uuid("message_id")
-      .notNull()
-      .references(() => messages.id, { onDelete: "cascade" }),
-    labelId: uuid("label_id")
-      .notNull()
-      .references(() => labels.id, { onDelete: "cascade" }),
-    aiDecision: text("ai_decision").$type<"applied" | "not_applied">().notNull(),
-    confidence: numeric("confidence", { precision: 5, scale: 2 }),
-    modelId: text("model_id"),
-    definitionVersion: integer("definition_version").notNull(),
-    userOverride: text("user_override").$type<"applied" | "suppressed">(),
-    analyzedAt: timestampWithTimezone("analyzed_at").notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("message_label_decisions_message_label_idx").on(
-      table.messageId,
-      table.labelId,
-    ),
-    index("message_label_decisions_label_version_idx").on(
-      table.labelId,
-      table.definitionVersion,
-    ),
-    check(
-      "message_label_decisions_ai_decision_check",
-      sql`${table.aiDecision} in ('applied', 'not_applied')`,
-    ),
-    check(
-      "message_label_decisions_user_override_check",
-      sql`${table.userOverride} is null or ${table.userOverride} in ('applied', 'suppressed')`,
-    ),
-    check(
-      "message_label_decisions_confidence_check",
-      sql`${table.confidence} is null or ${table.confidence} between 0 and 100`,
-    ),
-    check(
-      "message_label_decisions_definition_version_check",
-      sql`${table.definitionVersion} > 0`,
-    ),
+    check("message_labels_source_check", sql`${table.source} = 'gmail'`),
   ],
 );
 
@@ -1117,7 +1125,6 @@ export const temporalCommands = pgTable(
         | "mail-memory-submit"
         | "mail-memory-events"
         | "mail-memory-feedback"
-        | "mail-label-live"
         | "mail-label-submit"
       >()
       .notNull(),
@@ -1141,7 +1148,7 @@ export const temporalCommands = pgTable(
     ),
     check(
       "temporal_commands_activity_task_queue_check",
-      sql`${table.activityTaskQueue} in ('gmail-pages', 'gmail-messages', 'gmail-message-batches', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-live', 'mail-label-submit')`,
+      sql`${table.activityTaskQueue} in ('gmail-pages', 'gmail-messages', 'gmail-message-batches', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit')`,
     ),
   ],
 );

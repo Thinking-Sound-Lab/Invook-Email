@@ -20,18 +20,10 @@ test("live Gmail work dispatches ahead of bulk synchronization work", () => {
   assert.equal(TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE, 10);
   assert.ok(
     temporalCommandPriority("gmail.history.catchup") <
-      temporalCommandPriority("label.message.analyze", {
-        dispatchClass: "live",
-      }),
-  );
-  assert.ok(
-    temporalCommandPriority("label.message.analyze", {
-      dispatchClass: "live",
-    }) <
       temporalCommandPriority("gmail.sync.message"),
   );
   assert.equal(
-    temporalCommandPriority("label.message.analyze"),
+    temporalCommandPriority("label.thread.assign"),
     temporalCommandPriority("gmail.sync.message.batch"),
   );
   assert.equal(
@@ -40,15 +32,13 @@ test("live Gmail work dispatches ahead of bulk synchronization work", () => {
   );
   assert.equal(
     activityTaskQueueForStep({
-      stepType: "label.message.analyze",
-      payload: { dispatchClass: "live" },
+      stepType: "label.thread.assign",
     }),
-    "mail-label-live",
+    "mail-label-submit",
   );
   assert.equal(
     activityTaskQueueForStep({
-      stepType: "label.message.analyze",
-      payload: {},
+      stepType: "label.thread.scan",
     }),
     "mail-label-submit",
   );
@@ -181,11 +171,11 @@ test("ready-replica derivations fan out to independent Temporal Activity task qu
     "mail-memory-submit",
   );
   assert.equal(
-    activityTaskQueueForStepType("label.message.analyze"),
+    activityTaskQueueForStepType("label.thread.assign"),
     "mail-label-submit",
   );
   assert.equal(
-    activityTaskQueueForStepType("label.message.apply"),
+    activityTaskQueueForStepType("label.thread.scan"),
     "mail-label-submit",
   );
 });

@@ -18,6 +18,7 @@ import {
   labels,
   messageLabels,
   messages,
+  threadLabelAssignments,
 } from "./schema";
 
 export type QueryInvookMailboxInput = {
@@ -120,19 +121,48 @@ export async function queryInvookMailbox(
   const conditions = [
     eq(messages.userId, input.userId),
     eq(messages.accountId, account.id),
-    inArray(messages.labelAnalysisState, ["complete", "failed"]),
+    sql<boolean>`(
+      exists (
+        select 1 from ${threadLabelAssignments} visible_assignment
+        where visible_assignment.thread_id = ${messages.threadId}
+      )
+      or not exists (
+        select 1 from ${messages} visible_thread_message
+        where visible_thread_message.thread_id = ${messages.threadId}
+          and exists (
+            select 1 from ${messageLabels} visible_inbox_membership
+            inner join ${labels} visible_inbox_label
+              on visible_inbox_label.id = visible_inbox_membership.label_id
+            where visible_inbox_membership.message_id = visible_thread_message.id
+              and visible_inbox_label.kind = 'gmail'
+              and visible_inbox_label.provider_label_id = 'INBOX'
+          )
+          and not exists (
+            select 1 from ${messageLabels} visible_excluded_membership
+            inner join ${labels} visible_excluded_label
+              on visible_excluded_label.id = visible_excluded_membership.label_id
+            where visible_excluded_membership.message_id = visible_thread_message.id
+              and visible_excluded_label.kind = 'gmail'
+              and visible_excluded_label.provider_label_id in ('SPAM', 'TRASH')
+          )
+      )
+    )`,
   ];
   if (input.candidateMessageIds) {
     conditions.push(inArray(messages.id, input.candidateMessageIds));
   }
-  for (const labelId of [
-    ...(input.gmailLabelIds ?? []),
-    ...(input.invookLabelIds ?? []),
-  ]) {
+  for (const labelId of input.gmailLabelIds ?? []) {
     conditions.push(sql<boolean>`exists (
       select 1 from ${messageLabels} membership
       where membership.message_id = ${messages.id}
         and membership.label_id = ${labelId}
+    )`);
+  }
+  for (const labelId of input.invookLabelIds ?? []) {
+    conditions.push(sql<boolean>`exists (
+      select 1 from ${threadLabelAssignments} assignment
+      where assignment.thread_id = ${messages.threadId}
+        and assignment.label_id = ${labelId}
     )`);
   }
   const isInbox = gmailMembership("INBOX");
@@ -175,10 +205,11 @@ export async function queryInvookMailbox(
     .limit(limit + 1);
   const page = rows.slice(0, limit);
   const messageIds = page.map((message) => message.id);
-  const memberships =
-    messageIds.length === 0
-      ? []
-      : await database
+  const threadIds = Array.from(new Set(page.map((message) => message.threadId)));
+  const [memberships, assignmentRows] = messageIds.length === 0
+    ? [[], []]
+    : await Promise.all([
+        database
           .select({
             messageId: messageLabels.messageId,
             id: labels.id,
@@ -189,7 +220,20 @@ export async function queryInvookMailbox(
           .from(messageLabels)
           .innerJoin(labels, eq(labels.id, messageLabels.labelId))
           .where(inArray(messageLabels.messageId, messageIds))
-          .orderBy(asc(labels.name));
+          .orderBy(asc(labels.name)),
+        database
+          .select({
+            threadId: threadLabelAssignments.threadId,
+            id: labels.id,
+            name: labels.name,
+          })
+          .from(threadLabelAssignments)
+          .innerJoin(labels, eq(labels.id, threadLabelAssignments.labelId))
+          .where(inArray(threadLabelAssignments.threadId, threadIds)),
+      ]);
+  const assignmentsByThread = new Map(
+    assignmentRows.map((assignment) => [assignment.threadId, assignment]),
+  );
 
   return {
     status: "available" as const,
@@ -214,9 +258,12 @@ export async function queryInvookMailbox(
           (membership) => membership.providerLabelId === "UNREAD",
         ),
         gmailLabels: gmailLabels.map(({ id, name }) => ({ id, name })),
-        invookLabels: messageMemberships
-          .filter((membership) => membership.kind === "invook")
-          .map(({ id, name }) => ({ id, name })),
+        invookLabel: (() => {
+          const assignment = assignmentsByThread.get(message.threadId);
+          return assignment
+            ? { id: assignment.id, name: assignment.name }
+            : null;
+        })(),
       };
     }),
     availableGmailLabels,

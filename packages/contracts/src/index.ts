@@ -45,13 +45,17 @@ export const mailboxViews = [
 export type StaticMailboxView = (typeof mailboxViews)[number];
 export type MailboxView = StaticMailboxView | `label:${string}`;
 
-export type MessageLabelAnalysisState =
+export type ThreadLabelAnalysisState =
   | "pending"
   | "running"
   | "complete"
   | "failed";
 
-export type InvookSystemLabelKey = "newsletter";
+export type InvookSystemLabelKey =
+  | "important"
+  | "newsletter"
+  | "billing"
+  | "others";
 
 export type InvookLabel = {
   id: string;
@@ -59,6 +63,7 @@ export type InvookLabel = {
   description: string;
   systemKey: InvookSystemLabelKey | null;
   definitionVersion: number;
+  isEnabled: boolean;
 };
 
 export type LabelHistoryWindowDays = 7 | 30 | 90;
@@ -77,7 +82,7 @@ export type UpdateInvookLabelRequest = Pick<
 export type PreviewInvookLabelRequest = UpdateInvookLabelRequest;
 
 export type InvookLabelPreviewMatch = {
-  messageId: string;
+  threadId: string;
   sender: string;
   subject: string;
   sentAt: string;
@@ -85,7 +90,7 @@ export type InvookLabelPreviewMatch = {
 };
 
 export type InvookLabelPreviewResponse = {
-  scannedMessageCount: number;
+  scannedThreadCount: number;
   matches: InvookLabelPreviewMatch[];
 };
 
@@ -96,24 +101,35 @@ export type InvookLabelResponse = {
 export type CreateInvookLabelResponse = InvookLabelResponse & {
   historicalAnalysis: {
     windowDays: LabelHistoryWindowDays;
-    queuedMessageCount: number;
+    queuedThreadCount: number;
   } | null;
 };
 
 export type InvookThreadLabel = {
   labelId: string;
   name: string;
-  source: "ai" | "user" | "derived";
+  source: "ai" | "user";
   confidence: number | null;
 };
 
 export type SetThreadLabelRequest = {
   labelId: string;
-  applied: boolean;
 };
 
-export type ThreadLabelsResponse = {
-  labels: InvookThreadLabel[];
+export type ThreadLabelResponse = {
+  label: InvookThreadLabel;
+};
+
+export type SetInvookLabelEnabledRequest = {
+  isEnabled: boolean;
+  applyToPastDays?: LabelHistoryWindowDays | null;
+};
+
+export type SetInvookLabelEnabledResponse = InvookLabelResponse & {
+  historicalAnalysis: {
+    windowDays: LabelHistoryWindowDays;
+    queuedThreadCount: number;
+  } | null;
 };
 
 export const memoryTypes = ["preference", "contact", "scheduling"] as const;
@@ -234,11 +250,9 @@ export type MailboxThreadSummary = {
   snippet: string;
   participants: string[];
   gmailLabels: GmailLabel[];
-  invookLabels: InvookThreadLabel[];
+  invookLabel: InvookThreadLabel | null;
   latestMessageAt: string | null;
   messageCount: number;
-  isOthers: boolean;
-  hasLabelAnalysisFailure: boolean;
 };
 
 export type MailboxThreadMessage = {
@@ -260,8 +274,6 @@ export type MailboxThreadMessage = {
     contentLength: number;
   } | null;
   sentAt: string;
-  labelAnalysisState: MessageLabelAnalysisState;
-  isOthers: boolean;
   attachments: MailboxAttachment[];
 };
 
@@ -307,7 +319,7 @@ export type MailboxQueryMessage = {
   isInbox: boolean;
   isUnread: boolean;
   gmailLabels: Array<{ id: string; name: string }>;
-  invookLabels: Array<{ id: string; name: string }>;
+  invookLabel: { id: string; name: string } | null;
 };
 
 export type MailboxQueryResult =

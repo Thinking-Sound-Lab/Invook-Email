@@ -244,6 +244,17 @@ test("custom label edits require authentication", async () => {
   assert.equal(response.json().title, "Authentication required");
 });
 
+test("label enablement changes require authentication", async () => {
+  const response = await api.inject({
+    method: "PATCH",
+    url: "/v1/labels/00000000-0000-4000-8000-000000000000/enabled",
+    payload: { isEnabled: false },
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().title, "Authentication required");
+});
+
 test("custom label previews require authentication", async () => {
   const response = await api.inject({
     method: "POST",
@@ -269,6 +280,21 @@ test("custom label creation accepts only supported historical windows", async ()
 
   assert.equal(response.statusCode, 400);
   assert.equal(response.json().title, "Past-email window must be 7, 30, or 90 days");
+});
+
+test("label re-enablement accepts only supported historical windows", async () => {
+  const response = await api.inject({
+    method: "PATCH",
+    url: "/v1/labels/00000000-0000-4000-8000-000000000000/enabled",
+    headers: { cookie: await sessionCookie(attachmentOwnerId) },
+    payload: { isEnabled: true, applyToPastDays: 14 },
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.equal(
+    response.json().title,
+    "Enabled state and past-email window must be valid",
+  );
 });
 
 test("mailbox refresh requires an authenticated session", async () => {
@@ -539,7 +565,7 @@ test("Gmail provider writes require an authenticated session", async () => {
   }
 });
 
-test("obsolete Gmail label catalog and generic label mutation routes are absent", async () => {
+test("obsolete Gmail label routes and Invook label deletion are absent", async () => {
   const requests = [
     { method: "POST", url: "/v1/gmail/labels" },
     {
@@ -557,6 +583,10 @@ test("obsolete Gmail label catalog and generic label mutation routes are absent"
     {
       method: "PATCH",
       url: "/v1/gmail/threads/00000000-0000-4000-8000-000000000000/labels",
+    },
+    {
+      method: "DELETE",
+      url: "/v1/labels/00000000-0000-4000-8000-000000000000",
     },
   ] as const;
 

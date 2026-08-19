@@ -8,7 +8,6 @@ export const workflowActivityTaskQueues = [
   "mail-memory-submit",
   "mail-memory-events",
   "mail-memory-feedback",
-  "mail-label-live",
   "mail-label-submit",
 ] as const;
 

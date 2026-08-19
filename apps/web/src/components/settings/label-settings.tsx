@@ -5,6 +5,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import type {
   CreateInvookLabelRequest,
   InvookLabel,
+  LabelHistoryWindowDays,
   PreviewInvookLabelRequest,
 } from "@invook/contracts";
 import { useState } from "react";
@@ -12,8 +13,8 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   createInvookLabel,
-  deleteInvookLabel,
   previewInvookLabel,
+  setInvookLabelEnabled,
 } from "@/lib/api/labels";
 import { apiErrorMessage } from "@/lib/http-error";
 
@@ -28,7 +29,7 @@ export interface LabelSettingsProps {
 
 export function LabelSettings({ invookLabels, onChanged }: LabelSettingsProps) {
   const [isEditorOpen, setIsEditorOpen] = useState(false);
-  const [deletingLabelKey, setDeletingLabelKey] = useState<string | null>(null);
+  const [pendingLabelKey, setPendingLabelKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const labels = listLabelSettingsItems(invookLabels);
 
@@ -46,16 +47,20 @@ export function LabelSettings({ invookLabels, onChanged }: LabelSettingsProps) {
     return previewInvookLabel(request);
   }
 
-  async function handleDeleteInvookLabel(label: InvookLabel) {
-    setDeletingLabelKey(label.id);
+  async function handleSetEnabled(
+    label: InvookLabel,
+    isEnabled: boolean,
+    applyToPastDays: LabelHistoryWindowDays | null = null,
+  ) {
+    setPendingLabelKey(label.id);
     setError(null);
     try {
-      await deleteInvookLabel(label.id);
+      await setInvookLabelEnabled(label.id, { isEnabled, applyToPastDays });
       await onChanged();
     } catch (cause) {
-      setError(apiErrorMessage(cause, "Invook could not delete this label."));
+      setError(apiErrorMessage(cause, "Invook could not update this label."));
     } finally {
-      setDeletingLabelKey(null);
+      setPendingLabelKey(null);
     }
   }
 
@@ -85,12 +90,13 @@ export function LabelSettings({ invookLabels, onChanged }: LabelSettingsProps) {
               <LabelSettingsRow
                 name={label.name}
                 description={label.description}
-                status={label.systemKey === null ? "Custom label" : "Built-in label"}
-                deleting={deletingLabelKey === label.id}
-                onDelete={
-                  item.isDeletable
-                    ? () => handleDeleteInvookLabel(label)
-                    : undefined
+                status={`${label.systemKey === null ? "Custom" : "Built-in"} · ${label.isEnabled ? "Enabled" : "Disabled"}`}
+                isEnabled={label.isEnabled}
+                canDisable={item.canDisable}
+                isPending={pendingLabelKey === label.id}
+                onDisable={() => handleSetEnabled(label, false)}
+                onEnable={(applyToPastDays) =>
+                  handleSetEnabled(label, true, applyToPastDays)
                 }
               />
             </div>

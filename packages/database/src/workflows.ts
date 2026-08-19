@@ -308,8 +308,8 @@ export function activityTaskQueueForStepType(
       return "mail-memory-events";
     case "memory.feedback":
       return "mail-memory-feedback";
-    case "label.message.analyze":
-    case "label.message.apply":
+    case "label.thread.assign":
+    case "label.thread.scan":
       return "mail-label-submit";
     default:
       throw new Error(`Unsupported workflow step type: ${stepType}`);
@@ -317,26 +317,16 @@ export function activityTaskQueueForStepType(
 }
 
 export function activityTaskQueueForStep(
-  input: Pick<WorkflowStepInput, "stepType" | "payload">,
+  input: Pick<WorkflowStepInput, "stepType">,
 ): WorkflowActivityTaskQueue {
-  if (
-    input.stepType === "label.message.analyze" &&
-    input.payload?.dispatchClass === "live"
-  ) {
-    return "mail-label-live";
-  }
   return activityTaskQueueForStepType(input.stepType);
 }
 
 export function temporalCommandPriority(
   stepType: string,
-  payload: Record<string, unknown> = {},
 ): number {
   if (stepType === "gmail.history.catchup") return 0;
-  if (stepType === "label.message.analyze" && payload.dispatchClass === "live") {
-    return 1;
-  }
-  return 2;
+  return 1;
 }
 
 export function createGmailSyncMessageBatchSteps(input: {
@@ -874,7 +864,7 @@ export async function dispatchTemporalCommandBatch(
       )
       .where(isNull(temporalCommands.dispatchedAt))
       .orderBy(
-        sql`case when ${workflowSteps.stepType} = 'gmail.history.catchup' then ${temporalCommandPriority("gmail.history.catchup")} when ${workflowSteps.stepType} = 'label.message.analyze' and ${workflowSteps.input}->>'dispatchClass' = 'live' then ${temporalCommandPriority("label.message.analyze", { dispatchClass: "live" })} else ${temporalCommandPriority("default")} end`,
+        sql`case when ${workflowSteps.stepType} = 'gmail.history.catchup' then ${temporalCommandPriority("gmail.history.catchup")} else ${temporalCommandPriority("default")} end`,
         asc(temporalCommands.createdAt),
       )
       .limit(TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE)

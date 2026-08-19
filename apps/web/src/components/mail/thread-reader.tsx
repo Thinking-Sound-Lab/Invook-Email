@@ -1,5 +1,4 @@
 import {
-  AlertCircleIcon,
   ArrowLeft02Icon,
   Download01Icon,
   MailReply01Icon,
@@ -44,11 +43,6 @@ export async function ThreadReader({
 }: ThreadReaderProps) {
   const mailboxQuery = new URLSearchParams({ view: currentView });
   if (mailboxCursor) mailboxQuery.set("cursor", mailboxCursor);
-  const failedMessageCount = thread.messages.filter(
-    (message) => message.labelAnalysisState === "failed",
-  ).length;
-  const hasLabelAnalysisFailure =
-    thread.hasLabelAnalysisFailure || failedMessageCount > 0;
   const isUnread = thread.gmailLabels.some(
     (label) => label.providerLabelId === "UNREAD",
   );
@@ -80,9 +74,8 @@ export async function ThreadReader({
           <SmartLabelControls
             key={thread.id}
             threadId={thread.id}
-            labels={thread.invookLabels}
+            label={thread.invookLabel}
             availableLabels={availableLabels}
-            isOthers={thread.isOthers}
           />
           {latestMessage ? (
             <MessageStarButton
@@ -112,27 +105,6 @@ export async function ThreadReader({
           <p className="mt-1 text-xs text-muted-foreground">
             {thread.messageCount} {thread.messageCount === 1 ? "message" : "messages"}
           </p>
-
-          {hasLabelAnalysisFailure ? (
-            <div
-              role="alert"
-              className="mt-4 flex items-start gap-2.5 rounded-lg bg-warning/10 px-3 py-2.5 text-sm"
-            >
-              <HugeiconsIcon
-                icon={AlertCircleIcon}
-                size={16}
-                className="mt-0.5 shrink-0 text-warning"
-              />
-              <p className="leading-5 text-foreground/80">
-                Automatic label analysis failed
-                {failedMessageCount > 1
-                  ? ` for ${failedMessageCount} messages`
-                  : " for a message"}
-                . The stored content remains available, but its Invook labels may be
-                incomplete.
-              </p>
-            </div>
-          ) : null}
 
           <div className="mt-7 space-y-14">
             {thread.messages.map((message) => {

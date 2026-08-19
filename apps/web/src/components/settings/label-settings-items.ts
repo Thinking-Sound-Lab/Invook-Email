@@ -2,7 +2,7 @@ import type { InvookLabel } from "@invook/contracts";
 
 export interface LabelSettingsItem {
   label: InvookLabel;
-  isDeletable: boolean;
+  canDisable: boolean;
 }
 
 export function listLabelSettingsItems(
@@ -11,7 +11,7 @@ export function listLabelSettingsItems(
   return invookLabels
     .map((label) => ({
       label,
-      isDeletable: label.systemKey === null,
+      canDisable: label.systemKey !== "others",
     }))
     .sort((left, right) => left.label.name.localeCompare(right.label.name));
 }

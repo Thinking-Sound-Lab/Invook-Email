@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { listLabelSettingsItems } from "./label-settings-items";
 
-test("label settings list only Invook labels and protect built-ins", () => {
+test("label settings keep labels permanent and protect the Others fallback", () => {
   const items = listLabelSettingsItems([
     {
       id: "custom-label",
@@ -11,25 +11,27 @@ test("label settings list only Invook labels and protect built-ins", () => {
       description: "Requires a reply",
       systemKey: null,
       definitionVersion: 1,
+      isEnabled: true,
     },
     {
       id: "newsletter-label",
       name: "Newsletter",
       description: "Recurring editorial mail",
-      systemKey: "newsletter",
+      systemKey: "others",
       definitionVersion: 1,
+      isEnabled: true,
     },
   ]);
 
   assert.deepEqual(
     items.map((item) => ({
       id: item.label.id,
-      isDeletable: item.isDeletable,
+      canDisable: item.canDisable,
       name: item.label.name,
     })),
     [
-      { id: "custom-label", isDeletable: true, name: "Action needed" },
-      { id: "newsletter-label", isDeletable: false, name: "Newsletter" },
+      { id: "custom-label", canDisable: true, name: "Action needed" },
+      { id: "newsletter-label", canDisable: false, name: "Newsletter" },
     ],
   );
 });

@@ -11,6 +11,7 @@ test("sidebar labels contain only sorted Invook label definitions", () => {
       description: "Requires a reply",
       systemKey: null,
       definitionVersion: 1,
+      isEnabled: true,
     },
     {
       id: "newsletter-label",
@@ -18,6 +19,7 @@ test("sidebar labels contain only sorted Invook label definitions", () => {
       description: "Recurring editorial mail",
       systemKey: "newsletter",
       definitionVersion: 1,
+      isEnabled: true,
     },
   ]);
 

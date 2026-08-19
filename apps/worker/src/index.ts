@@ -55,6 +55,7 @@ import {
   enqueuePendingGmailHistoryCatchups,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
+  enqueueUnassignedInboxThreadAnalyses,
   failMailSyncItem,
   failWorkflowStep,
   finalizeEmbeddingBatchSubmission,
@@ -161,11 +162,11 @@ import {
 } from "./gmail-history-catchup";
 import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
 import {
-  failTerminalMessageLabelAnalysis,
-  isMessageLabelWorkflowStep,
-  messageLabelAnalysisErrorCode,
+  failTerminalThreadLabelAnalysis,
+  isThreadLabelWorkflowStep,
   runLabelSubmission,
-} from "./message-label-analysis";
+  threadLabelAnalysisErrorCode,
+} from "./thread-label-analysis";
 import { terminateWorkerAfterFatalError } from "./process-lifecycle";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
@@ -1135,7 +1136,17 @@ async function runGmailFinalize(job: WorkflowStepJob) {
     finalHistoryCursor: historyCursor,
   });
   if (!completed) return { status: "inactive", runId };
-  return { status: "complete", runId, historyCursor, runType: run.runType };
+  const queuedThreadCount = await enqueueUnassignedInboxThreadAnalyses({
+    userId: account.userId,
+    accountId: account.id,
+  });
+  return {
+    status: "complete",
+    runId,
+    historyCursor,
+    runType: run.runType,
+    queuedThreadCount,
+  };
 }
 
 async function runGmailHistoryCatchup(job: WorkflowStepJob) {
@@ -2390,8 +2401,8 @@ async function runWorkflowStepHandler(
         return runMemoryBatchEvent(job);
       case "memory.feedback":
         return runMemoryFeedback(job);
-      case "label.message.analyze":
-      case "label.message.apply":
+      case "label.thread.assign":
+      case "label.thread.scan":
         return runLabelSubmission(job);
       default:
         throw new Error(`Unsupported Temporal workflow step: ${job.stepType}`);
@@ -2442,11 +2453,11 @@ export async function runWorkflowStepActivity(
       maxAttempts: job.maxAttempts,
     });
     const persistedMessage =
-      isMessageLabelWorkflowStep(job.stepType)
-        ? messageLabelAnalysisErrorCode(error)
+      isThreadLabelWorkflowStep(job.stepType)
+        ? threadLabelAnalysisErrorCode(error)
         : failure.persistedMessage;
     if (failure.isTerminal) {
-      await failTerminalMessageLabelAnalysis(job, error);
+      await failTerminalThreadLabelAnalysis(job, error);
     }
     await persistWorkflowFailure(
       job,
@@ -2488,12 +2499,14 @@ export async function reconcileWorkflowStepFailureActivity(
     maxAttempts: input.maxAttempts,
   };
   const error = new Error("temporal_activity_terminal_failure");
-  await failTerminalMessageLabelAnalysis(job, error);
+  await failTerminalThreadLabelAnalysis(job, error);
   await persistWorkflowFailure(
     job,
-    job.stepType.startsWith("gmail.")
-      ? "gmail_workflow_activity_failed"
-      : "temporal_activity_failed",
+    isThreadLabelWorkflowStep(job.stepType)
+      ? threadLabelAnalysisErrorCode(error)
+      : job.stepType.startsWith("gmail.")
+        ? "gmail_workflow_activity_failed"
+        : "temporal_activity_failed",
     true,
     false,
   );
@@ -2505,7 +2518,6 @@ function enabledActivityTaskQueues(): Set<WorkflowActivityTaskQueue> {
     "gmail-messages",
     "gmail-message-batches",
     "gmail-control",
-    "mail-label-live",
     "mail-label-submit",
   ]);
   if (isAiConfigured()) {
@@ -2615,6 +2627,7 @@ async function run() {
     await enqueueReadyMailSyncFinalizers();
     await ensureDailyGmailWatchRenewals();
     await enqueuePostSyncWorkflowSteps();
+    await enqueueUnassignedInboxThreadAnalyses();
     await enqueuePendingAnalysisWorkflowSteps();
     await reconcileSubmittedEmbeddingBatches();
     outboxSignal.notify();

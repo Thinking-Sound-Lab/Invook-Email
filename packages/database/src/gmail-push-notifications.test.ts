@@ -359,7 +359,7 @@ test(
         {
           userId,
           accountId,
-          stepType: "label.message.analyze",
+          stepType: "label.thread.assign",
           payload: {},
           idempotencyKey: `bulk-label:${accountId}`,
         },
@@ -374,24 +374,13 @@ test(
           {
             userId,
             accountId,
-            stepType: "label.message.analyze",
+            stepType: "label.thread.assign",
             payload: {},
             idempotencyKey: `bulk-label:${accountId}:${index}`,
           },
           database,
         );
       }
-      await enqueueWorkflowStep(
-        {
-          userId,
-          accountId,
-          stepType: "label.message.analyze",
-          payload: { dispatchClass: "live" },
-          idempotencyKey: `live-label:${accountId}`,
-        },
-        database,
-      );
-
       await recordGmailPushNotification(
         { emailAddress, notificationHistoryId: "150" },
         database,
@@ -414,17 +403,19 @@ test(
         TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE,
       );
       assert.equal(dispatchedJobs[0]?.stepType, "gmail.history.catchup");
-      const liveLabelIndex = dispatchedJobs.findIndex(
-        (job) => job.payload.dispatchClass === "live",
-      );
-      const bulkLabelIndex = dispatchedJobs.findIndex(
+      const firstLabelIndex = dispatchedJobs.findIndex(
         (job) => job.activityTaskQueue === "mail-label-submit",
       );
-      assert.ok(liveLabelIndex >= 0);
-      assert.ok(bulkLabelIndex > liveLabelIndex);
-      assert.equal(
-        dispatchedJobs[liveLabelIndex]?.activityTaskQueue,
-        "mail-label-live",
+      assert.ok(firstLabelIndex > 0);
+      assert.ok(
+        dispatchedJobs
+          .slice(0, firstLabelIndex)
+          .every((job) => job.stepType === "gmail.history.catchup"),
+      );
+      assert.ok(
+        dispatchedJobs.slice(firstLabelIndex).every(
+          (job) => job.activityTaskQueue === "mail-label-submit",
+        ),
       );
 
       const [recoveryStep] = await database

@@ -30,7 +30,7 @@ import type {
 } from "./types";
 
 const viewTitles: Record<StaticMailboxView, string> = {
-  all: "All mail",
+  all: "All",
   important: "Important",
   starred: "Starred",
   drafts: "Drafts",
@@ -59,12 +59,10 @@ interface MailLabelChipProps {
 }
 
 function MailLabelChip({ label }: MailLabelChipProps) {
-  const sourceName = label.kind === "gmail" ? "Gmail" : "Invook";
-
   return (
     <span
-      aria-label={`${label.name}, ${sourceName} label`}
-      title={`${label.name} (${sourceName})`}
+      aria-label={`${label.name}, Invook label`}
+      title={`${label.name} (Invook)`}
       className={cn(
         "min-w-0 max-w-28 truncate rounded px-1.5 py-0.5 text-[11px] font-medium",
         mailLabelColorClassName(label),

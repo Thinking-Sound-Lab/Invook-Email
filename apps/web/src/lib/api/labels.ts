@@ -1,12 +1,13 @@
 import type {
   CreateInvookLabelRequest,
   CreateInvookLabelResponse,
-  DeletedResourceResponse,
   InvookLabelPreviewResponse,
   InvookThreadLabel,
   PreviewInvookLabelRequest,
+  SetInvookLabelEnabledRequest,
+  SetInvookLabelEnabledResponse,
   SetThreadLabelRequest,
-  ThreadLabelsResponse,
+  ThreadLabelResponse,
 } from "@invook/contracts";
 import axios from "axios";
 
@@ -30,8 +31,15 @@ export async function previewInvookLabel(
   return response.data;
 }
 
-export async function deleteInvookLabel(labelId: string): Promise<void> {
-  await axios.delete<DeletedResourceResponse>(`/v1/labels/${labelId}`);
+export async function setInvookLabelEnabled(
+  labelId: string,
+  input: SetInvookLabelEnabledRequest,
+): Promise<SetInvookLabelEnabledResponse> {
+  const response = await axios.patch<SetInvookLabelEnabledResponse>(
+    `/v1/labels/${labelId}/enabled`,
+    input,
+  );
+  return response.data;
 }
 
 export interface SetThreadLabelInput extends SetThreadLabelRequest {
@@ -41,12 +49,11 @@ export interface SetThreadLabelInput extends SetThreadLabelRequest {
 export async function setThreadLabel({
   threadId,
   labelId,
-  applied,
-}: SetThreadLabelInput): Promise<InvookThreadLabel[]> {
-  const request: SetThreadLabelRequest = { labelId, applied };
-  const response = await axios.patch<ThreadLabelsResponse>(
+}: SetThreadLabelInput): Promise<InvookThreadLabel> {
+  const request: SetThreadLabelRequest = { labelId };
+  const response = await axios.patch<ThreadLabelResponse>(
     `/v1/threads/${threadId}/labels`,
     request,
   );
-  return response.data.labels;
+  return response.data.label;
 }

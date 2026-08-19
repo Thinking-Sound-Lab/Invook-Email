@@ -26,7 +26,7 @@ Invook never ships dummy mailbox, contact, memory, label, or draft data. If Gmai
 
 ### Opinionated defaults, user authority
 
-A user may add an account-owned Invook label with an explicit description. Before creation, Invook can preview matches by classifying up to 100 recent canonical stored messages without persisting those sample results. At final confirmation the user may explicitly apply the new label to stored messages from the last 7, 30, or 90 days; that choice creates durable per-message work. Without that choice, and for definition edits, the label applies only to messages whose required analysis has not completed yet or that are ingested afterward. Explicit user applications and suppressions win over model output.
+A user may add an account-owned Invook label with an explicit description. Before creation, Invook can preview matches by classifying up to 100 recent Inbox threads without persisting those sample results. A new label may optionally scan existing Inbox threads from the last 7, 30, or 90 days. Every thread has exactly one Invook label; a manual choice atomically replaces its previous assignment and is never changed by later messages.
 
 User-written Memory is authoritative. Automatic inference must not silently overwrite it.
 
@@ -78,13 +78,13 @@ The left sidebar contains:
 
 The center pane shows the selected mailbox or label view in reverse chronological order. Selecting a thread replaces the list with the real thread. Opening an unread thread submits one Gmail thread-level read mutation; Gmail is written first, and the stored replica changes only when provider history is applied. A failed passive mutation remains non-optimistic and exposes an explicit retry.
 
-The right pane is the agent for Find and local Write. It reads only authoritative stored messages whose label analysis is complete or terminally failed and may create local drafts, but it has no Gmail mutation tools. During initial synchronization, not-yet-stored and pending/running messages remain unavailable while Gmail fetching and other UI activity continue. Explicit product actions for archive, read state, star, Trash, and Gmail Drafts write Gmail first and converge through provider history. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
+The right pane is the agent for Find and local Write. It reads authoritative stored mail and may create local drafts, but it has no Gmail mutation tools. During initial synchronization, Inbox threads remain unavailable until their one Invook label is assigned; provider-only non-Inbox views remain available from stored Gmail state. Explicit product actions for archive, read state, star, Trash, and Gmail Drafts write Gmail first and converge through provider history. Agent-initiated sending, recurring Inbox Zero, and standing approvals remain unavailable.
 
 ### Label settings
 
-Settings lists the built-in Newsletter definition and user-created Invook labels. Newsletter cannot be deleted. Creating or editing a custom label requires both a name and description. The creation flow previews sample matches from stored mail and asks whether to enqueue an optional 7-, 30-, or 90-day historical application. Editing stores only the new definition version and does not enqueue historical work. Deleting a custom label removes its decisions and memberships through database ownership constraints.
+Settings lists the built-in Important, Newsletter, Billing, and Others definitions plus user-created Invook labels. Labels are permanent: a user can enable or disable any label except the always-enabled Others fallback. Disabled labels keep their existing thread assignments but are excluded from classification of new Inbox threads. Re-enabling asks whether to scan existing Inbox threads from the last 7, 30, or 90 days; the scan replaces an assignment only if its version has not changed since the scan was queued.
 
-The mailbox sidebar groups All, Starred, Drafts, Sent, Spam, and Trash under Mail. Labels begins with Gmail-owned Important, followed by Newsletter and the user-created Invook labels.
+The mailbox sidebar groups All, Important, Starred, Drafts, Sent, Spam, and Trash under Mail. All and every Invook-label view contain only Gmail Inbox threads. Important is Invook-owned classification; Gmail's `IMPORTANT` membership remains provider metadata and is not used as the product label.
 
 ### Memory settings
 
@@ -119,7 +119,7 @@ Deleting removes the active record and its text. A non-reversible fingerprint to
 
 ## Batch analysis
 
-Embeddings are not required for Memory v3 or labels. Labels do not use provider Batch: each newly stored or content-changed message is analyzed once. Snapshot work uses the bounded `mail-label-submit` queue, and live history delivery uses the independently bounded `mail-label-live` queue.
+Embeddings are not required for Memory v3 or labels. Labels do not use provider Batch: after initial import, each unlabelled Gmail Inbox thread is analyzed once through the separately bounded `mail-label-submit` queue. New messages and content changes never reclassify an already-labelled thread.
 
 For initial Memory, the worker uses the selected OpenAI or Azure OpenAI native Batch API as follows:
 
@@ -175,9 +175,9 @@ The user can inspect, edit, or delete feedback-derived Memory exactly like mail-
 
 ## Labels
 
-One classifier may apply zero or more Invook-owned labels to a message: the built-in Newsletter definition and any custom definitions active before that message's analysis completes. Labels are independent and not mutually exclusive. Important comes only from Gmail's `IMPORTANT` system ID and never reaches the model. Others is derived only when a successfully analyzed message has neither Gmail Important nor any applied Invook label, and is not persisted. Opaque Gmail user-label IDs are ignored, and Invook never lists or fetches the Gmail user-label catalog.
+One classifier assigns exactly one enabled Invook-owned label to an eligible Gmail Inbox thread. Candidates include Important, Newsletter, Billing, and enabled custom definitions; Others is the persisted fallback when no candidate matches. Only messages currently carrying Gmail `INBOX` and neither `SPAM` nor `TRASH` are classifier input. Gmail `IMPORTANT` is retained only as provider metadata. Opaque Gmail user-label IDs are ignored.
 
-Every applied relationship is message-level. AI decision, confidence, model ID, definition version, and explicit user override or suppression live in `message_label_decisions`; the visible relationship lives only in `message_labels`. A message is excluded from normal mailbox, search, agent, attachment, and draft-context results while analysis is pending or running. Decisions, memberships, completion state, and the mailbox event commit atomically. A bounded terminal model failure becomes visible with real Gmail state and an explicit failed state, without fabricated matches.
+`thread_label_assignments` is the single visible and durable relationship, constrained to one row per thread. It stores AI or user source, confidence and model provenance, definition version, and an assignment version used to protect historical scans from overwriting later manual choices. Archive, Trash, and Spam preserve the assignment but remove the thread from All and Invook-label views; restoring it to Inbox reveals the same assignment without reclassification. An unlabelled thread first moved into Inbox is classified. Manual replacement is the only ordinary way an assigned thread changes label.
 
 ## Architecture
 
@@ -198,7 +198,7 @@ Worker
   -> S3-compatible raw MIME and attachment object storage
   -> Temporal Activities for search indexing, Invook-label analysis, and initial or incremental Memory
   -> selected OpenAI or Azure OpenAI Batch provider for Memory
-  -> configured model endpoint for validated per-message label classification
+  -> configured model endpoint for validated per-thread label classification
   -> configured model endpoint for feedback and drafts
   -> validated results in PostgreSQL
 ```
@@ -218,9 +218,9 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `threads`
 - `messages`
 - `message_labels`
+- `thread_label_assignments`
 - `message_attachments`
 - `drafts`
-- `message_label_decisions`
 - `message_embeddings`
 - `memory_entries`
 - `memory_pending_evidence`
@@ -257,10 +257,10 @@ Current mailbox, label, Memory, and draft endpoints include:
 | `GET` | `/v1/attachments/:id/download` | Authorize the attachment and download its private stored bytes |
 | `GET` | `/v1/mailbox/events` | Stream authenticated durable mailbox-change events over SSE |
 | `POST` | `/v1/webhooks/google-pubsub` | Authenticate a Gmail Pub/Sub push and coalesce its pending cursor |
-| `POST` | `/v1/labels/preview` | Preview a custom label against up to 100 recent canonical stored messages |
-| `POST` | `/v1/labels` | Create a custom Invook label and optionally enqueue a 7-, 30-, or 90-day stored-mail scan |
-| `PATCH` | `/v1/labels/:labelId` | Update a custom definition for not-yet-complete and future analysis |
-| `DELETE` | `/v1/labels/:labelId` | Delete a custom Invook label and its decisions |
+| `POST` | `/v1/labels/preview` | Preview a custom label against up to 100 recent Inbox threads |
+| `POST` | `/v1/labels` | Create a permanent custom Invook label and optionally enqueue a 7-, 30-, or 90-day Inbox-thread scan |
+| `PATCH` | `/v1/labels/:labelId` | Update a custom definition for future unlabelled threads |
+| `PATCH` | `/v1/labels/:labelId/enabled` | Enable or disable a label and optionally scan a recent window when re-enabling |
 | `GET` | `/v1/memories` | Return the connected account's real Memory and status |
 | `POST` | `/v1/memories` | Add a user-authored item |
 | `PATCH` | `/v1/memories/:id` | Correct an item and make it user-authored |

@@ -32,7 +32,7 @@ See [Configuration](#configuration) before signing in or connecting Gmail.
 
 - Mirror the complete Gmail mailbox, including Spam, Trash, drafts, raw MIME, and attachments.
 - Search mail with text, metadata, attachment filenames, and optional semantic similarity.
-- Apply the built-in Newsletter label and user-defined AI labels without changing Gmail labels.
+- Assign exactly one Invook-owned Important, Newsletter, Billing, Others, or custom label to each Inbox thread without changing Gmail labels.
 - Learn editable Memory for writing preferences, contacts, and scheduling behavior.
 - Draft replies with only the current thread and relevant Memory as context.
 - Save, edit, and send Gmail drafts through an explicit user-confirmed flow.

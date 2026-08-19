@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 
 import { getDatabase, type Database } from "./client";
 import { insertMailboxChange } from "./mailbox-change-events";
+import { visibleThreadCondition } from "./mailbox-visibility";
 import {
   deleteIndexedMessage,
   replaceGmailMessageLabels,
@@ -107,7 +108,6 @@ export async function getGmailMessageMutationContext(
     .where(
       and(
         eq(messages.id, input.messageId),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
       ),
@@ -127,21 +127,13 @@ export async function getGmailThreadMutationContext(
     })
     .from(threads)
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
-    .innerJoin(
-      messages,
-      and(
-        eq(messages.threadId, threads.id),
-        eq(messages.accountId, threads.accountId),
-        eq(messages.userId, input.userId),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
-      ),
-    )
     .where(
       and(
         eq(threads.id, input.threadId),
         eq(threads.userId, input.userId),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
+        visibleThreadCondition(),
       ),
     )
     .limit(1);
@@ -168,7 +160,6 @@ export async function getGmailDraftResourceForUser(
         eq(drafts.kind, "gmail"),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
       ),
     )
     .limit(1);
@@ -221,7 +212,6 @@ export async function getAiReplyDraftForGmailSave(
       and(
         eq(messages.threadId, draft.threadId),
         eq(messages.direction, "incoming"),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
       ),
     )
     .orderBy(desc(messages.internalDate), desc(messages.id))
