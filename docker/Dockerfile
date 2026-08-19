@@ -1,6 +1,9 @@
-FROM node:24-alpine AS base
+FROM node:24-bookworm-slim AS base
 WORKDIR /workspace
 ENV NEXT_TELEMETRY_DISABLED=1
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 
 FROM base AS deps
@@ -14,17 +17,18 @@ COPY packages/contracts/package.json ./packages/contracts/package.json
 COPY packages/database/package.json ./packages/database/package.json
 COPY packages/gmail/package.json ./packages/gmail/package.json
 COPY packages/object-storage/package.json ./packages/object-storage/package.json
+COPY packages/workflows/package.json ./packages/workflows/package.json
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS builder
 COPY . .
 RUN pnpm build
 
-FROM node:24-alpine AS runner
+FROM node:24-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
+RUN groupadd --system --gid 1001 nodejs && useradd --system --uid 1001 --gid nodejs nextjs
 COPY --from=builder --chown=nextjs:nodejs /workspace/apps/web/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /workspace/apps/web/.next/static ./apps/web/.next/static
 USER nextjs

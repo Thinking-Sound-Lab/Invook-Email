@@ -15,14 +15,17 @@ import {
 } from "./replica";
 import {
   createRepairMailSyncRun,
+  dispatchTemporalCommandBatch,
+  TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE,
   enqueuePendingGmailHistoryCatchups,
+  enqueueWorkflowStep,
   getActiveRepairMailSyncRunContext,
 } from "./workflows";
 import {
   connectedAccounts,
   gmailReplicaStates,
   profiles,
-  queueOutbox,
+  temporalCommands,
   workflowSteps,
 } from "./schema";
 import * as schema from "./schema";
@@ -93,7 +96,7 @@ test("each catch-up activation creates one deterministic continuation contract",
 });
 
 test(
-  "notifications during initial sync remain pending through readiness and then clear",
+  "notification admission preserves the highest cursor until an applied range clears it",
   { skip: !testDatabaseUrl },
   async () => {
     if (!testDatabaseUrl) return;
@@ -190,9 +193,9 @@ test(
         status: "queued",
       });
       const continuationOutbox = await database
-        .select({ workflowStepId: queueOutbox.workflowStepId })
-        .from(queueOutbox)
-        .where(eq(queueOutbox.workflowStepId, firstApplied.continuationStepId));
+        .select({ workflowStepId: temporalCommands.workflowStepId })
+        .from(temporalCommands)
+        .where(eq(temporalCommands.workflowStepId, firstApplied.continuationStepId));
       assert.deepEqual(continuationOutbox, [
         { workflowStepId: firstApplied.continuationStepId },
       ]);
@@ -315,6 +318,156 @@ test(
       assert.deepEqual(replica, {
         state: "repairing",
         historyCursor: "260",
+        pendingHistoryCursor: null,
+      });
+    } finally {
+      await database.delete(profiles).where(eq(profiles.id, userId));
+      await client.end();
+    }
+  },
+);
+
+test(
+  "snapshot notifications are reactivated and applied without completing the snapshot",
+  { skip: !testDatabaseUrl },
+  async () => {
+    if (!testDatabaseUrl) return;
+    const client = postgres(testDatabaseUrl, { max: 1, prepare: false });
+    const database = drizzle(client, { schema });
+    const userId = uuidv4();
+    const accountId = uuidv4();
+    const emailAddress = `${accountId}@example.com`;
+    try {
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
+      await database.insert(connectedAccounts).values({
+        id: accountId,
+        userId,
+        providerAccountId: `provider-${accountId}`,
+        email: emailAddress,
+        memoryAcknowledgedAt: new Date(),
+      });
+      await database.insert(gmailReplicaStates).values({
+        accountId,
+        initialHistoryId: "100",
+        state: "snapshotting",
+      });
+      await enqueueWorkflowStep(
+        {
+          userId,
+          accountId,
+          stepType: "label.message.analyze",
+          payload: {},
+          idempotencyKey: `bulk-label:${accountId}`,
+        },
+        database,
+      );
+      for (
+        let index = 0;
+        index < TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE;
+        index += 1
+      ) {
+        await enqueueWorkflowStep(
+          {
+            userId,
+            accountId,
+            stepType: "label.message.analyze",
+            payload: {},
+            idempotencyKey: `bulk-label:${accountId}:${index}`,
+          },
+          database,
+        );
+      }
+      await enqueueWorkflowStep(
+        {
+          userId,
+          accountId,
+          stepType: "label.message.analyze",
+          payload: { dispatchClass: "live" },
+          idempotencyKey: `live-label:${accountId}`,
+        },
+        database,
+      );
+
+      await recordGmailPushNotification(
+        { emailAddress, notificationHistoryId: "150" },
+        database,
+      );
+      assert.equal(await enqueuePendingGmailHistoryCatchups(database), 1);
+
+      let dispatchedJobs: Array<{
+        stepType: string;
+        activityTaskQueue: string;
+        payload: Record<string, unknown>;
+      }> = [];
+      await dispatchTemporalCommandBatch(
+        async (jobs) => {
+          dispatchedJobs = jobs;
+        },
+        database,
+      );
+      assert.equal(
+        dispatchedJobs.length,
+        TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE,
+      );
+      assert.equal(dispatchedJobs[0]?.stepType, "gmail.history.catchup");
+      const liveLabelIndex = dispatchedJobs.findIndex(
+        (job) => job.payload.dispatchClass === "live",
+      );
+      const bulkLabelIndex = dispatchedJobs.findIndex(
+        (job) => job.activityTaskQueue === "mail-label-submit",
+      );
+      assert.ok(liveLabelIndex >= 0);
+      assert.ok(bulkLabelIndex > liveLabelIndex);
+      assert.equal(
+        dispatchedJobs[liveLabelIndex]?.activityTaskQueue,
+        "mail-label-live",
+      );
+
+      const [recoveryStep] = await database
+        .select({ input: workflowSteps.input })
+        .from(workflowSteps)
+        .where(
+          eq(
+            workflowSteps.idempotencyKey,
+            `gmail-history-pending-reconciliation:${accountId}:snapshotting:150`,
+          ),
+        );
+      assert.deepEqual(recoveryStep?.input, {
+        reason: "pending_reconciliation",
+        pendingHistoryCursor: "150",
+      });
+
+      const applied = await applyGmailHistoryBatch(
+        {
+          userId,
+          accountId,
+          expectedCursor: "100",
+          nextCursor: "160",
+          messages: [],
+          labelChanges: [],
+          deletedMessageIds: [],
+          stateAfterApply: "snapshotting",
+        },
+        database,
+      );
+      assert.equal(applied.applied, true);
+      assert.equal(applied.pendingHistoryCursor, null);
+
+      const [replica] = await database
+        .select({
+          state: gmailReplicaStates.state,
+          historyCursor: gmailReplicaStates.historyCursor,
+          pendingHistoryCursor: gmailReplicaStates.pendingHistoryCursor,
+        })
+        .from(gmailReplicaStates)
+        .where(eq(gmailReplicaStates.accountId, accountId));
+      assert.deepEqual(replica, {
+        state: "snapshotting",
+        historyCursor: "160",
         pendingHistoryCursor: null,
       });
     } finally {

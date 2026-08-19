@@ -62,11 +62,11 @@ After sign-in, an authenticated user with no mailbox sees an honest **Connect Gm
 
 Signing out revokes only the Better Auth browser session. It does not revoke Gmail credentials, stop a Gmail watch, cancel durable work, or change a mailbox replica. Mailbox disconnection and account deletion remain explicit lifecycles.
 
-The first connection follows every Gmail result page with Spam and Trash included, stores exact raw MIME and attachment bytes in S3-compatible storage, and stores complete headers, text/HTML, recognized Gmail system-label memberships, Gmail Draft resources, applied/pending cursors, watch state, and workflow checkpoints in PostgreSQL. Each committed message atomically creates its own durable label-analysis step; Gmail fetching continues independently. The final replay from H0 is still the only path that marks the replica ready and releases indexing and initial Memory. Authenticated Pub/Sub pushes use the same message-storage and analysis path. Gmail remains canonical for provider-owned state. The detailed boundary is defined in `docs/gmail-replica-contract.md`.
+The first connection follows every Gmail result page with Spam and Trash included, stores exact raw MIME and attachment bytes in S3-compatible storage, and stores complete headers, text/HTML, recognized Gmail system-label memberships, Gmail Draft resources, applied/pending cursors, watch state, and workflow checkpoints in PostgreSQL. Each committed message atomically creates its own durable label-analysis step; Gmail fetching continues independently. Authenticated Pub/Sub pushes apply from the watch baseline while the initial snapshot continues, without marking the replica ready. The final replay from H0 is still the only path that marks the replica ready and releases indexing and initial Memory. Gmail remains canonical for provider-owned state. The detailed boundary is defined in `docs/gmail-replica-contract.md`.
 
 Each connected account also has one durable daily watch-renewal action. A successful renewal catches up from the stored cursor and schedules its successor. Normal initial synchronization, catch-up, and renewal do not run a full replica audit.
 
-Historical search indexing uses durable 2,000-message provider batches. A signed terminal provider webhook commits current-content embeddings, provider-submission completion, any retry or next-batch outbox step, and account progress in one PostgreSQL transaction. Duplicate webhook delivery is idempotent. Indexing is complete only when every current message has a complete embedding for the configured model, dimensions, content hash, and index version; unavailable mailbox prerequisites surface as failed rather than continuing in process memory.
+Historical search indexing uses durable 2,000-message provider batches. A signed terminal provider webhook commits current-content embeddings, provider-submission completion, any retry or next-batch Temporal command, and account progress in one PostgreSQL transaction. Duplicate webhook delivery is idempotent. Indexing is complete only when every current message has a complete embedding for the configured model, dimensions, content hash, and index version; unavailable mailbox prerequisites surface as failed rather than continuing in process memory.
 
 ### Mail workspace
 
@@ -119,7 +119,7 @@ Deleting removes the active record and its text. A non-reversible fingerprint to
 
 ## Batch analysis
 
-Embeddings are not required for Memory v3 or labels. Labels do not use provider Batch: each newly stored or content-changed message is analyzed once through the separately bounded `mail-label-submit` queue.
+Embeddings are not required for Memory v3 or labels. Labels do not use provider Batch: each newly stored or content-changed message is analyzed once. Snapshot work uses the bounded `mail-label-submit` queue, and live history delivery uses the independently bounded `mail-label-live` queue.
 
 For initial Memory, the worker uses the selected OpenAI or Azure OpenAI native Batch API as follows:
 
@@ -192,11 +192,11 @@ Browser
        -> PostgreSQL
 
 Worker
-  -> PostgreSQL workflow runs, checkpoints, and transactional outbox
-  -> BullMQ queues in persistent Redis
+  -> PostgreSQL product state, checkpoints, and transactional Temporal commands
+  -> Temporal Cloud Workflows, schedules, task delivery, and retries
   -> Gmail snapshot, history replay, Pub/Sub catch-up, watch renewal, and repair runs
   -> S3-compatible raw MIME and attachment object storage
-  -> BullMQ search indexing, Invook-label analysis, and initial or incremental Memory
+  -> Temporal Activities for search indexing, Invook-label analysis, and initial or incremental Memory
   -> selected OpenAI or Azure OpenAI Batch provider for Memory
   -> configured model endpoint for validated per-message label classification
   -> configured model endpoint for feedback and drafts
@@ -230,12 +230,12 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `gmail_sync_pages`
 - `gmail_sync_items`
 - `workflow_steps`
-- `queue_outbox`
+- `temporal_commands`
 - `embedding_batch_submissions`
 - `gmail_account_cleanups`
 - `mailbox_change_events`
 
-BullMQ is the only job executor and owns queue locks, retries, and stalled-job recovery in Redis. PostgreSQL workflow tables retain user-visible progress, page-level resumability, provider-Batch correlation, and reliable publication across the PostgreSQL/Redis boundary. New tables should be added only for a working feature and demonstrated query need.
+Temporal Cloud is the only asynchronous executor and owns Workflow history, Activity task delivery, retry timing, and scheduled starts. PostgreSQL retains canonical product state, user-visible progress, page-level resumability, provider-Batch correlation, and a transactional `temporal_commands` handoff across the PostgreSQL/Temporal boundary. New tables should be added only for a working feature and demonstrated query need.
 
 ## API requirements
 

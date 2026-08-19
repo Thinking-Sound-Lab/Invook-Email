@@ -72,6 +72,15 @@ test("sync notifications advance on a new percentage or durable count interval",
       previousProcessedMessageCount: 99,
       processedMessageCount: 100,
     }),
+    true,
+  );
+  assert.equal(
+    hasMailSyncProgressAdvanced({
+      discoveryComplete: false,
+      discoveredMessageCount: 10_000,
+      previousProcessedMessageCount: 100,
+      processedMessageCount: 101,
+    }),
     false,
   );
 });

@@ -31,7 +31,7 @@ const ACTIVE_MIME_TYPES = new Set([
   "text/html",
 ]);
 
-export function safeAttachmentContentType(mimeType: string | null): string {
+function safeAttachmentContentType(mimeType: string | null): string {
   const normalized = mimeType?.trim().toLowerCase() ?? "";
   return MIME_TYPE_PATTERN.test(normalized) && !ACTIVE_MIME_TYPES.has(normalized)
     ? normalized
@@ -51,7 +51,7 @@ function replaceUnpairedSurrogates(value: string): string {
   );
 }
 
-export function attachmentContentDisposition(filename: string): string {
+function attachmentContentDisposition(filename: string): string {
   const basename = filename.split(/[\\/]/).at(-1) ?? "";
   const safeUnicode = basename.replace(/[\u0000-\u001f\u007f]/g, "").trim();
   const normalized = replaceUnpairedSurrogates(safeUnicode || "attachment");

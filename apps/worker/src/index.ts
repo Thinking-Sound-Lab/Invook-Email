@@ -1,8 +1,8 @@
-import { UnrecoverableError } from "bullmq";
+import { activityInfo } from "@temporalio/activity";
+import { ApplicationFailure } from "@temporalio/common";
 
 import {
   AiConfigurationError,
-  deleteBatchFiles,
   buildEmbeddingInput,
   createEmbeddingBatch,
   deleteEmbeddingBatchInputFile,
@@ -51,6 +51,7 @@ import {
   enqueueMemoryBatchRetry,
   enqueueMissingMailSyncRuns,
   enqueueImplausibleGmailMessageDateRepairs,
+  enqueueFailedInitialGmailRepairRecoveries,
   enqueuePendingGmailHistoryCatchups,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
@@ -77,7 +78,7 @@ import {
   isActiveMailSyncRun,
   getBatchSubmission,
   hasCompletedMailSyncPage,
-  listenForOutboxNotifications,
+  listenForTemporalCommandNotifications,
   MAIL_INDEX_VERSION,
   listGmailObjectKeysForAccount,
   markGmailAccountCleanupRunning,
@@ -96,7 +97,7 @@ import {
   setIndexingSyncStage,
   setMemorySyncStage,
   toPostgresTextProjection,
-  publishOutboxBatch,
+  dispatchTemporalCommandBatch,
   createRepairMailSyncRun,
   replaceGmailDraftResources,
   prepareEmbeddingBatchSubmission,
@@ -135,16 +136,21 @@ import {
   type ParsedGmailMessage,
 } from "@invook/gmail";
 import { createObjectStorage } from "@invook/object-storage";
+import type {
+  WorkflowActivityTaskQueue,
+  WorkflowStepExecution,
+  WorkflowStepResult,
+} from "@invook/workflows";
 
 import {
-  BullQueueRuntime,
-  gmailControlConcurrency,
   gmailMessageConcurrency,
-  isBullMqStalledTerminalFailure,
-  mailLabelConcurrency,
-  type WorkflowJob,
-} from "./queue";
+  TemporalRuntime,
+} from "./temporal-runtime";
 import { classifyGmailWorkflowFailure } from "./gmail-workflow-failure";
+import {
+  parseGmailMessageBatchPayload,
+  processGmailMessageBatch,
+} from "./gmail-message-batch";
 import {
   applyGmailHistoryWithExpiredCursorRepair,
   shouldRepairNonReadyGmailReplica,
@@ -160,6 +166,7 @@ import {
   messageLabelAnalysisErrorCode,
   runLabelSubmission,
 } from "./message-label-analysis";
+import { terminateWorkerAfterFatalError } from "./process-lifecycle";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GMAIL_GOOGLE_CLIENT_ID ?? "";
@@ -167,7 +174,6 @@ const googleClientSecret = process.env.GMAIL_GOOGLE_CLIENT_SECRET ?? "";
 const feedbackBatchSize = 24;
 const embeddingBatchRequestLimit = 2_000;
 const embeddingBatchAttemptLimit = 3;
-const batchWorkerLockDuration = 5 * 60 * 1_000;
 const credentialRenewalWindowMs = 5 * 60 * 1_000;
 const objectStorage = createObjectStorage();
 const terminalEmbeddingBatchStates = new Set([
@@ -255,6 +261,7 @@ async function prepareMessage(options: {
   accountEmail: string;
   message: ParsedGmailMessage;
   ingestionMode: "initial" | "incremental";
+  isLiveDelivery?: boolean;
 }): Promise<IndexedMessage> {
   const { userId, accountId, accountEmail, message, ingestionMode } = options;
   const direction =
@@ -344,6 +351,7 @@ async function prepareMessage(options: {
     rawObject,
     isMemoryEligible: direction === "outgoing" && isMemoryEligible(message),
     ingestionMode,
+    isLiveDelivery: options.isLiveDelivery,
     memoryContactEmails: normalizedEmails(
       [message.from, ...message.to, ...message.cc],
       accountEmail,
@@ -496,9 +504,10 @@ async function applyHistoryRange(options: {
   accountEmail: string;
   startHistoryId: string;
   expectedCursor: string;
-  stateAfterApply?: "ready" | "replaying" | "repairing";
+  stateAfterApply?: "ready" | "snapshotting" | "replaying" | "repairing";
   continuationSourceStepId?: string;
   ingestionMode: "initial" | "incremental";
+  isLiveDelivery?: boolean;
 }) {
   let pageToken: string | undefined;
   let historyId = options.startHistoryId;
@@ -627,6 +636,7 @@ async function applyHistoryRange(options: {
           accountEmail: options.accountEmail,
           message: await parseGmailMessage(gmailMessage.message),
           ingestionMode: options.ingestionMode,
+          isLiveDelivery: options.isLiveDelivery,
         }),
       );
     }
@@ -721,6 +731,54 @@ async function runGmailPage(job: WorkflowStepJob) {
   };
 }
 
+async function processInitialGmailMessage(input: {
+  job: WorkflowStepJob;
+  runId: string;
+  providerMessageId: string;
+  account: { id: string; userId: string; email: string };
+  credential: GoogleCredential;
+}): Promise<"complete" | "current" | "gone" | "inactive"> {
+  const shouldProcess = await markMailSyncItemRunning(
+    input.runId,
+    input.account.id,
+    input.providerMessageId,
+    input.job.attempts,
+  );
+  if (!shouldProcess) return "current";
+  let gmailMessage;
+  try {
+    gmailMessage = await getGmailMessage(
+      input.credential.accessToken,
+      input.providerMessageId,
+    );
+  } catch (error) {
+    if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+    const completed = await completeMailSyncItem(
+      input.runId,
+      input.providerMessageId,
+    );
+    return completed ? "gone" : "inactive";
+  }
+  try {
+    await storeMessage({
+      userId: input.account.userId,
+      accountId: input.account.id,
+      accountEmail: input.account.email,
+      ingestionMode: "initial",
+      message: await parseGmailMessage(gmailMessage),
+      activeRunId: input.runId,
+    });
+  } catch (error) {
+    if (!(error instanceof InactiveMailSyncRunError)) throw error;
+    return "inactive";
+  }
+  const completed = await completeMailSyncItem(
+    input.runId,
+    input.providerMessageId,
+  );
+  return completed ? "complete" : "inactive";
+}
+
 async function runGmailMessage(job: WorkflowStepJob) {
   if (!job.accountId || !job.runId) {
     throw new Error("The Gmail message job is missing its synchronization run.");
@@ -730,46 +788,73 @@ async function runGmailMessage(job: WorkflowStepJob) {
     job.payload.providerMessageId,
     "Gmail message ID",
   );
-  const shouldProcess = await markMailSyncItemRunning(
+  const { account, credential } = await getMailSyncContext(job.accountId);
+  const status = await processInitialGmailMessage({
+    job,
     runId,
-    job.accountId,
     providerMessageId,
-    job.attempts,
-  );
-  if (!shouldProcess) {
-    return { status: "current", runId, providerMessageId };
+    account,
+    credential,
+  });
+  return {
+    status,
+    runId,
+    providerMessageId,
+  };
+}
+
+async function runGmailMessageBatch(job: WorkflowStepJob) {
+  if (!job.accountId || !job.runId) {
+    throw new Error("The Gmail message batch is missing its synchronization run.");
+  }
+  const { runId, providerMessageIds } = parseGmailMessageBatchPayload(job.payload);
+  if (runId !== job.runId) {
+    throw new Error("The Gmail message batch run ID does not match its workflow.");
   }
   const { account, credential } = await getMailSyncContext(job.accountId);
-  let gmailMessage;
-  try {
-    gmailMessage = await getGmailMessage(credential.accessToken, providerMessageId);
-  } catch (error) {
-    if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
-    const completed = await completeMailSyncItem(runId, providerMessageId);
-    return {
-      status: completed ? "gone" : "inactive",
-      runId,
-      providerMessageId,
-    };
+  const outcome = await processGmailMessageBatch({
+    providerMessageIds,
+    concurrency: gmailMessageConcurrency,
+    processMessage: async (providerMessageId) => {
+      await processInitialGmailMessage({
+        job,
+        runId,
+        providerMessageId,
+        account,
+        credential,
+      });
+    },
+  });
+  if (outcome.failures.length > 0) {
+    const classifiedFailures = outcome.failures.map((failure) => ({
+      ...failure,
+      classification: classifyGmailWorkflowFailure(failure.error, {
+        attempt: job.attempts,
+        maxAttempts: job.maxAttempts,
+      }),
+    }));
+    const terminalFailure = classifiedFailures.find(
+      (failure) =>
+        failure.classification.isReconnectRequired ||
+        failure.classification.isTerminal,
+    );
+    if (terminalFailure) throw terminalFailure.error;
+    for (const failure of classifiedFailures) {
+      await failMailSyncItem({
+        runId,
+        providerMessageId: failure.providerMessageId,
+        attempt: job.attempts,
+        message: failure.classification.persistedMessage,
+        terminal: false,
+        reconnectRequired: false,
+      });
+    }
+    throw classifiedFailures[0]?.error ?? new Error("Gmail message batch failed.");
   }
-  try {
-    await storeMessage({
-      userId: account.userId,
-      accountId: account.id,
-      accountEmail: account.email,
-      ingestionMode: "initial",
-      message: await parseGmailMessage(gmailMessage),
-      activeRunId: runId,
-    });
-  } catch (error) {
-    if (!(error instanceof InactiveMailSyncRunError)) throw error;
-    return { status: "inactive", runId, providerMessageId };
-  }
-  const completed = await completeMailSyncItem(runId, providerMessageId);
   return {
-    status: completed ? "complete" : "inactive",
+    status: "complete",
     runId,
-    providerMessageId,
+    messageCount: providerMessageIds.length,
   };
 }
 
@@ -882,7 +967,17 @@ async function catchUpGmailHistory(options: {
 }) {
   const replica = await getGmailReplicaContext(options.accountId);
   if (!replica) throw new Error("The Gmail replica state was not found.");
-  if (replica.state !== "ready" && replica.state !== "repairing") {
+  const activeRepairRun =
+    replica.state === "repairing"
+      ? await getActiveRepairMailSyncRunContext(options.accountId)
+      : null;
+  const plan = planGmailHistoryCatchup({
+    replicaState: replica.state,
+    initialHistoryId: replica.initialHistoryId,
+    historyCursor: replica.historyCursor,
+    repairStartingHistoryCursor: activeRepairRun?.startingHistoryCursor,
+  });
+  if (plan.kind === "defer") {
     if (shouldRepairNonReadyGmailReplica({
       isFailed: replica.state === "failed",
       resumeNonReady: options.resumeNonReady,
@@ -896,23 +991,6 @@ async function catchUpGmailHistory(options: {
       });
       return { status: "repair_queued", ...repair, changedThreadCount: 0 };
     }
-    return {
-      status: "deferred",
-      state: replica.state,
-      historyCursor: replica.historyCursor,
-    };
-  }
-  const activeRepairRun =
-    replica.state === "repairing"
-      ? await getActiveRepairMailSyncRunContext(options.accountId)
-      : null;
-  const plan = planGmailHistoryCatchup({
-    replicaState: replica.state,
-    initialHistoryId: replica.initialHistoryId,
-    historyCursor: replica.historyCursor,
-    repairStartingHistoryCursor: activeRepairRun?.startingHistoryCursor,
-  });
-  if (plan.kind === "defer") {
     return {
       status: "deferred",
       state: plan.state,
@@ -930,6 +1008,7 @@ async function catchUpGmailHistory(options: {
       expectedCursor: plan.expectedCursor,
       stateAfterApply: plan.stateAfterApply,
       ingestionMode: plan.ingestionMode,
+      isLiveDelivery: true,
       continuationSourceStepId: options.sourceStepId,
     });
   const replayOrRepair = plan.shouldRepairExpiredCursor
@@ -977,7 +1056,7 @@ async function catchUpGmailHistory(options: {
     };
   }
   return {
-    status: plan.stateAfterApply === "repairing" ? "live_applied" : "complete",
+    status: plan.stateAfterApply === "ready" ? "complete" : "live_applied",
     historyCursor: replay.historyId,
     changedThreadCount: replay.changedThreadIds.length,
   };
@@ -2112,7 +2191,7 @@ async function runMemoryBatchEvent(job: WorkflowStepJob) {
     await setMemorySyncStage(submission.accountId, "complete");
   }
 
-  const cleanupFailures = await deleteBatchFiles({
+  const cleanupFailures = await deleteMemoryBatchFiles({
     provider: details.provider,
     inputFileId: details.inputFileId,
     outputFileId: batch.outputFileId,
@@ -2272,48 +2351,91 @@ async function persistWorkflowFailure(
   }
 }
 
-function workflowStepFromBullJob(bullJob: WorkflowJob): WorkflowStepJob {
+async function runWorkflowStepHandler(
+  job: WorkflowStepJob,
+): Promise<Record<string, unknown>> {
+  const run = async (): Promise<Record<string, unknown>> => {
+    switch (job.stepType) {
+      case "gmail.sync.page":
+        return runGmailPage(job);
+      case "gmail.sync.message":
+        return runGmailMessage(job);
+      case "gmail.sync.message.batch":
+        return runGmailMessageBatch(job);
+      case "gmail.sync.finalize":
+        return runGmailFinalize(job);
+      case "gmail.history.catchup":
+        return runGmailHistoryCatchup(job);
+      case "gmail.message.refresh":
+        return runGmailMessageRefresh(job);
+      case "gmail.watch.renew":
+        return runGmailWatchRenewal(job);
+      case "gmail.objects.delete":
+        return runGmailObjectDelete(job);
+      case "gmail.account.cleanup":
+        return runGmailAccountCleanup(job);
+      case "embedding.backfill":
+        return runEmbeddingBackfill(job);
+      case "embedding.batch.event":
+        return runEmbeddingBatchEvent(job);
+      case "embedding.incremental":
+        return runIncrementalEmbedding(job);
+      case "memory.extract":
+        return runMemoryExtraction(job);
+      case "memory.incremental":
+        return runIncrementalMemoryExtraction(job);
+      case "memory.batch.retry":
+        return runMemoryBatchRetry(job);
+      case "memory.batch.event":
+        return runMemoryBatchEvent(job);
+      case "memory.feedback":
+        return runMemoryFeedback(job);
+      case "label.message.analyze":
+      case "label.message.apply":
+        return runLabelSubmission(job);
+      default:
+        throw new Error(`Unsupported Temporal workflow step: ${job.stepType}`);
+    }
+  };
+  if (
+    job.accountId &&
+    (job.stepType === "gmail.sync.finalize" ||
+      job.stepType === "gmail.history.catchup" ||
+      job.stepType === "gmail.message.refresh" ||
+      job.stepType === "gmail.watch.renew" ||
+      job.stepType === "gmail.objects.delete" ||
+      job.stepType === "gmail.account.cleanup")
+  ) {
+    return withGmailAccountControlLock(job.accountId, run);
+  }
+  return run();
+}
+
+function workflowStepJobFromActivity(
+  input: WorkflowStepExecution,
+): WorkflowStepJob {
   return {
-    ...bullJob.data,
-    stepType: bullJob.name,
-    attempts: bullJob.data.attempts + Math.max(bullJob.attemptsMade, 1),
-    maxAttempts: bullJob.data.maxAttempts,
+    id: input.id,
+    userId: input.userId,
+    accountId: input.accountId,
+    runId: input.runId,
+    stepType: input.stepType,
+    payload: input.payload,
+    attempts: input.attempts + activityInfo().attempt,
+    maxAttempts: input.maxAttempts,
   };
 }
 
-async function reconcileTerminalQueueFailure(bullJob: WorkflowJob, error: Error) {
-  const job = workflowStepFromBullJob(bullJob);
-  const message =
-    isMessageLabelWorkflowStep(job.stepType)
-      ? messageLabelAnalysisErrorCode(error)
-      : isBullMqStalledTerminalFailure(error) && job.stepType.startsWith("gmail.")
-        ? "gmail_workflow_stalled"
-        : error.message || "BullMQ reported a terminal workflow failure.";
-  await failTerminalMessageLabelAnalysis(job, error);
-  await persistWorkflowFailure(
-    job,
-    message,
-    true,
-    false,
-  );
-}
-
-async function executeWorkflowJob(
-  bullJob: WorkflowJob,
-  handler: (job: WorkflowStepJob) => Promise<Record<string, unknown>>,
-) {
-  const job: WorkflowStepJob = {
-    ...bullJob.data,
-    stepType: bullJob.name,
-    attempts: bullJob.data.attempts + bullJob.attemptsMade + 1,
-    maxAttempts: bullJob.data.maxAttempts,
-  };
+export async function runWorkflowStepActivity(
+  input: WorkflowStepExecution,
+): Promise<WorkflowStepResult> {
+  const job = workflowStepJobFromActivity(input);
   const started = await markWorkflowStepRunning(job.id, job.attempts);
-  if (!started.shouldExecute) return started.result;
+  if (!started.shouldExecute) return { result: started.result };
   try {
-    const result = await handler(job);
+    const result = await runWorkflowStepHandler(job);
     await completeWorkflowStep(job.id, result);
-    return result;
+    return { result };
   } catch (error) {
     const failure = classifyGmailWorkflowFailure(error, {
       attempt: job.attempts,
@@ -2333,148 +2455,75 @@ async function executeWorkflowJob(
       failure.isReconnectRequired,
     );
     if (failure.isReconnectRequired) {
-      throw new UnrecoverableError(persistedMessage);
+      throw ApplicationFailure.nonRetryable(
+        "gmail_reconnect_required",
+        "GmailReconnectRequired",
+      );
     }
-    if (isMessageLabelWorkflowStep(job.stepType)) {
-      throw new Error(persistedMessage, { cause: error });
+    if (failure.isTerminal) {
+      throw ApplicationFailure.nonRetryable(
+        "workflow_step_terminal_failure",
+        "WorkflowStepTerminalFailure",
+      );
     }
-    throw error;
+    throw ApplicationFailure.create({
+      message: "workflow_step_retryable_failure",
+      type: "WorkflowStepRetryableFailure",
+      nonRetryable: false,
+    });
   }
 }
 
-function processGmailPages(bullJob: WorkflowJob) {
-  const execute = () =>
-    executeWorkflowJob(bullJob, async (job) => {
-      if (job.stepType === "gmail.sync.page") return runGmailPage(job);
-      if (job.stepType === "gmail.sync.finalize") return runGmailFinalize(job);
-      throw new Error(`Unsupported Gmail page step: ${job.stepType}`);
-    });
-  const accountId = bullJob.data.accountId;
-  return bullJob.name === "gmail.sync.finalize" && accountId
-    ? withGmailAccountControlLock(accountId, execute)
-    : execute();
-}
-
-function processGmailMessage(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, runGmailMessage);
-}
-
-function processGmailControl(bullJob: WorkflowJob) {
-  const execute = () =>
-    executeWorkflowJob(bullJob, async (job) => {
-      if (!job.accountId) throw new Error("The Gmail control step has no account.");
-      if (job.stepType === "gmail.history.catchup") {
-        return runGmailHistoryCatchup(job);
-      }
-      if (job.stepType === "gmail.message.refresh") {
-        return runGmailMessageRefresh(job);
-      }
-      if (job.stepType === "gmail.watch.renew") return runGmailWatchRenewal(job);
-      if (job.stepType === "gmail.objects.delete") return runGmailObjectDelete(job);
-      if (job.stepType === "gmail.account.cleanup") {
-        return runGmailAccountCleanup(job);
-      }
-      throw new Error(`Unsupported Gmail control step: ${job.stepType}`);
-    });
-  const accountId = bullJob.data.accountId;
-  return accountId ? withGmailAccountControlLock(accountId, execute) : execute();
-}
-
-function processIndexingBatch(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, async (job) => {
-    if (job.stepType === "embedding.backfill") return runEmbeddingBackfill(job);
-    if (job.stepType === "embedding.batch.event") return runEmbeddingBatchEvent(job);
-    throw new Error(`Unsupported indexing Batch step: ${job.stepType}`);
-  });
-}
-
-function processIncrementalIndexing(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, runIncrementalEmbedding);
-}
-
-function processMemorySubmission(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, async (job) => {
-    if (job.stepType === "memory.extract") return runMemoryExtraction(job);
-    if (job.stepType === "memory.incremental") {
-      return runIncrementalMemoryExtraction(job);
-    }
-    throw new Error(`Unsupported Memory submission step: ${job.stepType}`);
-  });
-}
-
-function processMemoryEvent(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, async (job) => {
-    if (job.stepType === "memory.batch.retry") return runMemoryBatchRetry(job);
-    if (job.stepType === "memory.batch.event") return runMemoryBatchEvent(job);
-    throw new Error(`Unsupported Memory Batch step: ${job.stepType}`);
-  });
-}
-
-function processMemoryFeedback(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, runMemoryFeedback);
-}
-
-function processLabelSubmission(bullJob: WorkflowJob) {
-  return executeWorkflowJob(bullJob, runLabelSubmission);
-}
-
-function startBullWorkers(
-  runtime: BullQueueRuntime,
-  onReconciliationFailure: (error: Error) => void,
-) {
-  const withFailureReconciliation = {
-    onTerminalFailure: reconcileTerminalQueueFailure,
-    onTerminalFailureReconciliationError: onReconciliationFailure,
+export async function reconcileWorkflowStepFailureActivity(
+  input: WorkflowStepExecution,
+): Promise<void> {
+  const job: WorkflowStepJob = {
+    id: input.id,
+    userId: input.userId,
+    accountId: input.accountId,
+    runId: input.runId,
+    stepType: input.stepType,
+    payload: input.payload,
+    attempts: input.maxAttempts,
+    maxAttempts: input.maxAttempts,
   };
-  runtime.createWorker("gmail-pages", processGmailPages, withFailureReconciliation);
-  runtime.createWorker("gmail-messages", processGmailMessage, {
-    ...withFailureReconciliation,
-    concurrency: gmailMessageConcurrency,
-  });
-  runtime.createWorker(
-    "gmail-control",
-    processGmailControl,
-    {
-      ...withFailureReconciliation,
-      concurrency: gmailControlConcurrency,
-    },
+  const error = new Error("temporal_activity_terminal_failure");
+  await failTerminalMessageLabelAnalysis(job, error);
+  await persistWorkflowFailure(
+    job,
+    job.stepType.startsWith("gmail.")
+      ? "gmail_workflow_activity_failed"
+      : "temporal_activity_failed",
+    true,
+    false,
   );
+}
+
+function enabledActivityTaskQueues(): Set<WorkflowActivityTaskQueue> {
+  const taskQueues = new Set<WorkflowActivityTaskQueue>([
+    "gmail-pages",
+    "gmail-messages",
+    "gmail-message-batches",
+    "gmail-control",
+    "mail-label-live",
+    "mail-label-submit",
+  ]);
   if (isAiConfigured()) {
-    runtime.createWorker(
-      "mail-memory-feedback",
-      processMemoryFeedback,
-      withFailureReconciliation,
-    );
+    taskQueues.add("mail-memory-feedback");
   }
   if (isEmbeddingBatchConfigured()) {
-    runtime.createWorker("mail-indexing-batch", processIndexingBatch, {
-      ...withFailureReconciliation,
-      lockDuration: batchWorkerLockDuration,
-    });
+    taskQueues.add("mail-indexing-batch");
   }
   if (isEmbeddingConfigured()) {
-    runtime.createWorker("mail-indexing-live", processIncrementalIndexing, {
-      ...withFailureReconciliation,
-      concurrency: 5,
-    });
+    taskQueues.add("mail-indexing-live");
   }
   if (isMemoryBatchConfigured()) {
-    runtime.createWorker("mail-memory-submit", processMemorySubmission, {
-      ...withFailureReconciliation,
-      lockDuration: batchWorkerLockDuration,
-    });
+    taskQueues.add("mail-memory-submit");
   }
-  runtime.createWorker("mail-label-submit", processLabelSubmission, {
-    ...withFailureReconciliation,
-    concurrency: mailLabelConcurrency,
-  });
   if (isAnyMemoryBatchProviderConfigured()) {
-    runtime.createWorker(
-      "mail-memory-events",
-      processMemoryEvent,
-      withFailureReconciliation,
-    );
+    taskQueues.add("mail-memory-events");
   }
+  return taskQueues;
 }
 
 async function reconcileSubmittedEmbeddingBatches() {
@@ -2507,25 +2556,34 @@ async function reconcileSubmittedEmbeddingBatches() {
   }
 }
 
-async function runOutboxLoop(
+async function runTemporalCommandLoop(
   signal: ReturnType<typeof createJobSignal>,
   isStopped: () => boolean,
-  runtime: BullQueueRuntime,
+  runtime: TemporalRuntime,
 ) {
   while (!isStopped()) {
     await signal.wait();
     if (isStopped()) break;
     while (!isStopped()) {
-      const result = await publishOutboxBatch((jobs) => runtime.publish(jobs));
-      if (result.failed || result.published === 0) break;
+      const result = await dispatchTemporalCommandBatch((jobs) =>
+        runtime.dispatch(jobs),
+      );
+      if (result.failed) {
+        throw new Error("Temporal command dispatch failed.");
+      }
+      if (result.dispatched === 0) break;
     }
   }
 }
 
 async function run() {
-  const runtime = new BullQueueRuntime(process.env.REDIS_URL ?? "");
-  await runtime.waitUntilReady();
-  await runtime.configureGlobalConcurrency();
+  const runtime = await TemporalRuntime.create({
+    activities: {
+      runWorkflowStepActivity,
+      reconcileWorkflowStepFailureActivity,
+    },
+    enabledActivityTaskQueues: enabledActivityTaskQueues(),
+  });
   const outboxSignal = createJobSignal();
   let stopRequested = false;
   let fatalError: Error | null = null;
@@ -2533,12 +2591,14 @@ async function run() {
     stopRequested = true;
     outboxSignal.notify();
   };
-  startBullWorkers(runtime, (error) => {
-    fatalError = error;
+  const workerRun = runtime.run().catch((error: unknown) => {
+    fatalError =
+      error instanceof Error ? error : new Error("Unknown Temporal worker error.");
     requestStop();
   });
-  const stopOutboxListening = await listenForOutboxNotifications(outboxSignal.notify);
-  const stopRedisReadyListener = runtime.onReady(outboxSignal.notify);
+  const stopOutboxListening = await listenForTemporalCommandNotifications(
+    outboxSignal.notify,
+  );
 
   process.once("SIGINT", requestStop);
   process.once("SIGTERM", requestStop);
@@ -2550,6 +2610,7 @@ async function run() {
       ),
     });
     await enqueueMissingMailSyncRuns();
+    await enqueueFailedInitialGmailRepairRecoveries();
     await enqueuePendingGmailHistoryCatchups();
     await enqueueReadyMailSyncFinalizers();
     await ensureDailyGmailWatchRenewals();
@@ -2557,20 +2618,15 @@ async function run() {
     await enqueuePendingAnalysisWorkflowSteps();
     await reconcileSubmittedEmbeddingBatches();
     outboxSignal.notify();
-    await runOutboxLoop(outboxSignal, () => stopRequested, runtime);
+    await runTemporalCommandLoop(outboxSignal, () => stopRequested, runtime);
     if (fatalError) throw fatalError;
   } finally {
     process.removeListener("SIGINT", requestStop);
     process.removeListener("SIGTERM", requestStop);
-    stopRedisReadyListener();
     await stopOutboxListening();
     await runtime.close();
+    await workerRun;
   }
 }
 
-run().catch((error) => {
-  console.error("worker: fatal", {
-    name: error instanceof Error ? error.name : "UnknownError",
-  });
-  process.exitCode = 1;
-});
+run().catch(terminateWorkerAfterFatalError);

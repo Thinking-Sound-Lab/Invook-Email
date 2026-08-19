@@ -6,7 +6,7 @@ import {
 
 import type { GmailProviderAccess } from "./gmail-provider";
 
-export interface GmailThreadMutationContext {
+interface GmailThreadMutationContext {
   accountId: string;
   providerThreadId: string;
 }
@@ -39,7 +39,7 @@ const defaultDependencies: GmailThreadReadStateDependencies = {
   modifyThreadLabels: modifyGmailThreadLabels,
 };
 
-export function gmailThreadReadStateMutation(isRead: boolean): {
+function gmailThreadReadStateMutation(isRead: boolean): {
   addLabelIds?: GmailSystemLabelId[];
   removeLabelIds?: GmailSystemLabelId[];
 } {

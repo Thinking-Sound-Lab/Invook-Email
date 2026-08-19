@@ -14,7 +14,7 @@ These principles apply to every change:
 4. **Clear ownership.** Keep UI, HTTP admission, durable work, domain logic, persistence, and provider integration in their established layers. A module should have one coherent reason to change.
 5. **Composition over complexity.** Build behavior from small, focused modules with explicit contracts instead of large components, hidden coupling, or speculative abstractions.
 6. **Types are contracts.** Model valid states precisely, validate untrusted boundaries, and make impossible states difficult to represent. Do not use casts to hide an unclear contract.
-7. **Durability over process memory.** Work that must survive restarts belongs in PostgreSQL and the durable workflow/outbox path. Treat queues and notifications as execution and wake-up mechanisms.
+7. **Durability over process memory.** Temporal owns durable workflow execution, retries, schedules, and task delivery. PostgreSQL owns product state and the transactional command handoff required when a database commit must atomically admit Temporal work.
 8. **Retry-safe by design.** External delivery and worker execution are at least once. Use stable idempotency keys, transactions, database constraints, and cross-process locks where required.
 9. **Privacy and security by default.** Minimize access to mailbox data and credentials, authorize before reading, and never expose sensitive content through logs or errors.
 10. **Complete changes only.** Update every producer and consumer of a changed contract, remove the superseded path, and verify the result end to end at the level the environment permits.
@@ -26,7 +26,7 @@ These principles apply to every change:
 - Never introduce dummy, placeholder, seeded, synthetic, mock, or fixture data into product flows or persistent product stores. Test-only protocol inputs stay inside tests.
 - Remove dead files, functions, routes, exports, dependencies, configuration, environment variables, and documentation made obsolete by a change. Do not keep speculative compatibility shims.
 - Finish replacements with repository-wide `rg` searches for the obsolete symbols, routes, configuration, and forbidden APIs.
-- Never use `setTimeout`, deadline options named `timeout`, or timer-based polling in project code or configuration. Prefer durable queue state, PostgreSQL notifications, SSE, provider webhooks, or platform-native retry and health behavior.
+- Never use `setTimeout`, ad hoc request deadline options named `timeout`, or timer-based polling in project code or configuration. Prefer Temporal retries and schedules, PostgreSQL notifications, SSE, provider webhooks, or platform-native health behavior. Temporal Activity execution bounds such as `startToCloseTimeout` and `scheduleToCloseTimeout` are required durability controls and are allowed.
 - Use Fastify for the API server and Axios for outbound application HTTP. Do not use native `fetch`, `node:http` clients, or `node:https` clients for application requests.
 - Use the `uuid` package for UUID generation and utilities. Do not use UUID APIs from `node:crypto`, including `randomUUID`.
 - Use `pnpm` and `pnpm dlx`, not npm, yarn, or bun. Use Node.js 22+ and the versions pinned by the repository manifests and lockfile.
@@ -47,7 +47,8 @@ packages/
   ai/                  Model, embedding, Memory, label, draft, and mail-agent logic
   auth/                Better Auth Google identity and database-backed sessions
   contracts/           Shared browser/server product and wire contracts
-  database/            Schema, migrations, repositories, replica operations, and workflows
+  database/            Schema, migrations, repositories, replica operations, and Temporal command admission
+  workflows/           Deterministic Temporal Workflows and server-side workflow contracts
   gmail/               Google OAuth/OIDC, Gmail API, history mapping, and MIME parsing
   object-storage/      S3-compatible raw MIME and attachment storage
 docker/                 Container images and local service orchestration
@@ -103,10 +104,10 @@ docs/                   Product and implementation contracts
 - Reuse existing route, service, repository, serializer, access, credential, workflow, and error helpers before introducing a parallel implementation.
 - HTTP handlers should follow the established flow: authenticate and authorize, validate protocol/input, call a focused service or repository operation, then serialize a stable success or problem response.
 - Authenticate and authorize before reading protected data. Scope reads by server-resolved stable user/account IDs, never client-asserted ownership.
-- Multi-row invariants and state transition plus outbox publication belong in one database transaction. Repository functions that must compose should accept an existing transaction executor.
+- Multi-row invariants and state transition plus Temporal command publication belong in one database transaction. Repository functions that must compose should accept an existing transaction executor.
 - Use database constraints, row/advisory locks, or expected-version/cursor checks for cross-process correctness. In-memory mutexes do not coordinate multiple workers.
-- Queue payloads contain identifiers and durable checkpoints, not authoritative mutable state. Workers re-read canonical state, make handlers idempotent, and no-op terminal or superseded work before expensive external calls.
-- PostgreSQL workflow/outbox records are the durable source of work. Redis/BullMQ executes and retries; `LISTEN/NOTIFY` wakes consumers but does not store work.
+- Temporal payloads contain identifiers and durable checkpoints, not authoritative mutable state, mailbox content, or credentials. Activities re-read canonical state, remain idempotent, and no-op terminal or superseded work before expensive external calls.
+- Temporal is the durable source of workflow execution, retries, schedules, and task delivery. PostgreSQL command records exist only to bridge an atomic product-state transaction into Temporal and stop owning execution after Temporal acknowledges the command; `LISTEN/NOTIFY` only wakes dispatchers.
 - Default to React Server Components. Add `'use client'` only where browser APIs, client state, or hooks require it. Keep client components focused and keep server-only packages out of the client bundle.
 - Keep server data authoritative in the UI. Loading, empty, unavailable, reconnect, and error states must be explicit and honest.
 - Comments explain invariants, external constraints, or non-obvious tradeoffs. Do not narrate the code or add decorative section comments.
@@ -191,7 +192,7 @@ docker compose -f docker/compose.yml config --quiet
 
 - `make verify` runs repository typechecking, linting, tests, and the production web build.
 - Add regression coverage for changed parsing, validation, ownership, state transitions, concurrency, deduplication, idempotency, and retry behavior.
-- Prefer pure unit tests for deterministic transforms and real service integration checks when PostgreSQL, Redis, MinIO, Gmail, Pub/Sub, or model credentials are available.
+- Prefer pure unit tests for deterministic transforms, Temporal replay and time-skipping tests for Workflows, and real service integration checks when Temporal Cloud, PostgreSQL, MinIO, Gmail, Pub/Sub, or model credentials are available.
 - Do not weaken assertions to make tests pass. Test observable contracts and failure modes rather than private implementation details.
 - Schema changes require migration generation and inspection, plus a clean apply when the required database is available.
 - Configuration changes require Docker Compose validation. Runtime changes require the closest practical end-to-end verification.

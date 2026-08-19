@@ -2,7 +2,7 @@ export {
   createDatabase,
   getDatabase,
   listenForAccountSyncNotifications,
-  listenForOutboxNotifications,
+  listenForTemporalCommandNotifications,
   listenForMailboxChangeNotifications,
   withGmailAccountControlLock,
   type Database,
@@ -31,7 +31,6 @@ export type {
   AccountSyncState,
   IndexedMessage,
   MailboxMessage,
-  QueueName,
   WorkflowStepInput,
   WorkflowStepJob,
 } from "./types";

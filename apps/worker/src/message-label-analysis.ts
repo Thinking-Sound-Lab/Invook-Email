@@ -209,7 +209,7 @@ export function createRunMessageLabelAnalysis(
   };
 }
 
-export const runMessageLabelAnalysis = createRunMessageLabelAnalysis();
+const runMessageLabelAnalysis = createRunMessageLabelAnalysis();
 
 export function createRunHistoricalMessageLabelAnalysis(
   dependencies: HistoricalMessageLabelAnalysisDependencies =
@@ -260,7 +260,7 @@ export function createRunHistoricalMessageLabelAnalysis(
   };
 }
 
-export const runHistoricalMessageLabelAnalysis =
+const runHistoricalMessageLabelAnalysis =
   createRunHistoricalMessageLabelAnalysis();
 
 export function isMessageLabelWorkflowStep(stepType: string): boolean {

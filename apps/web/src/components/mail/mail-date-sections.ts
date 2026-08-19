@@ -1,6 +1,6 @@
 import type { MailThreadSummary } from "./types";
 
-export type MailDateSectionId =
+type MailDateSectionId =
   | "today"
   | "yesterday"
   | "last-seven-days"

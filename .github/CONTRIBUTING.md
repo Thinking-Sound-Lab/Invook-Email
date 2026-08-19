@@ -54,8 +54,8 @@ preserve an honest unavailable state rather than adding fake data.
   validation, webhooks, SSE, and response serialization.
 - `apps/worker` owns retryable and long-running durable work.
 - `packages/*` owns reusable domain and infrastructure code.
-- PostgreSQL workflow and outbox records are the durable source of work;
-  queues and notifications execute or wake that work.
+- PostgreSQL owns product state and the transactional Temporal command handoff;
+  Temporal owns durable execution, retries, schedules, and task delivery.
 
 Read the root `AGENTS.md` and the closest directory-specific `AGENTS.md` before
 editing. Keep application-to-package dependencies one-way, use public

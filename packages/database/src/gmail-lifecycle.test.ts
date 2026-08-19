@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { v4 as uuidv4 } from "uuid";
@@ -13,12 +13,13 @@ import {
   mailSyncRuns,
   messages,
   profiles,
-  queueOutbox,
+  temporalCommands,
   threads,
   workflowSteps,
 } from "./schema";
 import * as schema from "./schema";
 import {
+  enqueueFailedInitialGmailRepairRecoveries,
   enqueueImplausibleGmailMessageDateRepairs,
   failWorkflowStep,
   markGmailAccountReconnectRequired,
@@ -110,10 +111,10 @@ test(
         },
       ]);
       const outbox = await database
-        .select({ queueName: queueOutbox.queueName })
-        .from(queueOutbox)
-        .where(eq(queueOutbox.workflowStepId, steps[0]?.id ?? ""));
-      assert.deepEqual(outbox, [{ queueName: "gmail-control" }]);
+        .select({ activityTaskQueue: temporalCommands.activityTaskQueue })
+        .from(temporalCommands)
+        .where(eq(temporalCommands.workflowStepId, steps[0]?.id ?? ""));
+      assert.deepEqual(outbox, [{ activityTaskQueue: "gmail-control" }]);
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));
       await client.end();
@@ -150,6 +151,7 @@ test(
       await database.insert(gmailReplicaStates).values({
         accountId,
         initialHistoryId: "100",
+        pendingHistoryCursor: "250",
         state: "snapshotting",
       });
       await database.insert(mailSyncRuns).values({
@@ -207,6 +209,26 @@ test(
         ),
         true,
       );
+      assert.equal(
+        await failWorkflowStep(
+          {
+            step: {
+              id: stalledStepId,
+              runId,
+              userId,
+              accountId,
+              stepType: "gmail.sync.message",
+              payload: { runId, providerMessageId: "message-1" },
+              attempts: 1,
+              maxAttempts: 5,
+            },
+            message: "gmail_workflow_stalled",
+            terminal: true,
+          },
+          database,
+        ),
+        false,
+      );
 
       const [run] = await database
         .select()
@@ -229,6 +251,24 @@ test(
         .select()
         .from(gmailReplicaStates)
         .where(eq(gmailReplicaStates.accountId, accountId));
+      const [repairRecovery] = await database
+        .select({
+          status: workflowSteps.status,
+          input: workflowSteps.input,
+          idempotencyKey: workflowSteps.idempotencyKey,
+          activityTaskQueue: temporalCommands.activityTaskQueue,
+        })
+        .from(workflowSteps)
+        .innerJoin(
+          temporalCommands,
+          eq(temporalCommands.workflowStepId, workflowSteps.id),
+        )
+        .where(
+          and(
+            eq(workflowSteps.accountId, accountId),
+            eq(workflowSteps.stepType, "gmail.watch.renew"),
+          ),
+        );
 
       assert.equal(run?.status, "failed");
       assert.equal(run?.processedMessageCount, 0);
@@ -240,10 +280,102 @@ test(
       assert.equal(account?.syncState.indexing, "running");
       assert.equal(account?.syncState.memory, "complete");
       assert.equal(replica?.state, "failed");
+      assert.equal(replica?.pendingHistoryCursor, "250");
+      assert.equal(repairRecovery?.status, "queued");
+      assert.equal(repairRecovery?.input.reason, "terminal_sync_failure_recovery");
+      assert.equal(repairRecovery?.input.failedRunId, runId);
+      assert.equal(
+        repairRecovery?.idempotencyKey,
+        `gmail-repair-recovery:${accountId}:${runId}`,
+      );
+      assert.equal(repairRecovery?.activityTaskQueue, "gmail-control");
       assert.deepEqual(
         await markWorkflowStepRunning(remainingStepId, 1, database),
         { shouldExecute: false, result: { status: "inactive" } },
       );
+    } finally {
+      await database.delete(profiles).where(eq(profiles.id, userId));
+      await client.end();
+    }
+  },
+);
+
+test(
+  "failed initial replicas reconcile one durable repair trigger across restarts",
+  { skip: !testDatabaseUrl },
+  async () => {
+    if (!testDatabaseUrl) return;
+    const client = postgres(testDatabaseUrl, { max: 1, prepare: false });
+    const database = drizzle(client, { schema });
+    const userId = uuidv4();
+    const accountId = uuidv4();
+    const runId = uuidv4();
+    try {
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
+      await database.insert(connectedAccounts).values({
+        id: accountId,
+        userId,
+        providerAccountId: `provider-${accountId}`,
+        email: `${accountId}@example.com`,
+        memoryAcknowledgedAt: new Date(),
+        syncState: { mailSync: "failed", indexing: "pending", memory: "pending" },
+      });
+      await database.insert(gmailReplicaStates).values({
+        accountId,
+        initialHistoryId: "100",
+        pendingHistoryCursor: "250",
+        state: "failed",
+      });
+      await database.insert(mailSyncRuns).values({
+        id: runId,
+        userId,
+        accountId,
+        runType: "initial",
+        status: "failed",
+        startingHistoryCursor: "100",
+        lastError: "gmail_workflow_activity_failed",
+        idempotencyKey: `test-run-${runId}`,
+      });
+
+      assert.equal(
+        await enqueueFailedInitialGmailRepairRecoveries(database),
+        1,
+      );
+      const [firstRecovery] = await database
+        .select({ id: workflowSteps.id })
+        .from(workflowSteps)
+        .where(
+          eq(
+            workflowSteps.idempotencyKey,
+            `gmail-repair-recovery:${accountId}:${runId}`,
+          ),
+        );
+      assert.ok(firstRecovery);
+      await database
+        .update(workflowSteps)
+        .set({ status: "complete", completedAt: new Date() })
+        .where(eq(workflowSteps.id, firstRecovery.id));
+
+      assert.equal(
+        await enqueueFailedInitialGmailRepairRecoveries(database),
+        1,
+      );
+      const recoveries = await database
+        .select({ id: workflowSteps.id, status: workflowSteps.status })
+        .from(workflowSteps)
+        .where(
+          eq(
+            workflowSteps.idempotencyKey,
+            `gmail-repair-recovery:${accountId}:${runId}`,
+          ),
+        );
+      assert.deepEqual(recoveries, [
+        { id: firstRecovery.id, status: "complete" },
+      ]);
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));
       await client.end();

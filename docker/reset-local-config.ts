@@ -4,7 +4,6 @@ import { pathToFileURL } from "node:url";
 
 interface LocalResetEnvironment {
   databaseUrl: string | undefined;
-  redisUrl: string | undefined;
   s3Bucket: string | undefined;
   s3Endpoint: string | undefined;
 }
@@ -17,7 +16,6 @@ const EXPECTED_SERVICE_NAMES = [
   "migrate",
   "minio",
   "minio-init",
-  "redis",
   "web",
   "worker",
 ];
@@ -150,30 +148,6 @@ function assertLocalDatabaseUrl(value: string | undefined): void {
   }
 }
 
-function assertLocalRedisUrl(value: string | undefined): void {
-  const redisUrl = parseUrl(value, "REDIS_URL");
-  const isLocalHost =
-    redisUrl.hostname === "127.0.0.1" || redisUrl.hostname === "localhost";
-  const isDatabaseZero =
-    redisUrl.pathname === "" ||
-    redisUrl.pathname === "/" ||
-    redisUrl.pathname === "/0";
-  if (
-    redisUrl.protocol !== "redis:" ||
-    !isLocalHost ||
-    redisUrl.port !== "63790" ||
-    !isDatabaseZero ||
-    redisUrl.username !== "" ||
-    redisUrl.password !== "" ||
-    redisUrl.search !== "" ||
-    redisUrl.hash !== ""
-  ) {
-    throw new Error(
-      "REDIS_URL must target database 0 of the known Invook Redis service on localhost:63790.",
-    );
-  }
-}
-
 function assertLocalObjectStorage(environment: LocalResetEnvironment): void {
   if (
     environment.s3Endpoint !== undefined &&
@@ -199,7 +173,6 @@ function assertTopLevelVolumes(composeConfig: JsonRecord): void {
   const expectedVolumeNames: Record<string, string> = {
     "invook-minio": "invook_invook-minio",
     "invook-postgres": "invook_invook-postgres",
-    "invook-redis": "invook_invook-redis",
   };
   if (
     Object.keys(volumes).sort().join(",") !==
@@ -224,7 +197,6 @@ export function validateLocalResetConfiguration(
   environment: LocalResetEnvironment,
 ): void {
   assertLocalDatabaseUrl(environment.databaseUrl);
-  assertLocalRedisUrl(environment.redisUrl);
   assertLocalObjectStorage(environment);
 
   const composeConfig = requireRecord(composeValue, "Compose configuration");
@@ -244,7 +216,6 @@ export function validateLocalResetConfiguration(
   const migrate = requireService(services, "migrate");
   const minio = requireService(services, "minio");
   const minioInit = requireService(services, "minio-init");
-  const redis = requireService(services, "redis");
   const web = requireService(services, "web");
   const worker = requireService(services, "worker");
 
@@ -269,17 +240,14 @@ export function validateLocalResetConfiguration(
     "DATABASE_URL",
     "postgresql://invook:invook@db:5432/invook",
   );
-  assertEnvironmentValue(worker, "worker", "REDIS_URL", "redis://redis:6379");
   assertEnvironmentValue(worker, "worker", "S3_ENDPOINT", "http://minio:9000");
   assertEnvironmentValue(worker, "worker", "S3_BUCKET", "invook-mail");
   assertEnvironmentValue(minioInit, "minio-init", "S3_BUCKET", "invook-mail");
 
   assertNamedVolume(database, "db", "invook-postgres", "/var/lib/postgresql/data");
-  assertNamedVolume(redis, "redis", "invook-redis", "/data");
   assertNamedVolume(minio, "minio", "invook-minio", "/data");
 
   assertPorts(database, "db", [{ published: "54322", target: 5432 }]);
-  assertPorts(redis, "redis", [{ published: "63790", target: 6379 }]);
   assertPorts(minio, "minio", [
     { hostIp: "127.0.0.1", published: "9000", target: 9000 },
     { hostIp: "127.0.0.1", published: "9001", target: 9001 },
@@ -295,7 +263,6 @@ function runCli(): void {
     const composeConfig: unknown = JSON.parse(readFileSync(0, "utf8"));
     validateLocalResetConfiguration(composeConfig, {
       databaseUrl: process.env.DATABASE_URL,
-      redisUrl: process.env.REDIS_URL,
       s3Bucket: process.env.S3_BUCKET,
       s3Endpoint: process.env.S3_ENDPOINT,
     });

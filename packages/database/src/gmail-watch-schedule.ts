@@ -1,6 +1,6 @@
 import type { WorkflowStepInput } from "./types";
 
-export const GMAIL_WATCH_RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const GMAIL_WATCH_RENEWAL_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 export function createDailyGmailWatchRenewalStep(input: {
   userId: string;
@@ -50,5 +50,25 @@ export function createGmailWatchRecoveryStep(input: {
       expectedExpirationAt: input.expectedExpirationAt.toISOString(),
     },
     idempotencyKey: `gmail-watch-renew:${input.accountId}:recovery:${input.recoveryKey}`,
+  };
+}
+
+export function createImmediateGmailRepairRecoveryStep(input: {
+  userId: string;
+  accountId: string;
+  failedRunId: string;
+  now: Date;
+}): WorkflowStepInput {
+  return {
+    userId: input.userId,
+    accountId: input.accountId,
+    stepType: "gmail.watch.renew",
+    payload: {
+      cadence: "recovery",
+      reason: "terminal_sync_failure_recovery",
+      failedRunId: input.failedRunId,
+      runAt: input.now.toISOString(),
+    },
+    idempotencyKey: `gmail-repair-recovery:${input.accountId}:${input.failedRunId}`,
   };
 }

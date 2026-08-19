@@ -62,15 +62,40 @@ test("repair catch-up advances from its committed live cursor", () => {
   );
 });
 
-test("non-ready replicas without an active repair remain deferred", () => {
+test("snapshotting replicas apply live changes without becoming ready", () => {
   assert.deepEqual(
     planGmailHistoryCatchup({
       replicaState: "snapshotting",
       initialHistoryId: "100",
       historyCursor: null,
     }),
-    { kind: "defer", state: "snapshotting" },
+    {
+      kind: "apply",
+      expectedCursor: "100",
+      startHistoryId: "100",
+      stateAfterApply: "snapshotting",
+      ingestionMode: "initial",
+      shouldRepairExpiredCursor: false,
+    },
   );
+  assert.deepEqual(
+    planGmailHistoryCatchup({
+      replicaState: "snapshotting",
+      initialHistoryId: "100",
+      historyCursor: "150",
+    }),
+    {
+      kind: "apply",
+      expectedCursor: "150",
+      startHistoryId: "150",
+      stateAfterApply: "snapshotting",
+      ingestionMode: "initial",
+      shouldRepairExpiredCursor: false,
+    },
+  );
+});
+
+test("replicas without a usable live baseline remain deferred", () => {
   assert.deepEqual(
     planGmailHistoryCatchup({
       replicaState: "repairing",

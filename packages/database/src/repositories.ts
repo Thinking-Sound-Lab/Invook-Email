@@ -1265,7 +1265,7 @@ async function lockEmbeddingIndex(
   );
 }
 
-export async function upsertIndexedMessage(
+export async function upsertMailboxMessage(
   input: IndexedMessage,
   database: Database = getDatabase(),
   activeRunId?: string,
@@ -1591,6 +1591,7 @@ export async function upsertIndexedMessage(
             messageId,
             contentHash: storedMessage.contentHash,
             analysisVersion: storedMessage.labelAnalysisVersion,
+            isLiveDelivery: input.isLiveDelivery,
           },
           transaction,
         );
@@ -1845,8 +1846,6 @@ export function createMessageContentHash(
     )
     .digest("hex");
 }
-
-export const upsertMailboxMessage = upsertIndexedMessage;
 
 export async function replaceGmailMessageLabels(
   input: {

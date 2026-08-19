@@ -10,12 +10,15 @@
   },
   "dependencies": {
     "@invook/ai": "workspace:*",
-    "@invook/contracts": "workspace:*",
     "@invook/database": "workspace:*",
     "@invook/gmail": "workspace:*",
     "@invook/object-storage": "workspace:*",
-    "bullmq": "^5.58.5",
-    "ioredis": "^5.7.0"
+    "@invook/workflows": "workspace:*",
+    "@temporalio/activity": "1.22.0",
+    "@temporalio/client": "1.22.0",
+    "@temporalio/common": "1.22.0",
+    "@temporalio/worker": "1.22.0",
+    "@temporalio/workflow": "1.22.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

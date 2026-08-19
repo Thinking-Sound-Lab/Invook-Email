@@ -21,7 +21,6 @@ set -a
 set +a
 
 export DATABASE_URL_DOCKER="postgresql://invook:invook@db:5432/invook"
-export REDIS_URL_DOCKER="redis://redis:6379"
 
 compose_file="docker/compose.yml"
 
@@ -31,8 +30,8 @@ compose() {
 
 compose config --format json | pnpm exec tsx docker/reset-local-config.ts
 
-echo "Reset scope: PostgreSQL product rows, Redis database 0, and objects in MinIO bucket invook-mail."
-echo "Preserved: schemas, Drizzle migrations, the MinIO bucket, Docker volumes, .env.local, credentials, and source files."
+echo "Reset scope: PostgreSQL product rows and objects in MinIO bucket invook-mail."
+echo "Preserved: Temporal Cloud histories, schemas, Drizzle migrations, the MinIO bucket, Docker volumes, .env.local, credentials, and source files."
 
 if ! compose stop web api worker; then
   echo "Compose reported a stop error; verifying that all application services stopped." >&2
@@ -46,9 +45,9 @@ for service_name in web api worker; do
 done
 
 echo "Application services stopped."
-compose up -d --wait db redis minio
+compose up -d --wait db minio
 
-for service_name in db redis minio; do
+for service_name in db minio; do
   container_id=$(compose ps -q "$service_name")
   [ -n "$container_id" ] || fail "local $service_name container is not running."
   project_label=$(docker inspect "$container_id" --format '{{index .Config.Labels "com.docker.compose.project"}}')
@@ -79,7 +78,7 @@ FROM (
     ('drafts'),
     ('memory_entries'),
     ('workflow_steps'),
-    ('queue_outbox')
+    ('temporal_commands')
 ) AS required(table_name)
 WHERE to_regclass('public.' || quote_ident(required.table_name)) IS NULL;
 SQL
@@ -96,10 +95,6 @@ ORDER BY tablename
 \gexec
 COMMIT;
 SQL
-
-compose exec -T redis redis-cli -n 0 FLUSHDB >/dev/null
-redis_keys_after_flush=$(compose exec -T redis redis-cli -n 0 DBSIZE)
-[ "$redis_keys_after_flush" -eq 0 ] || fail "Redis database 0 was not emptied."
 
 compose run --rm --no-deps --entrypoint /bin/sh minio-init -c '
   set -eu
@@ -159,29 +154,9 @@ UNION ALL SELECT 'drafts=' || count(*) FROM drafts
 UNION ALL SELECT 'gmail_drafts=' || count(*) FROM gmail_drafts
 UNION ALL SELECT 'memory_entries=' || count(*) FROM memory_entries
 UNION ALL SELECT 'workflow_steps=' || count(*) FROM workflow_steps
-UNION ALL SELECT 'queue_outbox=' || count(*) FROM queue_outbox;
+UNION ALL SELECT 'temporal_commands=' || count(*) FROM temporal_commands;
 SQL
 )
-
-queue_evidence=$(compose exec -T redis sh -c '
-  set -eu
-  total=0
-  for queue_name in gmail-pages gmail-messages gmail-control mail-indexing-batch mail-indexing-live mail-memory-submit mail-memory-events mail-memory-feedback mail-label-submit; do
-    queue_total=0
-    for state_name in wait active paused; do
-      state_count=$(redis-cli -n 0 LLEN "bull:$queue_name:$state_name")
-      queue_total=$((queue_total + state_count))
-    done
-    for state_name in delayed completed failed prioritized waiting-children repeat; do
-      state_count=$(redis-cli -n 0 ZCARD "bull:$queue_name:$state_name")
-      queue_total=$((queue_total + state_count))
-    done
-    echo "$queue_name=$queue_total"
-    total=$((total + queue_total))
-  done
-  echo "all_queued_jobs=$total"
-  [ "$total" -eq 0 ]
-')
 
 compose run --rm --no-deps --entrypoint /bin/sh minio-init -c '
   set -eu
@@ -196,8 +171,7 @@ echo "Reset evidence:"
 echo "$database_evidence"
 echo "all_public_product_rows=0"
 echo "drizzle_migrations_preserved=$migration_count_after"
-echo "redis_keys_after_flush=$redis_keys_after_flush"
-echo "$queue_evidence"
+echo "temporal_cloud_histories=preserved"
 echo "mailbox_objects=0"
 echo "Data stores cleared and verified; restarting the normal local stack."
 compose up -d --build --wait
