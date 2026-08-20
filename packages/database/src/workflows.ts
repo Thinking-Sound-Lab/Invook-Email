@@ -295,7 +295,6 @@ export function tenantTaskQueueLaneForStepType(
     case "embedding.backfill":
     case "memory.extract":
     case "memory.batch.retry":
-    case "label.thread.scan":
       return "bulk";
     case "gmail.history.catchup":
     case "gmail.message.refresh":
@@ -307,6 +306,7 @@ export function tenantTaskQueueLaneForStepType(
     case "memory.batch.event":
     case "memory.feedback":
     case "label.thread.assign":
+    case "label.thread.scan":
     case "label.batch.submit":
     case "label.batch.event":
       return "live";

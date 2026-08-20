@@ -7,6 +7,7 @@ import {
   parseNonNegativeInteger,
   parsePositiveInteger,
   taskQueueRouteForCommand,
+  tenantActivityConcurrency,
   tenantShardForUserId,
   tenantTaskQueueName,
 } from "./temporal-runtime";
@@ -117,6 +118,12 @@ test("Temporal Activity concurrency is a positive integer", () => {
     () => parsePositiveInteger("0", 5, "TEST_CONCURRENCY"),
     /must be a positive integer/i,
   );
+});
+
+test("every tenant lane executes Activities in parallel", () => {
+  assert.ok(tenantActivityConcurrency("control") >= 2);
+  assert.ok(tenantActivityConcurrency("live") >= 5);
+  assert.ok(tenantActivityConcurrency("bulk") >= 2);
 });
 
 test("Temporal workflow start delay preserves a future runAt checkpoint", () => {

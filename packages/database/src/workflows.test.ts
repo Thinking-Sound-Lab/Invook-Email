@@ -45,7 +45,7 @@ test("live Gmail work dispatches ahead of bulk synchronization work", () => {
     tenantTaskQueueLaneForStep({
       stepType: "label.thread.scan",
     }),
-    "bulk",
+    "live",
   );
   assert.equal(
     tenantTaskQueueLaneForStepType("label.batch.submit"),
@@ -229,6 +229,6 @@ test("ready-replica derivations fan out to independent Temporal Activity task qu
   );
   assert.equal(
     tenantTaskQueueLaneForStepType("label.thread.scan"),
-    "bulk",
+    "live",
   );
 });

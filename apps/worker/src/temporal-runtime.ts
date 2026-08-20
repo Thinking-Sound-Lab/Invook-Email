@@ -34,6 +34,11 @@ const mailLabelConcurrency = parsePositiveInteger(
   5,
   "MAIL_LABEL_CONCURRENCY",
 );
+const mailBulkConcurrency = parsePositiveInteger(
+  process.env.MAIL_BULK_CONCURRENCY,
+  3,
+  "MAIL_BULK_CONCURRENCY",
+);
 
 export interface TemporalCloudConfiguration {
   address: string;
@@ -173,14 +178,16 @@ export function getWorkflowStartDelay(
   return runAt - now;
 }
 
-function tenantActivityConcurrency(lane: TenantTaskQueueLane): number {
+export function tenantActivityConcurrency(lane: TenantTaskQueueLane): number {
   switch (lane) {
     case "control":
       return gmailControlConcurrency;
     case "live":
       return Math.max(mailLabelConcurrency, 5);
     case "bulk":
-      return 1;
+      // Above one so a user's Gmail accounts synchronize in parallel; each
+      // account's per-message work is still bounded by GMAIL_MESSAGE_CONCURRENCY.
+      return mailBulkConcurrency;
   }
 }
 
@@ -352,8 +359,11 @@ export class TemporalRuntime {
     );
   }
 
+  // Dispatch runs inside the outbox database transaction, so it must only
+  // start Workflows. Tenant Workers are ensured by the command loop before
+  // each drain; Temporal retains Workflow Tasks durably until a Worker polls,
+  // so a tenant whose Worker is not yet running loses no work.
   async dispatch(commands: TemporalCommandJob[]): Promise<void> {
-    await this.ensureTenantWorkers(commands.map((command) => command.userId));
     await Promise.all(
       commands.map(async (command) => {
         const taskQueueRoute = taskQueueRouteForCommand(

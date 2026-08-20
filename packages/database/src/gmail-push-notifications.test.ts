@@ -413,7 +413,7 @@ test(
         (job) => job.accountId === accountId,
       );
       const firstLabelIndex = accountJobs.findIndex(
-        (job) => job.activityTaskLane === "bulk",
+        (job) => job.stepType === "label.thread.scan",
       );
       assert.ok(firstLabelIndex >= 2);
       assert.ok(
@@ -437,7 +437,7 @@ test(
       );
       assert.ok(
         accountJobs.slice(firstLabelIndex).every(
-          (job) => job.activityTaskLane === "bulk",
+          (job) => job.stepType === "label.thread.scan",
         ),
       );
 
