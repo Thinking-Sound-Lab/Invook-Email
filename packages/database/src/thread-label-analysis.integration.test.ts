@@ -345,6 +345,246 @@ test(
   },
 );
 test(
+  "recent label replans bypass a full distinct-thread fast-lane cap",
+  { skip: !testDatabaseUrl },
+  async () => {
+    if (!testDatabaseUrl) return;
+    const client = postgres(testDatabaseUrl, { max: 1 });
+    const database = drizzle(client, { schema }) as Database;
+    const userId = uuidv4();
+    const accountId = uuidv4();
+    const runId = uuidv4();
+    const replanThreadId = uuidv4();
+    const newThreadId = uuidv4();
+    const replanMessageId = uuidv4();
+    const newMessageId = uuidv4();
+    const sentAt = new Date("2026-08-20T11:00:00.000Z");
+
+    try {
+      await database.insert(profiles).values({
+        id: userId,
+        email: `${userId}@example.test`,
+        displayName: "Capped recent label replan test",
+      });
+      await database.insert(connectedAccounts).values({
+        id: accountId,
+        userId,
+        providerAccountId: `provider-${accountId}`,
+        email: "owner@example.test",
+        memoryAcknowledgedAt: sentAt,
+      });
+      await ensureBuiltInInvookLabels({ userId, accountId }, database);
+      const [importantLabel] = await database
+        .select({ id: labels.id, definitionVersion: labels.definitionVersion })
+        .from(labels)
+        .where(
+          and(
+            eq(labels.accountId, accountId),
+            eq(labels.systemKey, "important"),
+          ),
+        )
+        .limit(1);
+      assert.ok(importantLabel);
+      const [inboxLabel] = await database
+        .insert(labels)
+        .values({
+          userId,
+          accountId,
+          kind: "gmail",
+          providerLabelId: "INBOX",
+          name: "Inbox",
+          normalizedName: "inbox",
+          providerType: "system",
+        })
+        .returning({ id: labels.id });
+      assert.ok(inboxLabel);
+      await database.insert(mailSyncRuns).values({
+        id: runId,
+        userId,
+        accountId,
+        status: "running",
+        discoveryComplete: false,
+        startingHistoryCursor: "200",
+        idempotencyKey: `capped-recent-label-sync:${runId}`,
+      });
+      await database.insert(threads).values([
+        {
+          id: replanThreadId,
+          userId,
+          accountId,
+          providerThreadId: `provider-thread-${replanThreadId}`,
+          subject: "Updated invoice",
+          snippet: "New content needs another label analysis",
+          participants: ["billing@example.test"],
+          latestMessageAt: sentAt,
+          labelAnalysisVersion: 2,
+        },
+        {
+          id: newThreadId,
+          userId,
+          accountId,
+          providerThreadId: `provider-thread-${newThreadId}`,
+          subject: "New thread outside the cohort",
+          snippet: "This thread must wait for batch labeling",
+          participants: ["sender@example.test"],
+          latestMessageAt: new Date(sentAt.getTime() - 1_000),
+        },
+      ]);
+      await database.insert(messages).values([
+        {
+          id: replanMessageId,
+          userId,
+          accountId,
+          threadId: replanThreadId,
+          providerMessageId: `provider-${replanMessageId}`,
+          direction: "incoming",
+          sender: {
+            raw: "Billing <billing@example.test>",
+            email: "billing@example.test",
+          },
+          recipients: ["owner@example.test"],
+          internalDate: sentAt,
+          headerLines: [],
+          subject: "Updated invoice",
+          snippet: "New content needs another label analysis",
+          bodyText: "The invoice changed after the first analysis.",
+          embeddingContentHash: "d".repeat(64),
+          sentAt,
+        },
+        {
+          id: newMessageId,
+          userId,
+          accountId,
+          threadId: newThreadId,
+          providerMessageId: `provider-${newMessageId}`,
+          direction: "incoming",
+          sender: {
+            raw: "Sender <sender@example.test>",
+            email: "sender@example.test",
+          },
+          recipients: ["owner@example.test"],
+          internalDate: new Date(sentAt.getTime() - 1_000),
+          headerLines: [],
+          subject: "New thread outside the cohort",
+          snippet: "This thread must wait for batch labeling",
+          bodyText: "A separate new message.",
+          embeddingContentHash: "e".repeat(64),
+          sentAt: new Date(sentAt.getTime() - 1_000),
+        },
+      ]);
+      await database.insert(messageLabels).values([
+        {
+          userId,
+          accountId,
+          messageId: replanMessageId,
+          labelId: inboxLabel.id,
+          source: "gmail",
+        },
+        {
+          userId,
+          accountId,
+          messageId: newMessageId,
+          labelId: inboxLabel.id,
+          source: "gmail",
+        },
+      ]);
+      await database.insert(threadLabelAssignments).values({
+        userId,
+        accountId,
+        threadId: replanThreadId,
+        labelId: importantLabel.id,
+        source: "ai",
+        confidence: "95.00",
+        modelId: "test-model-v1",
+        definitionVersion: importantLabel.definitionVersion,
+      });
+      await database.insert(gmailSyncItems).values([
+        {
+          runId,
+          providerMessageId: `provider-${replanMessageId}`,
+          providerThreadId: `provider-thread-${replanThreadId}`,
+          status: "complete",
+          completedAt: sentAt,
+        },
+        {
+          runId,
+          providerMessageId: `provider-${newMessageId}`,
+          providerThreadId: `provider-thread-${newThreadId}`,
+          status: "complete",
+          completedAt: sentAt,
+        },
+      ]);
+      const admittedThreadIds = [
+        replanThreadId,
+        ...Array.from({ length: 199 }, () => uuidv4()),
+      ];
+      await database.insert(workflowSteps).values(
+        admittedThreadIds.map((threadId) => ({
+          runId,
+          userId,
+          accountId,
+          stepType: "label.thread.assign",
+          status: "complete" as const,
+          input: {
+            threadId,
+            analysisVersion: 1,
+            definitionHash: "f".repeat(64),
+            lane: "recent",
+          },
+          idempotencyKey: `capped-recent-label:${runId}:${threadId}`,
+        })),
+      );
+
+      assert.equal(
+        await enqueueRecentInboxThreadLabelFastLane(
+          {
+            userId,
+            accountId,
+            runId,
+            threadIds: [replanThreadId, newThreadId],
+          },
+          database,
+        ),
+        1,
+      );
+      const [replacementStep] = await database
+        .select({ input: workflowSteps.input })
+        .from(workflowSteps)
+        .where(
+          and(
+            eq(workflowSteps.accountId, accountId),
+            sql`${workflowSteps.input}->>'threadId' = ${replanThreadId}`,
+            sql`${workflowSteps.input}->>'analysisVersion' = '2'`,
+          ),
+        )
+        .limit(1);
+      assert.equal(replacementStep?.input.lane, "recent");
+      assert.deepEqual(
+        await database
+          .select({
+            state: threads.labelAnalysisState,
+            version: threads.labelAnalysisVersion,
+          })
+          .from(threads)
+          .where(eq(threads.id, newThreadId))
+          .then((rows) => rows[0]),
+        { state: "pending", version: 1 },
+      );
+      assert.equal(
+        await database
+          .select({ id: workflowSteps.id })
+          .from(workflowSteps)
+          .where(sql`${workflowSteps.input}->>'threadId' = ${newThreadId}`)
+          .then((rows) => rows.length),
+        0,
+      );
+    } finally {
+      await database.delete(profiles).where(eq(profiles.id, userId));
+      await client.end();
+    }
+  },
+);
+test(
   "Inbox threads keep exactly one Invook label across manual replacement and Gmail moves",
   { skip: !testDatabaseUrl },
   async () => {

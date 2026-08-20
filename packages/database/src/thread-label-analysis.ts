@@ -294,6 +294,21 @@ function automaticThreadLabelAssignmentAllowed() {
   )`;
 }
 
+function recentThreadPreviouslyAdmittedCondition(input: {
+  accountId: string;
+  runId?: string;
+}) {
+  return sql<boolean>`exists (
+    select 1
+    from ${workflowSteps} admitted_recent_step
+    where admitted_recent_step.account_id = ${input.accountId}
+      and admitted_recent_step.step_type = 'label.thread.assign'
+      and admitted_recent_step.input->>'lane' = 'recent'
+      and admitted_recent_step.input->>'threadId' = ${threads.id}::text
+      ${input.runId ? sql`and admitted_recent_step.run_id = ${input.runId}` : sql``}
+  )`;
+}
+
 async function saveAiThreadLabelAssignment(
   input: {
     userId: string;
@@ -485,8 +500,29 @@ export async function enqueueRecentInboxThreadLabelFastLane(
       0,
       INITIAL_THREAD_LABEL_FAST_LANE_LIMIT - (alreadyAdmitted?.value ?? 0),
     );
-    if (remaining === 0) return 0;
-    const candidates = await transaction
+    const eligibleCandidateCondition = and(
+      eq(threads.userId, input.userId),
+      eq(threads.accountId, input.accountId),
+      requestedThreadIds ? inArray(threads.id, requestedThreadIds) : undefined,
+      eq(threads.labelAnalysisState, "pending"),
+      automaticThreadLabelAssignmentAllowed(),
+      inboxThreadConditionForBatch(),
+      input.runId
+        ? sql<boolean>`not exists (
+            select 1
+            from ${gmailSyncItems} pending_thread_item
+            where pending_thread_item.run_id = ${input.runId}
+              and pending_thread_item.provider_thread_id = ${threads.providerThreadId}
+              and pending_thread_item.status <> 'complete'
+          )`
+        : undefined,
+    );
+    const previouslyAdmittedCondition =
+      recentThreadPreviouslyAdmittedCondition({
+        accountId: input.accountId,
+        runId: input.runId,
+      });
+    const replanCandidates = await transaction
       .select({
         threadId: threads.id,
         analysisVersion: threads.labelAnalysisVersion,
@@ -498,26 +534,35 @@ export async function enqueueRecentInboxThreadLabelFastLane(
       )
       .where(
         and(
-          eq(threads.userId, input.userId),
-          eq(threads.accountId, input.accountId),
-          requestedThreadIds ? inArray(threads.id, requestedThreadIds) : undefined,
-          eq(threads.labelAnalysisState, "pending"),
-          automaticThreadLabelAssignmentAllowed(),
-          inboxThreadConditionForBatch(),
-          input.runId
-            ? sql<boolean>`not exists (
-                select 1
-                from ${gmailSyncItems} pending_thread_item
-                where pending_thread_item.run_id = ${input.runId}
-                  and pending_thread_item.provider_thread_id = ${threads.providerThreadId}
-                  and pending_thread_item.status <> 'complete'
-              )`
-            : undefined,
+          eligibleCandidateCondition,
+          previouslyAdmittedCondition,
         ),
       )
       .orderBy(desc(threads.latestMessageAt), desc(threads.id))
-      .limit(remaining)
       .for("update", { of: threads, skipLocked: true });
+    const newCandidates =
+      remaining === 0
+        ? []
+        : await transaction
+            .select({
+              threadId: threads.id,
+              analysisVersion: threads.labelAnalysisVersion,
+            })
+            .from(threads)
+            .leftJoin(
+              threadLabelAssignments,
+              eq(threadLabelAssignments.threadId, threads.id),
+            )
+            .where(
+              and(
+                eligibleCandidateCondition,
+                sql<boolean>`not (${previouslyAdmittedCondition})`,
+              ),
+            )
+            .orderBy(desc(threads.latestMessageAt), desc(threads.id))
+            .limit(remaining)
+            .for("update", { of: threads, skipLocked: true });
+    const candidates = [...replanCandidates, ...newCandidates];
     let enqueuedCount = 0;
     for (const candidate of candidates) {
       const enqueued = await enqueueThreadLabelAnalysisWithExecutor(
