@@ -25,6 +25,14 @@ const rebasedMailboxEventMigrationUrl = new URL(
   "../drizzle/0029_rebased_mailbox_event_contract.sql",
   import.meta.url,
 );
+const threadLabelsMigrationUrl = new URL(
+  "../drizzle/0030_parallel_tarantula.sql",
+  import.meta.url,
+);
+const threadLabelBatchMigrationUrl = new URL(
+  "../drizzle/0032_brave_kree.sql",
+  import.meta.url,
+);
 const schemaUrl = new URL("./schema.ts", import.meta.url);
 const migrationsUrl = new URL("../drizzle/", import.meta.url);
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -37,9 +45,9 @@ function assertBefore(source: string, earlier: string, later: string): void {
   assert.ok(earlierIndex < laterIndex, `${earlier} must precede ${later}`);
 }
 
-test("the Drizzle schema has exactly the 29 owned tables", async () => {
+test("the Drizzle schema has exactly the 30 owned tables", async () => {
   const source = await readFile(schemaUrl, "utf8");
-  assert.equal(source.match(/\bpgTable\s*\(/g)?.length, 29);
+  assert.equal(source.match(/\bpgTable\s*\(/g)?.length, 30);
 });
 
 test("the auth migration preserves identity without copying Gmail credentials", async () => {
@@ -171,6 +179,41 @@ test("the built-in Invook labels are deleted before system_key is removed", asyn
     `DELETE FROM "labels"\nWHERE "kind" = 'invook' AND "system_key" IS NOT NULL`,
     'ALTER TABLE "labels" DROP COLUMN "system_key"',
   );
+});
+
+test("the thread-label migration preserves only unambiguous manual state", async () => {
+  const migration = await readFile(threadLabelsMigrationUrl, "utf8");
+
+  assert.match(
+    migration,
+    /HAVING COUNT\(DISTINCT membership\."label_id"\) = 1/,
+  );
+  assertBefore(
+    migration,
+    'INSERT INTO "thread_label_assignments"',
+    'DELETE FROM "message_labels" WHERE "source" <> \'gmail\'',
+  );
+  assertBefore(
+    migration,
+    "('Others', 'others'",
+    'ALTER TABLE "labels" ADD CONSTRAINT "labels_enabled_contract_check"',
+  );
+  assert.match(
+    migration,
+    /step\."step_type" IN \('label\.message\.analyze', 'label\.message\.apply'\)/,
+  );
+});
+
+test("the thread-label Batch migration supersedes per-thread assignments safely", async () => {
+  const migration = await readFile(threadLabelBatchMigrationUrl, "utf8");
+
+  assert.match(migration, /CREATE TABLE "thread_label_batch_submissions"/);
+  assert.match(migration, /"request_count" between 1 and 2000/);
+  assert.match(migration, /ADD COLUMN "provider_thread_id" text/);
+  assert.match(migration, /"step_type" = 'label\.thread\.assign'/);
+  assert.match(migration, /superseded_by_batch/);
+  assert.match(migration, /"label_analysis_state" = 'pending'/);
+  assert.match(migration, /'mail-label-events'/);
 });
 
 async function applyMigrationFile(

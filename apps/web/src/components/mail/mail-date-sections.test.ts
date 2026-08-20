@@ -14,14 +14,12 @@ function thread(
     snippet: "",
     participants: [],
     gmailLabels: [],
-    invookLabels: [],
+    invookLabel: null,
     latestMessageAt:
       latestMessageAt instanceof Date
         ? latestMessageAt.toISOString()
         : latestMessageAt,
     messageCount: 1,
-    isOthers: false,
-    hasLabelAnalysisFailure: false,
   };
 }
 

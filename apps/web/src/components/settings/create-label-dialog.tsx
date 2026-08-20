@@ -230,16 +230,16 @@ export function CreateLabelDialog({
             >
               <div>
                 <h3 className="text-xl font-semibold tracking-[-0.025em]">
-                  Sample matching emails
+                  Sample matching threads
                 </h3>
                 {preview ? (
                   <p className="mt-1.5 text-xs text-muted-foreground">
-                    Found {preview.matches.length} matches in your {preview.scannedMessageCount}{" "}
-                    most recent stored emails.
+                    Found {preview.matches.length} matches in your {preview.scannedThreadCount}{" "}
+                    most recent Inbox threads.
                   </p>
                 ) : (
                   <p className="mt-1.5 text-xs text-muted-foreground">
-                    Preview up to 100 recent emails before saving the label.
+                    Preview up to 100 recent Inbox threads before saving the label.
                   </p>
                 )}
               </div>
@@ -262,7 +262,7 @@ export function CreateLabelDialog({
                     <div className="space-y-1">
                       {preview.matches.map((match) => (
                         <article
-                          key={match.messageId}
+                          key={match.threadId}
                           className="group grid grid-cols-[18px_minmax(0,0.8fr)_minmax(0,1.2fr)_auto] items-center gap-3 rounded-lg px-2 py-2.5 hover:bg-muted/45"
                         >
                           <span className="grid size-4 place-items-center rounded-[4px] bg-primary text-primary-foreground">

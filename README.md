@@ -32,7 +32,7 @@ See [Configuration](#configuration) before signing in or connecting Gmail.
 
 - Mirror the complete Gmail mailbox, including Spam, Trash, drafts, raw MIME, and attachments.
 - Search mail with text, metadata, attachment filenames, and optional semantic similarity.
-- Apply the built-in Newsletter label and user-defined AI labels without changing Gmail labels.
+- Assign exactly one Invook-owned Important, Newsletter, Billing, Others, or custom label to each Inbox thread without changing Gmail labels.
 - Learn editable Memory for writing preferences, contacts, and scheduling behavior.
 - Draft replies with only the current thread and relevant Memory as context.
 - Save, edit, and send Gmail drafts through an explicit user-confirmed flow.
@@ -118,8 +118,8 @@ You can reuse the same OAuth client ID and secret for both flows or use separate
 
 AI configuration is feature-specific:
 
-- `AI_BASE_URL`, `AI_MODEL`, and optional `AI_API_KEY` power labels, feedback analysis, and drafting through an OpenAI-compatible endpoint.
-- `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL`, and `OPENAI_WEBHOOK_SECRET` power semantic indexing and historical embedding batches.
+- `AI_BASE_URL`, `AI_MODEL`, and optional `AI_API_KEY` power fast new/recent-thread labels, label previews/historical custom-label scans, feedback analysis, and drafting through an OpenAI-compatible endpoint.
+- `OPENAI_API_KEY`, optional `OPENAI_LABEL_BATCH_MODEL`, `OPENAI_LABEL_BATCH_INPUT_TOKEN_LIMIT`, `OPENAI_EMBEDDING_MODEL`, and `OPENAI_WEBHOOK_SECRET` power serialized historical thread-label Batch analysis and semantic indexing.
 - `MEMORY_BATCH_PROVIDER=openai` uses OpenAI Batch for Memory.
 - `MEMORY_BATCH_PROVIDER=azure-openai` uses the `AZURE_OPENAI_*` Batch settings.
 

@@ -1,8 +1,10 @@
-import { and, desc, eq, inArray, isNotNull, not, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, not } from "drizzle-orm";
 import { v4 as uuidv4 } from "uuid";
 
 import { getDatabase, type Database } from "./client";
 import { insertMailboxChange } from "./mailbox-change-events";
+import { visibleThreadCondition } from "./mailbox-visibility";
+import { enqueueLiveInboxThreadLabelAnalyses } from "./thread-label-analysis";
 import {
   deleteIndexedMessage,
   replaceGmailMessageLabels,
@@ -107,7 +109,6 @@ export async function getGmailMessageMutationContext(
     .where(
       and(
         eq(messages.id, input.messageId),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
       ),
@@ -127,21 +128,13 @@ export async function getGmailThreadMutationContext(
     })
     .from(threads)
     .innerJoin(connectedAccounts, eq(connectedAccounts.id, threads.accountId))
-    .innerJoin(
-      messages,
-      and(
-        eq(messages.threadId, threads.id),
-        eq(messages.accountId, threads.accountId),
-        eq(messages.userId, input.userId),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
-      ),
-    )
     .where(
       and(
         eq(threads.id, input.threadId),
         eq(threads.userId, input.userId),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
+        visibleThreadCondition(),
       ),
     )
     .limit(1);
@@ -168,7 +161,6 @@ export async function getGmailDraftResourceForUser(
         eq(drafts.kind, "gmail"),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
       ),
     )
     .limit(1);
@@ -221,7 +213,6 @@ export async function getAiReplyDraftForGmailSave(
       and(
         eq(messages.threadId, draft.threadId),
         eq(messages.direction, "incoming"),
-        inArray(messages.labelAnalysisState, ["complete", "failed"]),
       ),
     )
     .orderBy(desc(messages.internalDate), desc(messages.id))
@@ -253,6 +244,39 @@ export async function recordMailboxMessageRefresh(
       payload: {
         changedThreadIds: [input.threadId],
         refreshedThreadIds: [input.threadId],
+        reason: "message_refresh",
+      },
+    });
+    return true;
+  });
+}
+
+export async function recordMailboxMessageBatchRefresh(
+  input: { userId: string; accountId: string; threadIds: string[] },
+  database: Database = getDatabase(),
+): Promise<boolean> {
+  const threadIds = Array.from(new Set(input.threadIds));
+  if (threadIds.length === 0) return false;
+  return database.transaction(async (transaction) => {
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.userId, input.userId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .limit(1);
+    if (!account) return false;
+    await insertMailboxChange(transaction, {
+      userId: input.userId,
+      accountId: input.accountId,
+      changeType: "history_applied",
+      payload: {
+        changedThreadIds: threadIds,
+        refreshedThreadIds: threadIds,
         reason: "message_refresh",
       },
     });
@@ -813,7 +837,7 @@ export async function applyGmailHistoryBatch(
     const executor = transaction as unknown as Database;
     for (const message of input.messages) {
       const result = await upsertMailboxMessage(message, executor);
-      if (result.changed && !result.analysisQueued) {
+      if (result.changed) {
         changedThreadIds.add(result.threadId);
       }
     }
@@ -846,6 +870,14 @@ export async function applyGmailHistoryBatch(
         changedThreadIds.add(result.threadId);
       }
     }
+    await enqueueLiveInboxThreadLabelAnalyses(
+      {
+        userId: input.userId,
+        accountId: input.accountId,
+        threadIds: Array.from(changedThreadIds),
+      },
+      transaction,
+    );
     const pendingHistoryCursor =
       replica.pendingHistoryCursor &&
       BigInt(replica.pendingHistoryCursor) > BigInt(input.nextCursor)

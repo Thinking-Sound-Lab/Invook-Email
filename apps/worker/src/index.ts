@@ -11,6 +11,7 @@ import {
   extractFeedbackMemories,
   findEmbeddingBatchBySubmissionId,
   getEmbeddingBatchState,
+  getThreadLabelBatchState,
   getEmbeddingConfiguration,
   isAnyMemoryBatchProviderConfigured,
   isAiConfigured,
@@ -18,6 +19,7 @@ import {
   isEmbeddingConfigured,
   isMemoryBatchConfigured,
   isMemoryBatchProviderConfigured,
+  isThreadLabelBatchConfigured,
   batchProviders,
   MemoryBatchConfigurationError,
   readEmbeddingBatch,
@@ -55,6 +57,10 @@ import {
   enqueuePendingGmailHistoryCatchups,
   enqueuePostSyncWorkflowSteps,
   enqueueReadyMailSyncFinalizers,
+  enqueueRecentInboxThreadLabelFastLane,
+  enqueueStartupThreadLabelFastLanes,
+  enqueueStartupThreadLabelBatchSubmissions,
+  enqueueThreadLabelBatchSubmission,
   failMailSyncItem,
   failWorkflowStep,
   finalizeEmbeddingBatchSubmission,
@@ -71,6 +77,7 @@ import {
   getGmailReplicaContext,
   getGmailWatchContext,
   getActiveRepairMailSyncRunContext,
+  getCompletedMailSyncItemThreadId,
   getMailSyncRunContext,
   getMailSyncRunProviderMessageIds,
   getStoredProviderMessageIds,
@@ -83,6 +90,7 @@ import {
   listGmailObjectKeysForAccount,
   markGmailAccountCleanupRunning,
   listSubmittedEmbeddingBatchIds,
+  listSubmittedThreadLabelBatchIds,
   markGmailReplicaReady,
   markMailSyncItemRunning,
   markWorkflowStepRunning,
@@ -103,8 +111,10 @@ import {
   prepareEmbeddingBatchSubmission,
   recordEmbeddingBatchInputFile,
   recordEmbeddingProviderBatch,
+  recordMailboxMessageBatchRefresh,
   recordMailboxMessageRefresh,
   recordMailSyncPage,
+  requeueRetryableThreadLabelBatchFailures,
   refreshPreparingEmbeddingBatchSubmission,
   startMailSyncRun,
   updateStoredCredential,
@@ -161,12 +171,16 @@ import {
 } from "./gmail-history-catchup";
 import { runDailyGmailWatchRenewal } from "./gmail-watch-renewal";
 import {
-  failTerminalMessageLabelAnalysis,
-  isMessageLabelWorkflowStep,
-  messageLabelAnalysisErrorCode,
+  failTerminalThreadLabelAnalysis,
+  isThreadLabelWorkflowStep,
   runLabelSubmission,
-} from "./message-label-analysis";
+  threadLabelAnalysisErrorCode,
+} from "./thread-label-analysis";
 import { terminateWorkerAfterFatalError } from "./process-lifecycle";
+import {
+  runThreadLabelBatchEvent,
+  runThreadLabelBatchSubmission,
+} from "./thread-label-batch";
 
 const encryptionKey = process.env.TOKEN_ENCRYPTION_KEY ?? "";
 const googleClientId = process.env.GMAIL_GOOGLE_CLIENT_ID ?? "";
@@ -711,7 +725,10 @@ async function runGmailPage(job: WorkflowStepJob) {
   const page = await listGmailMessages(credential.accessToken, {
     pageToken: rawPageToken ?? undefined,
   });
-  const providerMessageIds = (page.messages ?? []).map((message) => message.id);
+  const providerMessages = (page.messages ?? []).map((message) => ({
+    providerMessageId: message.id,
+    providerThreadId: message.threadId,
+  }));
   const recorded = await recordMailSyncPage({
     runId,
     userId: account.userId,
@@ -719,14 +736,22 @@ async function runGmailPage(job: WorkflowStepJob) {
     pageNumber,
     pageToken: rawPageToken ?? null,
     nextPageToken: page.nextPageToken ?? null,
-    providerMessageIds,
+    providerMessages,
   });
   if (!recorded) return { status: "inactive", runId, pageNumber };
+  if (!page.nextPageToken) {
+    await enqueueThreadLabelBatchSubmission({
+      userId: account.userId,
+      accountId: account.id,
+      sourceKey: `gmail-discovery:${runId}`,
+      flushRemainder: false,
+    });
+  }
   return {
     status: "complete",
     runId,
     pageNumber,
-    discoveredMessageCount: providerMessageIds.length,
+    discoveredMessageCount: providerMessages.length,
     hasNextPage: Boolean(page.nextPageToken),
   };
 }
@@ -737,14 +762,26 @@ async function processInitialGmailMessage(input: {
   providerMessageId: string;
   account: { id: string; userId: string; email: string };
   credential: GoogleCredential;
-}): Promise<"complete" | "current" | "gone" | "inactive"> {
+}): Promise<{
+  status: "complete" | "current" | "gone" | "inactive";
+  threadId: string | null;
+}> {
   const shouldProcess = await markMailSyncItemRunning(
     input.runId,
     input.account.id,
     input.providerMessageId,
     input.job.attempts,
   );
-  if (!shouldProcess) return "current";
+  if (!shouldProcess) {
+    return {
+      status: "current",
+      threadId: await getCompletedMailSyncItemThreadId({
+        runId: input.runId,
+        accountId: input.account.id,
+        providerMessageId: input.providerMessageId,
+      }),
+    };
+  }
   let gmailMessage;
   try {
     gmailMessage = await getGmailMessage(
@@ -753,14 +790,18 @@ async function processInitialGmailMessage(input: {
     );
   } catch (error) {
     if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
-    const completed = await completeMailSyncItem(
-      input.runId,
-      input.providerMessageId,
-    );
-    return completed ? "gone" : "inactive";
+    const completed = await completeMailSyncItem({
+      runId: input.runId,
+      providerMessageId: input.providerMessageId,
+    });
+    return {
+      status: completed ? "gone" : "inactive",
+      threadId: null,
+    };
   }
+  let threadId: string;
   try {
-    await storeMessage({
+    const stored = await storeMessage({
       userId: input.account.userId,
       accountId: input.account.id,
       accountEmail: input.account.email,
@@ -768,15 +809,20 @@ async function processInitialGmailMessage(input: {
       message: await parseGmailMessage(gmailMessage),
       activeRunId: input.runId,
     });
+    threadId = stored.threadId;
   } catch (error) {
     if (!(error instanceof InactiveMailSyncRunError)) throw error;
-    return "inactive";
+    return { status: "inactive", threadId: null };
   }
-  const completed = await completeMailSyncItem(
-    input.runId,
-    input.providerMessageId,
-  );
-  return completed ? "complete" : "inactive";
+  const completed = await completeMailSyncItem({
+    runId: input.runId,
+    providerMessageId: input.providerMessageId,
+    providerThreadId: gmailMessage.threadId,
+  });
+  return {
+    status: completed ? "complete" : "inactive",
+    threadId: completed ? threadId : null,
+  };
 }
 
 async function runGmailMessage(job: WorkflowStepJob) {
@@ -789,17 +835,25 @@ async function runGmailMessage(job: WorkflowStepJob) {
     "Gmail message ID",
   );
   const { account, credential } = await getMailSyncContext(job.accountId);
-  const status = await processInitialGmailMessage({
+  const result = await processInitialGmailMessage({
     job,
     runId,
     providerMessageId,
     account,
     credential,
   });
+  if (result.threadId) {
+    await recordMailboxMessageRefresh({
+      userId: account.userId,
+      accountId: account.id,
+      threadId: result.threadId,
+    });
+  }
   return {
-    status,
+    status: result.status,
     runId,
     providerMessageId,
+    threadId: result.threadId,
   };
 }
 
@@ -812,18 +866,25 @@ async function runGmailMessageBatch(job: WorkflowStepJob) {
     throw new Error("The Gmail message batch run ID does not match its workflow.");
   }
   const { account, credential } = await getMailSyncContext(job.accountId);
+  const changedThreadIds: string[] = [];
   const outcome = await processGmailMessageBatch({
     providerMessageIds,
     concurrency: gmailMessageConcurrency,
     processMessage: async (providerMessageId) => {
-      await processInitialGmailMessage({
+      const result = await processInitialGmailMessage({
         job,
         runId,
         providerMessageId,
         account,
         credential,
       });
+      if (result.threadId) changedThreadIds.push(result.threadId);
     },
+  });
+  await recordMailboxMessageBatchRefresh({
+    userId: account.userId,
+    accountId: account.id,
+    threadIds: changedThreadIds,
   });
   if (outcome.failures.length > 0) {
     const classifiedFailures = outcome.failures.map((failure) => ({
@@ -851,6 +912,20 @@ async function runGmailMessageBatch(job: WorkflowStepJob) {
     }
     throw classifiedFailures[0]?.error ?? new Error("Gmail message batch failed.");
   }
+  if (changedThreadIds.length > 0 && job.runId) {
+    await enqueueRecentInboxThreadLabelFastLane({
+      userId: account.userId,
+      accountId: account.id,
+      runId: job.runId,
+      threadIds: changedThreadIds,
+    });
+  }
+  await enqueueThreadLabelBatchSubmission({
+    userId: account.userId,
+    accountId: account.id,
+    sourceKey: `gmail-message-batch:${job.id}`,
+    flushRemainder: false,
+  });
   return {
     status: "complete",
     runId,
@@ -1038,6 +1113,14 @@ async function catchUpGmailHistory(options: {
       changedThreadCount: 0,
     };
   }
+  if (replay.changedThreadIds.length > 0) {
+    await enqueueThreadLabelBatchSubmission({
+      userId: account.userId,
+      accountId: account.id,
+      sourceKey: `gmail-history:${options.sourceStepId}:${replay.historyId}`,
+      flushRemainder: true,
+    });
+  }
   if (disposition === "continue_durably") {
     const pendingHistoryCursor = replay.pendingHistoryCursor;
     if (!pendingHistoryCursor) {
@@ -1135,7 +1218,18 @@ async function runGmailFinalize(job: WorkflowStepJob) {
     finalHistoryCursor: historyCursor,
   });
   if (!completed) return { status: "inactive", runId };
-  return { status: "complete", runId, historyCursor, runType: run.runType };
+  await enqueueThreadLabelBatchSubmission({
+    userId: account.userId,
+    accountId: account.id,
+    sourceKey: `gmail-finalize:${runId}`,
+    flushRemainder: true,
+  });
+  return {
+    status: "complete",
+    runId,
+    historyCursor,
+    runType: run.runType,
+  };
 }
 
 async function runGmailHistoryCatchup(job: WorkflowStepJob) {
@@ -2390,9 +2484,13 @@ async function runWorkflowStepHandler(
         return runMemoryBatchEvent(job);
       case "memory.feedback":
         return runMemoryFeedback(job);
-      case "label.message.analyze":
-      case "label.message.apply":
+      case "label.thread.assign":
+      case "label.thread.scan":
         return runLabelSubmission(job);
+      case "label.batch.submit":
+        return runThreadLabelBatchSubmission(job);
+      case "label.batch.event":
+        return runThreadLabelBatchEvent(job);
       default:
         throw new Error(`Unsupported Temporal workflow step: ${job.stepType}`);
     }
@@ -2442,11 +2540,11 @@ export async function runWorkflowStepActivity(
       maxAttempts: job.maxAttempts,
     });
     const persistedMessage =
-      isMessageLabelWorkflowStep(job.stepType)
-        ? messageLabelAnalysisErrorCode(error)
+      isThreadLabelWorkflowStep(job.stepType)
+        ? threadLabelAnalysisErrorCode(error)
         : failure.persistedMessage;
     if (failure.isTerminal) {
-      await failTerminalMessageLabelAnalysis(job, error);
+      await failTerminalThreadLabelAnalysis(job, error);
     }
     await persistWorkflowFailure(
       job,
@@ -2488,12 +2586,14 @@ export async function reconcileWorkflowStepFailureActivity(
     maxAttempts: input.maxAttempts,
   };
   const error = new Error("temporal_activity_terminal_failure");
-  await failTerminalMessageLabelAnalysis(job, error);
+  await failTerminalThreadLabelAnalysis(job, error);
   await persistWorkflowFailure(
     job,
-    job.stepType.startsWith("gmail.")
-      ? "gmail_workflow_activity_failed"
-      : "temporal_activity_failed",
+    isThreadLabelWorkflowStep(job.stepType)
+      ? threadLabelAnalysisErrorCode(error)
+      : job.stepType.startsWith("gmail.")
+        ? "gmail_workflow_activity_failed"
+        : "temporal_activity_failed",
     true,
     false,
   );
@@ -2523,6 +2623,10 @@ function enabledActivityTaskQueues(): Set<WorkflowActivityTaskQueue> {
   if (isAnyMemoryBatchProviderConfigured()) {
     taskQueues.add("mail-memory-events");
   }
+  if (isThreadLabelBatchConfigured()) {
+    taskQueues.add("mail-label-batch");
+    taskQueues.add("mail-label-events");
+  }
   return taskQueues;
 }
 
@@ -2550,6 +2654,36 @@ async function reconcileSubmittedEmbeddingBatches() {
   }
   if (providerBatchIds.length > 0) {
     console.info("worker: submitted embedding Batches reconciled", {
+      checked: providerBatchIds.length,
+      enqueued,
+    });
+  }
+}
+
+async function reconcileSubmittedThreadLabelBatches() {
+  if (!isThreadLabelBatchConfigured()) return;
+  const providerBatchIds = await listSubmittedThreadLabelBatchIds();
+  let enqueued = 0;
+  for (const providerBatchId of providerBatchIds) {
+    try {
+      const state = await getThreadLabelBatchState(providerBatchId);
+      if (!terminalEmbeddingBatchStates.has(state)) continue;
+      const event = await enqueueBatchEvent({
+        provider: "openai",
+        webhookId: `worker-startup:thread-label:${providerBatchId}:${state}`,
+        eventType: `batch.${state}`,
+        providerBatchId,
+      });
+      if (event) enqueued += 1;
+    } catch (error) {
+      console.error("worker: submitted thread-label Batch reconciliation failed", {
+        providerBatchId,
+        name: error instanceof Error ? error.name : "UnknownError",
+      });
+    }
+  }
+  if (providerBatchIds.length > 0) {
+    console.info("worker: submitted thread-label Batches reconciled", {
       checked: providerBatchIds.length,
       enqueued,
     });
@@ -2615,8 +2749,14 @@ async function run() {
     await enqueueReadyMailSyncFinalizers();
     await ensureDailyGmailWatchRenewals();
     await enqueuePostSyncWorkflowSteps();
+    await requeueRetryableThreadLabelBatchFailures();
+    if (isAiConfigured()) {
+      await enqueueStartupThreadLabelFastLanes();
+    }
+    await enqueueStartupThreadLabelBatchSubmissions();
     await enqueuePendingAnalysisWorkflowSteps();
     await reconcileSubmittedEmbeddingBatches();
+    await reconcileSubmittedThreadLabelBatches();
     outboxSignal.notify();
     await runTemporalCommandLoop(outboxSignal, () => stopRequested, runtime);
     if (fatalError) throw fatalError;

@@ -42,6 +42,7 @@ import {
   messages,
   profiles,
   temporalCommands,
+  threadLabelAssignments,
   threads,
   workflowSteps,
 } from "./schema";
@@ -164,7 +165,6 @@ async function withPartialReplicaFixture(
         subject: "Partial synchronization keyword",
         bodyText: "The synchronization keyword is present in committed mail.",
       }),
-      labelAnalysisState: "complete",
       sentAt,
     });
     await database.insert(labels).values([
@@ -213,14 +213,15 @@ async function withPartialReplicaFixture(
         labelId: gmailDraftLabelId,
         source: "gmail",
       },
-      {
-        userId,
-        accountId,
-        messageId,
-        labelId: invookLabelId,
-        source: "user",
-      },
     ]);
+    await database.insert(threadLabelAssignments).values({
+      userId,
+      accountId,
+      threadId,
+      labelId: invookLabelId,
+      source: "user",
+      definitionVersion: 1,
+    });
     await database.insert(messageAttachments).values({
       userId,
       accountId,
@@ -481,12 +482,11 @@ test(
       );
 
       await database
-        .update(messages)
-        .set({ labelAnalysisState: "pending" })
-        .where(eq(messages.id, messageId));
-      assert.equal(
+        .delete(threadLabelAssignments)
+        .where(eq(threadLabelAssignments.threadId, threadId));
+      assert.deepEqual(
         await getGmailThreadMutationContext({ userId, threadId }, database),
-        null,
+        { accountId, providerThreadId: `provider-thread-${threadId}` },
       );
     });
   },

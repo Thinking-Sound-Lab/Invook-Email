@@ -2,8 +2,8 @@ import type { FastifyPluginAsync } from "fastify";
 
 import {
   AiConfigurationError,
-  classifyStoredMessageLabels,
-  MessageLabelClassificationContractError,
+  classifyStoredThreadLabel,
+  ThreadLabelClassificationContractError,
 } from "@invook/ai";
 import type {
   InvookLabelPreviewMatch,
@@ -11,9 +11,9 @@ import type {
 } from "@invook/contracts";
 import {
   createInvookLabel,
-  deleteInvookLabel,
   LabelConflictError,
   listInvookLabelPreviewCandidates,
+  setInvookLabelEnabled,
   updateInvookLabel,
 } from "@invook/database";
 
@@ -73,11 +73,18 @@ function hasInvalidHistoryWindow(body: unknown): boolean {
   return value !== null && value !== 7 && value !== 30 && value !== 90;
 }
 
+function parseEnabledState(body: unknown): boolean | null {
+  if (!body || typeof body !== "object" || !("isEnabled" in body)) {
+    return null;
+  }
+  return typeof body.isEnabled === "boolean" ? body.isEnabled : null;
+}
+
 async function previewLabelMatches(input: {
   userId: string;
   name: string;
   description: string;
-}): Promise<{ scannedMessageCount: number; matches: InvookLabelPreviewMatch[] }> {
+}): Promise<{ scannedThreadCount: number; matches: InvookLabelPreviewMatch[] }> {
   const candidates = await listInvookLabelPreviewCandidates({
     userId: input.userId,
     limit: 100,
@@ -87,12 +94,17 @@ async function previewLabelMatches(input: {
     for (let index = 0; index < candidates.length; index += 5) {
       const results = await Promise.all(
         candidates.slice(index, index + 5).map(async (candidate) => {
-          const classification = await classifyStoredMessageLabels({
-            message: {
+          const noMatchLabelId = `preview-no-match:${candidate.threadId}`;
+          const classification = await classifyStoredThreadLabel({
+            thread: {
               subject: candidate.subject,
-              sender: candidate.sender.raw,
-              recipients: candidate.recipients,
-              bodyText: candidate.bodyText,
+              messages: candidate.messages.map((message) => ({
+                subject: message.subject,
+                sender: message.sender.raw,
+                recipients: message.recipients,
+                bodyText: message.bodyText,
+                sentAt: message.sentAt.toISOString(),
+              })),
             },
             labelDefinitions: [{
               id: "preview",
@@ -100,31 +112,36 @@ async function previewLabelMatches(input: {
               description: input.description,
               definitionVersion: 1,
             }],
+            fallbackLabelId: noMatchLabelId,
           });
-          return { candidate, decision: classification.decisions[0] };
+          return {
+            candidate,
+            matched: classification.labelId === "preview",
+            confidence: classification.confidence,
+          };
         }),
       );
       for (const result of results) {
-        if (!result.decision?.matched) continue;
+        if (!result.matched) continue;
         matches.push({
-          messageId: result.candidate.messageId,
+          threadId: result.candidate.threadId,
           sender: result.candidate.sender.raw,
           subject: result.candidate.subject,
           sentAt: result.candidate.sentAt.toISOString(),
-          confidence: result.decision.confidence,
+          confidence: result.confidence,
         });
       }
     }
   } catch (error) {
     if (
       error instanceof AiConfigurationError ||
-      error instanceof MessageLabelClassificationContractError
+      error instanceof ThreadLabelClassificationContractError
     ) {
       throw error;
     }
     throw new LabelPreviewModelError();
   }
-  return { scannedMessageCount: candidates.length, matches };
+  return { scannedThreadCount: candidates.length, matches };
 }
 
 export const registerLabelRoutes: FastifyPluginAsync = async (api) => {
@@ -155,7 +172,7 @@ export const registerLabelRoutes: FastifyPluginAsync = async (api) => {
           await sendProblem(request, reply, 503, "Label preview model is unavailable");
           return;
         }
-        if (error instanceof MessageLabelClassificationContractError) {
+        if (error instanceof ThreadLabelClassificationContractError) {
           await sendProblem(request, reply, 502, "Label preview returned an invalid result");
           return;
         }
@@ -267,8 +284,8 @@ export const registerLabelRoutes: FastifyPluginAsync = async (api) => {
     },
   );
 
-  api.delete<{ Params: LabelParams }>(
-    "/:labelId",
+  api.patch<{ Params: LabelParams; Body: unknown }>(
+    "/:labelId/enabled",
     {
       onRequest: [
         ...mutationAccessHooks,
@@ -278,15 +295,36 @@ export const registerLabelRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      const deleted = await deleteInvookLabel({
-        userId: session.userId,
-        labelId: request.params.labelId,
-      });
-      if (!deleted) {
-        await sendProblem(request, reply, 404, "Label not found");
+      const isEnabled = parseEnabledState(request.body);
+      if (isEnabled === null || hasInvalidHistoryWindow(request.body)) {
+        await sendProblem(
+          request,
+          reply,
+          400,
+          "Enabled state and past-email window must be valid",
+        );
         return;
       }
-      await sendJson(reply, 200, { deleted: true });
+      try {
+        const result = await setInvookLabelEnabled({
+          userId: session.userId,
+          labelId: request.params.labelId,
+          isEnabled,
+          applyToPastDays: parseHistoryWindow(request.body),
+        });
+        if (!result) {
+          await sendProblem(request, reply, 404, "Label not found");
+          return;
+        }
+        const { historicalAnalysis, ...label } = result;
+        await sendJson(reply, 200, { label, historicalAnalysis });
+      } catch (error) {
+        if (error instanceof LabelConflictError) {
+          await sendProblem(request, reply, 409, error.message);
+          return;
+        }
+        throw error;
+      }
     },
   );
 };

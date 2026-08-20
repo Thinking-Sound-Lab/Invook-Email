@@ -1,59 +1,76 @@
 import type { MailboxView, StaticMailboxView } from "@invook/contracts";
-import { inArray, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 
 import {
   labels,
   messageLabels,
   messages,
+  threadLabelAssignments,
   threads,
 } from "./schema";
-import { visibleMessageLabelAnalysisStates } from "./message-label-analysis";
 
 export const MAILBOX_PAGE_SIZE = 100;
 
 const gmailProviderLabelByMailboxView = {
-  important: "IMPORTANT",
   starred: "STARRED",
   drafts: "DRAFT",
   sent: "SENT",
   spam: "SPAM",
   trash: "TRASH",
-} as const satisfies Record<Exclude<StaticMailboxView, "all">, string>;
+} as const satisfies Record<
+  Exclude<StaticMailboxView, "all" | "important">,
+  string
+>;
 
 export const countedGmailProviderLabelIds = Object.values(
   gmailProviderLabelByMailboxView,
 );
 
-export const visibleMessageCondition = inArray(
-  messages.labelAnalysisState,
-  visibleMessageLabelAnalysisStates,
-);
+export function inboxThreadCondition() {
+  return sql<boolean>`exists (
+    select 1 from ${messages} inbox_message
+    where inbox_message.thread_id = ${threads.id}
+      and exists (
+        select 1 from ${messageLabels} inbox_membership
+        inner join ${labels} inbox_label on inbox_label.id = inbox_membership.label_id
+        where inbox_membership.message_id = inbox_message.id
+          and inbox_label.kind = 'gmail'
+          and inbox_label.provider_label_id = 'INBOX'
+      )
+  )`;
+}
+
+export const visibleMessageCondition = sql<boolean>`true`;
 
 export function visibleThreadCondition() {
-  return sql<boolean>`exists (
-    select 1
-    from ${messages} visible_message
-    where visible_message.thread_id = ${threads.id}
-      and visible_message.label_analysis_state in ('complete', 'failed')
-  )`;
+  return sql<boolean>`true`;
 }
 
 export function mailboxViewCondition(view: MailboxView) {
   if (view.startsWith("label:")) {
     const labelId = view.slice(6);
-    return sql<boolean>`exists (
-      select 1
-      from ${messages}
-      inner join ${messageLabels} on ${messageLabels.messageId} = ${messages.id}
-      where ${messages.threadId} = ${threads.id}
-        and ${messageLabels.labelId} = ${labelId}::uuid
-        and ${messages.labelAnalysisState} in ('complete', 'failed')
-    )`;
+    return sql<boolean>`
+      (${inboxThreadCondition()}) and exists (
+        select 1 from ${threadLabelAssignments} assignment
+        where assignment.thread_id = ${threads.id}
+          and assignment.label_id = ${labelId}::uuid
+      )
+    `;
   }
   switch (view) {
     case "all":
-      return undefined;
+      return inboxThreadCondition();
     case "important":
+      return sql<boolean>`
+        (${inboxThreadCondition()}) and exists (
+          select 1 from ${threadLabelAssignments} important_assignment
+          inner join ${labels} important_label
+            on important_label.id = important_assignment.label_id
+          where important_assignment.thread_id = ${threads.id}
+            and important_label.kind = 'invook'
+            and important_label.system_key = 'important'
+        )
+      `;
     case "starred":
     case "drafts":
     case "sent":
@@ -70,7 +87,6 @@ export function mailboxViewCondition(view: MailboxView) {
         where ${messages.threadId} = ${threads.id}
           and ${labels.kind} = 'gmail'
           and ${labels.providerLabelId} = ${providerLabelId}
-          and ${messages.labelAnalysisState} in ('complete', 'failed')
       )`;
     }
   }
@@ -80,8 +96,6 @@ export function mailboxViewForProviderLabelId(
   providerLabelId: string | null,
 ): Exclude<StaticMailboxView, "all"> | null {
   switch (providerLabelId) {
-    case "IMPORTANT":
-      return "important";
     case "STARRED":
       return "starred";
     case "DRAFT":

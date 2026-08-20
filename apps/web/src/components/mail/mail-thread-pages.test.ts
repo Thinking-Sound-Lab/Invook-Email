@@ -14,11 +14,9 @@ function thread(id: string, subject = id): MailThreadSummary {
     snippet: "",
     participants: [],
     gmailLabels: [],
-    invookLabels: [],
+    invookLabel: null,
     latestMessageAt: "2026-08-16T00:00:00.000Z",
     messageCount: 1,
-    isOthers: false,
-    hasLabelAnalysisFailure: false,
   };
 }
 

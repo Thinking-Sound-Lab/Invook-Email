@@ -6,9 +6,10 @@ export interface SidebarLabel {
 }
 
 export function listSidebarLabels(invookLabels: InvookLabel[]): SidebarLabel[] {
-  const labels = invookLabels.map((label) => ({
-    id: label.id,
-    name: label.name,
-  }));
+  const labels = invookLabels.flatMap((label) =>
+    label.systemKey === "important"
+      ? []
+      : [{ id: label.id, name: label.name }],
+  );
   return labels.sort((left, right) => left.name.localeCompare(right.name));
 }

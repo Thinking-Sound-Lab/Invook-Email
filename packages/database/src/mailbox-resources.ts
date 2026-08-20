@@ -15,6 +15,7 @@ import type {
 import {
   and,
   asc,
+  count,
   countDistinct,
   desc,
   eq,
@@ -44,9 +45,9 @@ import {
   labels,
   memoryEntries,
   messageAttachments,
-  messageLabelDecisions,
   messageLabels,
   messages,
+  threadLabelAssignments,
   threads,
 } from "./schema";
 
@@ -69,7 +70,7 @@ type MailboxAccountRow = {
 
 type ThreadBaseRow = Omit<
   MailboxThreadSummary,
-  "gmailLabels" | "invookLabels" | "latestMessageAt"
+  "gmailLabels" | "invookLabel" | "latestMessageAt"
 > & {
   latestMessageAt: Date | null;
 };
@@ -172,6 +173,7 @@ async function listInvookLabels(
       description: labels.description,
       systemKey: labels.systemKey,
       definitionVersion: labels.definitionVersion,
+      isEnabled: labels.isEnabled,
     })
     .from(labels)
     .where(
@@ -183,40 +185,6 @@ async function listInvookLabels(
     )
     .orderBy(asc(labels.createdAt), asc(labels.name));
   return rows.sort((left, right) => left.name.localeCompare(right.name));
-}
-
-function threadIsOthersExpression() {
-  return sql<boolean>`exists (
-    select 1 from ${messages} completed_message
-    where completed_message.thread_id =
-      ${threads}.${sql.identifier(threads.id.name)}
-      and completed_message.label_analysis_state = 'complete'
-  ) and not exists (
-    select 1 from ${messages} other_message
-    inner join ${messageLabels} other_membership
-      on other_membership.message_id = other_message.id
-    inner join ${labels} other_label
-      on other_label.id = other_membership.label_id
-    where other_message.thread_id =
-      ${threads}.${sql.identifier(threads.id.name)}
-      and other_message.label_analysis_state in ('complete', 'failed')
-      and (
-        other_label.kind = 'invook'
-        or (
-          other_label.kind = 'gmail'
-          and other_label.provider_label_id = 'IMPORTANT'
-        )
-      )
-  )`;
-}
-
-function threadHasLabelAnalysisFailureExpression() {
-  return sql<boolean>`exists (
-    select 1 from ${messages} failed_message
-    where failed_message.thread_id =
-      ${threads}.${sql.identifier(threads.id.name)}
-      and failed_message.label_analysis_state = 'failed'
-  )`;
 }
 
 async function attachThreadLabels<T extends ThreadBaseRow>(
@@ -232,31 +200,22 @@ async function attachThreadLabels<T extends ThreadBaseRow>(
   const [invookLabelRows, gmailLabelRows] = await Promise.all([
     database
       .select({
-        threadId: messages.threadId,
-        labelId: messageLabels.labelId,
+        threadId: threadLabelAssignments.threadId,
+        labelId: threadLabelAssignments.labelId,
         name: labels.name,
-        source: messageLabels.source,
-        confidence: messageLabelDecisions.confidence,
+        source: threadLabelAssignments.source,
+        confidence: threadLabelAssignments.confidence,
       })
-      .from(messages)
-      .innerJoin(messageLabels, eq(messageLabels.messageId, messages.id))
-      .innerJoin(labels, eq(labels.id, messageLabels.labelId))
-      .leftJoin(
-        messageLabelDecisions,
-        and(
-          eq(messageLabelDecisions.messageId, messages.id),
-          eq(messageLabelDecisions.labelId, messageLabels.labelId),
-        ),
-      )
+      .from(threadLabelAssignments)
+      .innerJoin(labels, eq(labels.id, threadLabelAssignments.labelId))
       .where(
         and(
-          eq(messages.userId, input.userId),
-          eq(messages.accountId, input.accountId),
-          inArray(messages.threadId, threadIds),
+          eq(threadLabelAssignments.userId, input.userId),
+          eq(threadLabelAssignments.accountId, input.accountId),
+          inArray(threadLabelAssignments.threadId, threadIds),
           eq(labels.userId, input.userId),
           eq(labels.accountId, input.accountId),
           eq(labels.kind, "invook"),
-          visibleMessageCondition,
         ),
       ),
     database
@@ -283,18 +242,14 @@ async function attachThreadLabels<T extends ThreadBaseRow>(
         ),
       ),
   ]);
-  const invookLabelsByThread = new Map<string, InvookThreadLabel[]>();
+  const invookLabelsByThread = new Map<string, InvookThreadLabel>();
   for (const label of invookLabelRows) {
-    const current = invookLabelsByThread.get(label.threadId) ?? [];
-    if (!current.some((entry) => entry.labelId === label.labelId)) {
-      current.push({
-        labelId: label.labelId,
-        name: label.name,
-        source: label.source === "user" ? "user" : "ai",
-        confidence: label.confidence === null ? null : Number(label.confidence),
-      });
-      invookLabelsByThread.set(label.threadId, current);
-    }
+    invookLabelsByThread.set(label.threadId, {
+      labelId: label.labelId,
+      name: label.name,
+      source: label.source,
+      confidence: label.confidence === null ? null : Number(label.confidence),
+    });
   }
   const gmailLabelsByThread = new Map<
     string,
@@ -317,7 +272,7 @@ async function attachThreadLabels<T extends ThreadBaseRow>(
     ...thread,
     latestMessageAt: thread.latestMessageAt?.toISOString() ?? null,
     gmailLabels: gmailLabelsByThread.get(thread.id) ?? [],
-    invookLabels: invookLabelsByThread.get(thread.id) ?? [],
+    invookLabel: invookLabelsByThread.get(thread.id) ?? null,
   }));
 }
 
@@ -340,22 +295,26 @@ export async function getMailboxSidebarCounts(
 ): Promise<MailboxSidebarCounts | null> {
   const account = await getMailboxAccountContext(userId, database);
   if (!account) return null;
-  const [invookLabels, [allThreadCount], mailboxLabelCountRows] =
+  const [
+    invookLabels,
+    [allThreadCount],
+    gmailLabelCountRows,
+    invookLabelCountRows,
+  ] =
     await Promise.all([
       listInvookLabels({ userId, accountId: account.id }, database),
       database
-        .select({ value: countDistinct(messages.threadId) })
-        .from(messages)
+        .select({ value: count(threads.id) })
+        .from(threads)
         .where(
           and(
-            eq(messages.userId, userId),
-            eq(messages.accountId, account.id),
-            visibleMessageCondition,
+            eq(threads.userId, userId),
+            eq(threads.accountId, account.id),
+            mailboxViewCondition("all"),
           ),
         ),
       database
         .select({
-          kind: labels.kind,
           labelId: labels.id,
           providerLabelId: labels.providerLabelId,
           value: countDistinct(messages.threadId),
@@ -369,17 +328,29 @@ export async function getMailboxSidebarCounts(
             eq(messages.accountId, account.id),
             eq(labels.userId, userId),
             eq(labels.accountId, account.id),
-            visibleMessageCondition,
-            or(
-              eq(labels.kind, "invook"),
-              and(
-                eq(labels.kind, "gmail"),
-                inArray(labels.providerLabelId, countedGmailProviderLabelIds),
-              ),
-            ),
+            eq(labels.kind, "gmail"),
+            inArray(labels.providerLabelId, countedGmailProviderLabelIds),
           ),
         )
-        .groupBy(labels.kind, labels.id, labels.providerLabelId),
+        .groupBy(labels.id, labels.providerLabelId),
+      database
+        .select({
+          labelId: labels.id,
+          systemKey: labels.systemKey,
+          value: count(threads.id),
+        })
+        .from(threadLabelAssignments)
+        .innerJoin(labels, eq(labels.id, threadLabelAssignments.labelId))
+        .innerJoin(threads, eq(threads.id, threadLabelAssignments.threadId))
+        .where(
+          and(
+            eq(threads.userId, userId),
+            eq(threads.accountId, account.id),
+            mailboxViewCondition("all"),
+            eq(labels.kind, "invook"),
+          ),
+        )
+        .groupBy(labels.id, labels.systemKey),
     ]);
   const views: Record<StaticMailboxView, number> = {
     all: allThreadCount?.value ?? 0,
@@ -391,11 +362,13 @@ export async function getMailboxSidebarCounts(
     trash: 0,
   };
   const labelCounts = new Map<string, number>();
-  for (const countRow of mailboxLabelCountRows) {
-    if (countRow.kind === "invook") {
-      labelCounts.set(countRow.labelId, countRow.value);
-      continue;
+  for (const countRow of invookLabelCountRows) {
+    labelCounts.set(countRow.labelId, countRow.value);
+    if (countRow.systemKey === "important") {
+      views.important = countRow.value;
     }
+  }
+  for (const countRow of gmailLabelCountRows) {
     const view = mailboxViewForProviderLabelId(countRow.providerLabelId);
     if (view) views[view] = countRow.value;
   }
@@ -440,8 +413,6 @@ export async function listMailboxThreads(
       participants: threads.participants,
       latestMessageAt: threads.latestMessageAt,
       messageCount: threads.messageCount,
-      isOthers: threadIsOthersExpression(),
-      hasLabelAnalysisFailure: threadHasLabelAnalysisFailureExpression(),
     })
     .from(threads)
     .where(
@@ -498,8 +469,6 @@ export async function getMailboxThreadDetail(
       participants: threads.participants,
       latestMessageAt: threads.latestMessageAt,
       messageCount: threads.messageCount,
-      isOthers: threadIsOthersExpression(),
-      hasLabelAnalysisFailure: threadHasLabelAnalysisFailureExpression(),
     })
     .from(threads)
     .where(
@@ -532,21 +501,6 @@ export async function getMailboxThreadDetail(
           recipients: messages.recipients,
           subject: messages.subject,
           bodyText: messages.bodyText,
-          labelAnalysisState: messages.labelAnalysisState,
-          isOthers: sql<boolean>`${messages.labelAnalysisState} = 'complete' and not exists (
-            select 1 from ${messageLabels} other_membership
-            inner join ${labels} other_label
-              on other_label.id = other_membership.label_id
-            where other_membership.message_id =
-              ${messages}.${sql.identifier(messages.id.name)}
-              and (
-                other_label.kind = 'invook'
-                or (
-                  other_label.kind = 'gmail'
-                  and other_label.provider_label_id = 'IMPORTANT'
-                )
-              )
-          )`,
           bodyHtml: messages.bodyHtml,
           rawChecksumSha256: messages.rawChecksumSha256,
           rawContentLength: messages.rawContentLength,
@@ -699,8 +653,6 @@ export async function getMailboxThreadDetail(
       bodyText: message.bodyText,
       bodyHtml: message.bodyHtml,
       sentAt: message.sentAt.toISOString(),
-      labelAnalysisState: message.labelAnalysisState,
-      isOthers: message.isOthers,
       headers: message.headerLines.map((header) => {
         const separator = header.line.indexOf(":");
         return {

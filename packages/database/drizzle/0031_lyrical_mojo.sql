@@ -1,0 +1,2 @@
+ALTER TABLE "labels" ADD COLUMN "enablement_version" integer DEFAULT 1 NOT NULL;--> statement-breakpoint
+ALTER TABLE "labels" ADD CONSTRAINT "labels_enablement_version_check" CHECK ("labels"."enablement_version" > 0);

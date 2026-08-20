@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { v4 as uuidv4 } from "uuid";
@@ -14,10 +14,13 @@ import {
   mailSyncRuns,
   profiles,
   temporalCommands,
+  threads,
   workflowSteps,
 } from "./schema";
 import {
+  completeMailSyncItem,
   GMAIL_SYNC_MESSAGE_BATCH_SIZE,
+  getCompletedMailSyncItemThreadId,
   recordMailSyncPage,
 } from "./workflows";
 
@@ -73,7 +76,10 @@ test(
             pageNumber: 1,
             pageToken: null,
             nextPageToken: null,
-            providerMessageIds,
+            providerMessages: providerMessageIds.map((providerMessageId) => ({
+              providerMessageId,
+              providerThreadId: `thread-${providerMessageId}`,
+            })),
           },
           database,
         ),
@@ -124,6 +130,62 @@ test(
             messageCount: 3,
           },
         ],
+      );
+
+      const completedProviderMessageId = providerMessageIds[0]!;
+      const completedThreadId = uuidv4();
+      await database.insert(threads).values({
+        id: completedThreadId,
+        userId,
+        accountId,
+        providerThreadId: `thread-${completedProviderMessageId}`,
+      });
+      assert.equal(
+        await completeMailSyncItem(
+          {
+            runId,
+            providerMessageId: completedProviderMessageId,
+            providerThreadId: `thread-${completedProviderMessageId}`,
+          },
+          database,
+        ),
+        true,
+      );
+      const [completedItem] = await database
+        .select({ providerThreadId: gmailSyncItems.providerThreadId })
+        .from(gmailSyncItems)
+        .where(
+          and(
+            eq(gmailSyncItems.runId, runId),
+            eq(gmailSyncItems.providerMessageId, completedProviderMessageId),
+          ),
+        );
+      assert.equal(
+        completedItem?.providerThreadId,
+        `thread-${completedProviderMessageId}`,
+      );
+
+      assert.equal(
+        await getCompletedMailSyncItemThreadId(
+          {
+            runId,
+            accountId,
+            providerMessageId: completedProviderMessageId,
+          },
+          database,
+        ),
+        completedThreadId,
+      );
+      assert.equal(
+        await getCompletedMailSyncItemThreadId(
+          {
+            runId,
+            accountId,
+            providerMessageId: providerMessageIds[1]!,
+          },
+          database,
+        ),
+        null,
       );
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));

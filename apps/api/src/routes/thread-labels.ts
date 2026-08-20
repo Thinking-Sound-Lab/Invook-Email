@@ -32,32 +32,26 @@ export const registerThreadLabelRoutes: FastifyPluginAsync = async (api) => {
       }
 
       const labelId = "labelId" in body ? body.labelId : undefined;
-      const applied = "applied" in body ? body.applied : undefined;
-      if (
-        typeof labelId !== "string" ||
-        !isUuid(labelId) ||
-        typeof applied !== "boolean"
-      ) {
+      if (typeof labelId !== "string" || !isUuid(labelId)) {
         await sendProblem(
           request,
           reply,
           400,
-          "Label ID and applied must be valid",
+          "Label ID must be valid",
         );
         return;
       }
 
-      const labels = await setUserThreadLabel({
+      const label = await setUserThreadLabel({
         userId: session.userId,
         threadId: request.params.threadId,
         labelId,
-        applied,
       });
-      if (!labels) {
+      if (!label) {
         await sendProblem(request, reply, 404, "Email thread not found");
         return;
       }
-      await sendJson(reply, 200, { labels });
+      await sendJson(reply, 200, { label });
     },
   );
 };
