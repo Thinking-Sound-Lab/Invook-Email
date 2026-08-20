@@ -17,6 +17,10 @@ type DatabaseConnection = {
 
 const databaseState = globalThis as typeof globalThis & {
   invookDatabaseConnection?: DatabaseConnection;
+  invookControlLockConnection?: {
+    url: string;
+    client: ReturnType<typeof postgres>;
+  };
 };
 
 function openDatabase(databaseUrl: string): DatabaseConnection {
@@ -56,15 +60,36 @@ export function getDatabase(): Database {
   return connection.database;
 }
 
+function getControlLockClient(): ReturnType<typeof postgres> {
+  const databaseUrl = process.env.DATABASE_URL ?? "";
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required for application data access.");
+  }
+  const existing = databaseState.invookControlLockConnection;
+  if (existing) {
+    if (existing.url !== databaseUrl) {
+      throw new Error("DATABASE_URL changed after the database connection was created.");
+    }
+    return existing.client;
+  }
+  const client = postgres(databaseUrl, {
+    max: 10,
+    prepare: false,
+  });
+  databaseState.invookControlLockConnection = { url: databaseUrl, client };
+  return client;
+}
+
 export async function withGmailAccountControlLock<T>(
   accountId: string,
   operation: () => Promise<T>,
 ): Promise<T> {
   const lockName = `gmail-control:${accountId}`;
-  getDatabase();
-  const client = databaseState.invookDatabaseConnection?.client;
-  if (!client) throw new Error("The database connection is unavailable.");
-  const connection = await client.reserve();
+  // pg_advisory_lock blocks while holding a reserved connection, so lock
+  // acquisition must use a pool the locked operation never queries. Waiters
+  // on the shared query pool starve the active holder's queries and freeze
+  // every concurrent Activity in the process.
+  const connection = await getControlLockClient().reserve();
   let locked = false;
   try {
     await connection`select pg_advisory_lock(hashtextextended(${lockName}, 0))`;
