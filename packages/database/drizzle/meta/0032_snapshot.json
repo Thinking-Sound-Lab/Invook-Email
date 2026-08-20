@@ -1,6 +1,6 @@
 {
-  "id": "a3ee13bf-4da9-4aa0-bf98-05f405d63e23",
-  "prevId": "bd8bdd66-7270-4161-8a6d-cb7aa6a97808",
+  "id": "175c598d-e251-44d1-8e4a-0575d8bdda65",
+  "prevId": "a3ee13bf-4da9-4aa0-bf98-05f405d63e23",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1753,6 +1753,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "provider_thread_id": {
+          "name": "provider_thread_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -1827,6 +1833,33 @@
           "columns": [
             {
               "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "gmail_sync_items_run_thread_status_idx": {
+          "name": "gmail_sync_items_run_thread_status_idx",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider_thread_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -4452,7 +4485,7 @@
         },
         "temporal_commands_activity_task_queue_check": {
           "name": "temporal_commands_activity_task_queue_check",
-          "value": "\"temporal_commands\".\"activity_task_queue\" in ('gmail-pages', 'gmail-messages', 'gmail-message-batches', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit')"
+          "value": "\"temporal_commands\".\"activity_task_queue\" in ('gmail-pages', 'gmail-messages', 'gmail-message-batches', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-live', 'mail-label-submit', 'mail-label-batch', 'mail-label-events')"
         }
       },
       "isRLSEnabled": false
@@ -4656,6 +4689,280 @@
         "thread_label_assignments_assignment_version_check": {
           "name": "thread_label_assignments_assignment_version_check",
           "value": "\"thread_label_assignments\".\"assignment_version\" > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.thread_label_batch_submissions": {
+      "name": "thread_label_batch_submissions",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "workflow_step_id": {
+          "name": "workflow_step_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'openai'"
+        },
+        "provider_batch_id": {
+          "name": "provider_batch_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "input_file_id": {
+          "name": "input_file_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "output_file_id": {
+          "name": "output_file_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error_file_id": {
+          "name": "error_file_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "model_id": {
+          "name": "model_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "definition_hash": {
+          "name": "definition_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "flush_remainder": {
+          "name": "flush_remainder",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "has_more": {
+          "name": "has_more",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "request_count": {
+          "name": "request_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "manifest": {
+          "name": "manifest",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'preparing'"
+        },
+        "provider_state": {
+          "name": "provider_state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "submitted_at": {
+          "name": "submitted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "completed_at": {
+          "name": "completed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "thread_label_batch_submissions_workflow_step_idx": {
+          "name": "thread_label_batch_submissions_workflow_step_idx",
+          "columns": [
+            {
+              "expression": "workflow_step_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "thread_label_batch_submissions_provider_batch_idx": {
+          "name": "thread_label_batch_submissions_provider_batch_idx",
+          "columns": [
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider_batch_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"thread_label_batch_submissions\".\"provider_batch_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "thread_label_batch_submissions_account_status_idx": {
+          "name": "thread_label_batch_submissions_account_status_idx",
+          "columns": [
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "thread_label_batch_submissions_workflow_step_id_workflow_steps_id_fk": {
+          "name": "thread_label_batch_submissions_workflow_step_id_workflow_steps_id_fk",
+          "tableFrom": "thread_label_batch_submissions",
+          "tableTo": "workflow_steps",
+          "columnsFrom": [
+            "workflow_step_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "thread_label_batch_submissions_user_id_profiles_id_fk": {
+          "name": "thread_label_batch_submissions_user_id_profiles_id_fk",
+          "tableFrom": "thread_label_batch_submissions",
+          "tableTo": "profiles",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "thread_label_batch_submissions_account_id_connected_accounts_id_fk": {
+          "name": "thread_label_batch_submissions_account_id_connected_accounts_id_fk",
+          "tableFrom": "thread_label_batch_submissions",
+          "tableTo": "connected_accounts",
+          "columnsFrom": [
+            "account_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "thread_label_batch_submissions_provider_check": {
+          "name": "thread_label_batch_submissions_provider_check",
+          "value": "\"thread_label_batch_submissions\".\"provider\" = 'openai'"
+        },
+        "thread_label_batch_submissions_status_check": {
+          "name": "thread_label_batch_submissions_status_check",
+          "value": "\"thread_label_batch_submissions\".\"status\" in ('preparing', 'submitted', 'complete', 'failed')"
+        },
+        "thread_label_batch_submissions_request_count_check": {
+          "name": "thread_label_batch_submissions_request_count_check",
+          "value": "\"thread_label_batch_submissions\".\"request_count\" between 1 and 2000"
+        },
+        "thread_label_batch_submissions_definition_hash_check": {
+          "name": "thread_label_batch_submissions_definition_hash_check",
+          "value": "\"thread_label_batch_submissions\".\"definition_hash\" ~ '^[0-9a-f]{64}$'"
         }
       },
       "isRLSEnabled": false

@@ -1109,6 +1109,82 @@ export const embeddingBatchSubmissions = pgTable(
   ],
 );
 
+export const threadLabelBatchSubmissions = pgTable(
+  "thread_label_batch_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workflowStepId: uuid("workflow_step_id")
+      .notNull()
+      .references(() => workflowSteps.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    provider: text("provider").$type<"openai">().notNull().default("openai"),
+    providerBatchId: text("provider_batch_id"),
+    inputFileId: text("input_file_id"),
+    outputFileId: text("output_file_id"),
+    errorFileId: text("error_file_id"),
+    modelId: text("model_id").notNull(),
+    definitionHash: text("definition_hash").notNull(),
+    flushRemainder: boolean("flush_remainder").notNull().default(false),
+    hasMore: boolean("has_more").notNull().default(false),
+    requestCount: integer("request_count").notNull(),
+    manifest: jsonb("manifest")
+      .$type<Array<{
+        threadId: string;
+        analysisVersion: number;
+        definitionHash: string;
+        fallbackLabelId: string;
+      }>>()
+      .notNull(),
+    status: text("status")
+      .$type<"preparing" | "submitted" | "complete" | "failed">()
+      .notNull()
+      .default("preparing"),
+    providerState: text("provider_state"),
+    lastError: text("last_error"),
+    submittedAt: timestampWithTimezone("submitted_at"),
+    completedAt: timestampWithTimezone("completed_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("thread_label_batch_submissions_workflow_step_idx").on(
+      table.workflowStepId,
+    ),
+    uniqueIndex("thread_label_batch_submissions_provider_batch_idx")
+      .on(table.provider, table.providerBatchId)
+      .where(sql`${table.providerBatchId} is not null`),
+    index("thread_label_batch_submissions_account_status_idx").on(
+      table.accountId,
+      table.status,
+      table.createdAt,
+    ),
+    check(
+      "thread_label_batch_submissions_provider_check",
+      sql`${table.provider} = 'openai'`,
+    ),
+    check(
+      "thread_label_batch_submissions_status_check",
+      sql`${table.status} in ('preparing', 'submitted', 'complete', 'failed')`,
+    ),
+    check(
+      "thread_label_batch_submissions_request_count_check",
+      sql`${table.requestCount} between 1 and 2000`,
+    ),
+    check(
+      "thread_label_batch_submissions_definition_hash_check",
+      sql`${table.definitionHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);
+
 export const temporalCommands = pgTable(
   "temporal_commands",
   {
@@ -1127,7 +1203,10 @@ export const temporalCommands = pgTable(
         | "mail-memory-submit"
         | "mail-memory-events"
         | "mail-memory-feedback"
+        | "mail-label-live"
         | "mail-label-submit"
+        | "mail-label-batch"
+        | "mail-label-events"
       >()
       .notNull(),
     dispatchAttempts: integer("dispatch_attempts").notNull().default(0),
@@ -1150,7 +1229,7 @@ export const temporalCommands = pgTable(
     ),
     check(
       "temporal_commands_activity_task_queue_check",
-      sql`${table.activityTaskQueue} in ('gmail-pages', 'gmail-messages', 'gmail-message-batches', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-submit')`,
+      sql`${table.activityTaskQueue} in ('gmail-pages', 'gmail-messages', 'gmail-message-batches', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-live', 'mail-label-submit', 'mail-label-batch', 'mail-label-events')`,
     ),
   ],
 );
@@ -1187,6 +1266,7 @@ export const gmailSyncItems = pgTable(
       .notNull()
       .references(() => mailSyncRuns.id, { onDelete: "cascade" }),
     providerMessageId: text("provider_message_id").notNull(),
+    providerThreadId: text("provider_thread_id"),
     status: text("status")
       .$type<"queued" | "running" | "complete" | "failed">()
       .notNull()
@@ -1207,6 +1287,11 @@ export const gmailSyncItems = pgTable(
       table.providerMessageId,
     ),
     index("gmail_sync_items_run_status_idx").on(table.runId, table.status),
+    index("gmail_sync_items_run_thread_status_idx").on(
+      table.runId,
+      table.providerThreadId,
+      table.status,
+    ),
     check(
       "gmail_sync_items_status_check",
       sql`${table.status} in ('queued', 'running', 'complete', 'failed')`,

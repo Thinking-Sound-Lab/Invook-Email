@@ -120,8 +120,14 @@ function activityConcurrency(
       return 1;
     case "mail-indexing-live":
       return 5;
-    case "mail-label-submit":
+    case "mail-label-live":
       return mailLabelConcurrency;
+    case "mail-label-submit":
+      return 1;
+    case "mail-label-batch":
+      return 2;
+    case "mail-label-events":
+      return 2;
     default:
       return 1;
   }

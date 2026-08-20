@@ -37,52 +37,13 @@ export function inboxThreadCondition() {
           and inbox_label.kind = 'gmail'
           and inbox_label.provider_label_id = 'INBOX'
       )
-      and not exists (
-        select 1 from ${messageLabels} excluded_membership
-        inner join ${labels} excluded_label on excluded_label.id = excluded_membership.label_id
-        where excluded_membership.message_id = inbox_message.id
-          and excluded_label.kind = 'gmail'
-          and excluded_label.provider_label_id in ('SPAM', 'TRASH')
-      )
   )`;
 }
 
-export function assignedThreadCondition() {
-  return sql<boolean>`exists (
-    select 1 from ${threadLabelAssignments} assignment
-    where assignment.thread_id = ${threads.id}
-  )`;
-}
-
-export const visibleMessageCondition = sql<boolean>`(
-  exists (
-    select 1 from ${threadLabelAssignments} visible_assignment
-    where visible_assignment.thread_id = ${messages.threadId}
-  )
-  or not exists (
-    select 1 from ${messages} visible_thread_message
-    where visible_thread_message.thread_id = ${messages.threadId}
-      and exists (
-        select 1 from ${messageLabels} visible_inbox_membership
-        inner join ${labels} visible_inbox_label
-          on visible_inbox_label.id = visible_inbox_membership.label_id
-        where visible_inbox_membership.message_id = visible_thread_message.id
-          and visible_inbox_label.kind = 'gmail'
-          and visible_inbox_label.provider_label_id = 'INBOX'
-      )
-      and not exists (
-        select 1 from ${messageLabels} visible_excluded_membership
-        inner join ${labels} visible_excluded_label
-          on visible_excluded_label.id = visible_excluded_membership.label_id
-        where visible_excluded_membership.message_id = visible_thread_message.id
-          and visible_excluded_label.kind = 'gmail'
-          and visible_excluded_label.provider_label_id in ('SPAM', 'TRASH')
-      )
-  )
-)`;
+export const visibleMessageCondition = sql<boolean>`true`;
 
 export function visibleThreadCondition() {
-  return sql<boolean>`((${assignedThreadCondition()}) or not (${inboxThreadCondition()}))`;
+  return sql<boolean>`true`;
 }
 
 export function mailboxViewCondition(view: MailboxView) {
@@ -98,7 +59,7 @@ export function mailboxViewCondition(view: MailboxView) {
   }
   switch (view) {
     case "all":
-      return sql<boolean>`(${inboxThreadCondition()}) and (${assignedThreadCondition()})`;
+      return inboxThreadCondition();
     case "important":
       return sql<boolean>`
         (${inboxThreadCondition()}) and exists (

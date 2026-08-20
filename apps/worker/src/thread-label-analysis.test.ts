@@ -8,8 +8,6 @@ import {
   parseThreadLabelAnalysisJob,
 } from "./thread-label-analysis";
 
-const DEFINITION_HASH = "a".repeat(64);
-
 function workflowJob(
   stepType: string,
   payload: Record<string, unknown>,
@@ -26,30 +24,39 @@ function workflowJob(
   };
 }
 
-test("thread assignment jobs require the durable thread and definition checkpoints", () => {
-  const parsed = parseThreadLabelAnalysisJob(
-    workflowJob("label.thread.assign", {
-      threadId: "thread-1",
-      analysisVersion: 3,
-      definitionHash: DEFINITION_HASH,
-    }),
+test("live thread assignment jobs preserve their durable checkpoint", () => {
+  assert.deepEqual(
+    parseThreadLabelAnalysisJob(
+      workflowJob("label.thread.assign", {
+        threadId: "thread-1",
+        analysisVersion: 2,
+        definitionHash: "a".repeat(64),
+        lane: "live",
+      }),
+    ),
+    {
+      userId: "user-1",
+      accountId: "account-1",
+      checkpoint: {
+        threadId: "thread-1",
+        analysisVersion: 2,
+        definitionHash: "a".repeat(64),
+      },
+    },
   );
+});
 
-  assert.deepEqual(parsed.checkpoint, {
-    threadId: "thread-1",
-    analysisVersion: 3,
-    definitionHash: DEFINITION_HASH,
-  });
+test("live thread assignment jobs reject invalid checkpoints", () => {
   assert.throws(
     () =>
       parseThreadLabelAnalysisJob(
         workflowJob("label.thread.assign", {
           threadId: "thread-1",
-          analysisVersion: 3,
-          definitionHash: "invalid",
+          analysisVersion: 0,
+          definitionHash: "not-a-sha256",
         }),
       ),
-    /lowercase SHA-256 digest/,
+    /positive integer/,
   );
 });
 

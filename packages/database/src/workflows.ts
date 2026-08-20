@@ -21,6 +21,7 @@ import {
 import {
   connectedAccounts,
   embeddingBatchSubmissions,
+  threadLabelBatchSubmissions,
   gmailAccountCleanups,
   gmailReplicaStates,
   gmailWatchStates,
@@ -29,6 +30,7 @@ import {
   mailSyncRuns,
   messages,
   temporalCommands,
+  threads,
   workflowSteps,
 } from "./schema";
 import {
@@ -309,8 +311,13 @@ export function activityTaskQueueForStepType(
     case "memory.feedback":
       return "mail-memory-feedback";
     case "label.thread.assign":
+      return "mail-label-live";
     case "label.thread.scan":
       return "mail-label-submit";
+    case "label.batch.submit":
+      return "mail-label-batch";
+    case "label.batch.event":
+      return "mail-label-events";
     default:
       throw new Error(`Unsupported workflow step type: ${stepType}`);
   }
@@ -325,7 +332,13 @@ export function activityTaskQueueForStep(
 export function temporalCommandPriority(
   stepType: string,
 ): number {
-  if (stepType === "gmail.history.catchup") return 0;
+  if (
+    stepType === "gmail.history.catchup" ||
+    stepType === "label.thread.assign" ||
+    stepType === "label.batch.event"
+  ) {
+    return 0;
+  }
   return 1;
 }
 
@@ -864,7 +877,7 @@ export async function dispatchTemporalCommandBatch(
       )
       .where(isNull(temporalCommands.dispatchedAt))
       .orderBy(
-        sql`case when ${workflowSteps.stepType} = 'gmail.history.catchup' then ${temporalCommandPriority("gmail.history.catchup")} else ${temporalCommandPriority("default")} end`,
+        sql`case when ${workflowSteps.stepType} in ('gmail.history.catchup', 'label.thread.assign', 'label.batch.event') then ${temporalCommandPriority("gmail.history.catchup")} else ${temporalCommandPriority("default")} end`,
         asc(temporalCommands.createdAt),
       )
       .limit(TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE)
@@ -1188,6 +1201,44 @@ export async function failWorkflowStep(
           ),
         );
     }
+    if (input.terminal && input.step.stepType === "label.batch.submit") {
+      const [submission] = await transaction
+        .update(threadLabelBatchSubmissions)
+        .set({
+          status: "failed",
+          lastError: message,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(threadLabelBatchSubmissions.workflowStepId, input.step.id),
+            eq(threadLabelBatchSubmissions.status, "preparing"),
+          ),
+        )
+        .returning({ manifest: threadLabelBatchSubmissions.manifest });
+      if (submission) {
+        const checkpoints = submission.manifest;
+        for (const checkpoint of checkpoints) {
+          await transaction
+            .update(threads)
+            .set({
+              labelAnalysisState: "pending",
+              labelAnalysisError: message,
+              labelAnalyzedAt: null,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(threads.id, checkpoint.threadId),
+                eq(threads.labelAnalysisVersion, checkpoint.analysisVersion),
+                eq(threads.labelAnalysisDefinitionHash, checkpoint.definitionHash),
+                eq(threads.labelAnalysisState, "running"),
+              ),
+            );
+        }
+      }
+    }
     if (!input.terminal || !input.step.accountId) return true;
     if (
       ["memory.extract", "memory.batch.retry", "memory.batch.event"].includes(
@@ -1306,7 +1357,10 @@ export async function recordMailSyncPage(
     pageNumber: number;
     pageToken: string | null;
     nextPageToken: string | null;
-    providerMessageIds: string[];
+    providerMessages: Array<{
+      providerMessageId: string;
+      providerThreadId: string;
+    }>;
   },
   database: Database = getDatabase(),
 ) {
@@ -1324,20 +1378,28 @@ export async function recordMailSyncPage(
         pageNumber: input.pageNumber,
         pageToken: input.pageToken,
         nextPageToken: input.nextPageToken,
-        discoveredMessageCount: input.providerMessageIds.length,
+        discoveredMessageCount: input.providerMessages.length,
       })
       .onConflictDoNothing({ target: [gmailSyncPages.runId, gmailSyncPages.pageNumber] })
       .returning({ id: gmailSyncPages.id });
     if (!insertedPage) return true;
 
-    const uniqueMessageIds = Array.from(new Set(input.providerMessageIds));
-    const insertedItems = uniqueMessageIds.length
+    const uniqueMessages = Array.from(
+      new Map(
+        input.providerMessages.map((message) => [
+          message.providerMessageId,
+          message,
+        ]),
+      ).values(),
+    );
+    const insertedItems = uniqueMessages.length
       ? await transaction
           .insert(gmailSyncItems)
           .values(
-            uniqueMessageIds.map((providerMessageId) => ({
+            uniqueMessages.map(({ providerMessageId, providerThreadId }) => ({
               runId: input.runId,
               providerMessageId,
+              providerThreadId,
             })),
           )
           .onConflictDoNothing({
@@ -1355,9 +1417,9 @@ export async function recordMailSyncPage(
         userId: input.userId,
         accountId: input.accountId,
         pageNumber: input.pageNumber,
-        providerMessageIds: uniqueMessageIds.filter((providerMessageId) =>
-          insertedMessageIds.has(providerMessageId),
-        ),
+        providerMessageIds: uniqueMessages
+          .map((message) => message.providerMessageId)
+          .filter((providerMessageId) => insertedMessageIds.has(providerMessageId)),
       }),
       executor,
     );
@@ -1442,6 +1504,37 @@ export async function markMailSyncItemRunning(
     )
     .returning({ id: gmailSyncItems.id });
   return Boolean(item);
+}
+
+export async function getCompletedMailSyncItemThreadId(
+  input: {
+    runId: string;
+    accountId: string;
+    providerMessageId: string;
+  },
+  database: Database = getDatabase(),
+): Promise<string | null> {
+  const [item] = await database
+    .select({ threadId: threads.id })
+    .from(gmailSyncItems)
+    .innerJoin(mailSyncRuns, eq(mailSyncRuns.id, gmailSyncItems.runId))
+    .innerJoin(
+      threads,
+      and(
+        eq(threads.accountId, mailSyncRuns.accountId),
+        eq(threads.providerThreadId, gmailSyncItems.providerThreadId),
+      ),
+    )
+    .where(
+      and(
+        eq(gmailSyncItems.runId, input.runId),
+        eq(mailSyncRuns.accountId, input.accountId),
+        eq(gmailSyncItems.providerMessageId, input.providerMessageId),
+        eq(gmailSyncItems.status, "complete"),
+      ),
+    )
+    .limit(1);
+  return item?.threadId ?? null;
 }
 
 async function getItemCounts(runId: string, database: Database) {
@@ -1544,26 +1637,37 @@ export async function enqueueReadyMailSyncFinalizers(
 }
 
 export async function completeMailSyncItem(
-  runId: string,
-  providerMessageId: string,
+  input: {
+    runId: string;
+    providerMessageId: string;
+    providerThreadId?: string;
+  },
   database: Database = getDatabase(),
 ) {
   return database.transaction(async (transaction) => {
     const executor = transaction as unknown as Database;
-    if (!(await lockMailSyncRun({ runId }, executor))) return false;
+    if (!(await lockMailSyncRun({ runId: input.runId }, executor))) return false;
     const [item] = await transaction
       .update(gmailSyncItems)
-      .set({ status: "complete", lastError: null, completedAt: new Date(), updatedAt: new Date() })
+      .set({
+        ...(input.providerThreadId
+          ? { providerThreadId: input.providerThreadId }
+          : {}),
+        status: "complete",
+        lastError: null,
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
       .where(
         and(
-          eq(gmailSyncItems.runId, runId),
-          eq(gmailSyncItems.providerMessageId, providerMessageId),
+          eq(gmailSyncItems.runId, input.runId),
+          eq(gmailSyncItems.providerMessageId, input.providerMessageId),
           inArray(gmailSyncItems.status, ["queued", "running"]),
         ),
       )
       .returning({ id: gmailSyncItems.id });
     if (!item) return false;
-    await enqueueFinalizeIfReady(runId, executor);
+    await enqueueFinalizeIfReady(input.runId, executor);
     return true;
   });
 }

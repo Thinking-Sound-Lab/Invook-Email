@@ -22,9 +22,13 @@ test("live Gmail work dispatches ahead of bulk synchronization work", () => {
     temporalCommandPriority("gmail.history.catchup") <
       temporalCommandPriority("gmail.sync.message"),
   );
-  assert.equal(
-    temporalCommandPriority("label.thread.assign"),
+  assert.ok(
+    temporalCommandPriority("label.thread.assign") <
     temporalCommandPriority("gmail.sync.message.batch"),
+  );
+  assert.ok(
+    temporalCommandPriority("label.batch.event") <
+      temporalCommandPriority("label.batch.submit"),
   );
   assert.equal(
     activityTaskQueueForStepType("gmail.sync.message.batch"),
@@ -34,13 +38,21 @@ test("live Gmail work dispatches ahead of bulk synchronization work", () => {
     activityTaskQueueForStep({
       stepType: "label.thread.assign",
     }),
-    "mail-label-submit",
+    "mail-label-live",
   );
   assert.equal(
     activityTaskQueueForStep({
       stepType: "label.thread.scan",
     }),
     "mail-label-submit",
+  );
+  assert.equal(
+    activityTaskQueueForStepType("label.batch.submit"),
+    "mail-label-batch",
+  );
+  assert.equal(
+    activityTaskQueueForStepType("label.batch.event"),
+    "mail-label-events",
   );
 });
 
@@ -172,7 +184,7 @@ test("ready-replica derivations fan out to independent Temporal Activity task qu
   );
   assert.equal(
     activityTaskQueueForStepType("label.thread.assign"),
-    "mail-label-submit",
+    "mail-label-live",
   );
   assert.equal(
     activityTaskQueueForStepType("label.thread.scan"),
