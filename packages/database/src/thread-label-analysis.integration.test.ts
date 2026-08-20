@@ -8,6 +8,9 @@ import { v4 as uuidv4 } from "uuid";
 
 import type { Database } from "./client";
 import {
+  beginHistoricalThreadLabelScan,
+  completeHistoricalThreadLabelScan,
+  enqueueHistoricalThreadLabelScan,
   ensureBuiltInInvookLabels,
   listInboxThreadMessages,
   setUserThreadLabel,
@@ -167,7 +170,78 @@ test(
       assert.ok(importantLabelId);
       assert.ok(billingLabelId);
 
+      const historicalCheckpoint = {
+        threadId,
+        labelId: billingLabelId,
+        definitionVersion: 1,
+        assignmentVersion: null,
+      };
+      assert.equal(
+        await enqueueHistoricalThreadLabelScan(
+          {
+            userId,
+            accountId,
+            labelId: billingLabelId,
+            definitionVersion: 1,
+            after: new Date(sentAt.getTime() - 1_000),
+          },
+          database,
+        ),
+        1,
+      );
+      const [historicalStep] = await database
+        .select({ payload: workflowSteps.input })
+        .from(workflowSteps)
+        .where(eq(workflowSteps.stepType, "label.thread.scan"));
+      assert.deepEqual(historicalStep?.payload, historicalCheckpoint);
+      assert.equal(
+        (await beginHistoricalThreadLabelScan(
+          { userId, accountId, checkpoint: historicalCheckpoint },
+          database,
+        )).status,
+        "ready",
+      );
+      assert.deepEqual(
+        await completeHistoricalThreadLabelScan(
+          {
+            userId,
+            accountId,
+            checkpoint: historicalCheckpoint,
+            modelId: "test-model",
+            matched: true,
+            confidence: 95,
+          },
+          database,
+        ),
+        { status: "complete" },
+      );
+      assert.deepEqual(
+        await database
+          .select({
+            labelId: threadLabelAssignments.labelId,
+            source: threadLabelAssignments.source,
+            assignmentVersion: threadLabelAssignments.assignmentVersion,
+          })
+          .from(threadLabelAssignments)
+          .where(eq(threadLabelAssignments.threadId, threadId)),
+        [{ labelId: billingLabelId, source: "ai", assignmentVersion: 1 }],
+      );
+
       await setUserThreadLabel({ userId, threadId, labelId: importantLabelId }, database);
+      assert.deepEqual(
+        await completeHistoricalThreadLabelScan(
+          {
+            userId,
+            accountId,
+            checkpoint: historicalCheckpoint,
+            modelId: "test-model",
+            matched: true,
+            confidence: 95,
+          },
+          database,
+        ),
+        { status: "superseded" },
+      );
       await setUserThreadLabel({ userId, threadId, labelId: billingLabelId }, database);
       const assignments = await database
         .select()
@@ -175,7 +249,7 @@ test(
         .where(eq(threadLabelAssignments.threadId, threadId));
       assert.equal(assignments.length, 1);
       assert.equal(assignments[0]?.labelId, billingLabelId);
-      assert.equal(assignments[0]?.assignmentVersion, 2);
+      assert.equal(assignments[0]?.assignmentVersion, 3);
       assert.deepEqual(
         (await listMailboxThreads(userId, { view: "all" }, database))?.threads.map(
           (thread) => [thread.id, thread.invookLabel?.labelId],

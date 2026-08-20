@@ -53,7 +53,7 @@ test("thread assignment jobs require the durable thread and definition checkpoin
   );
 });
 
-test("historical scans protect manual changes with an assignment version", () => {
+test("historical scans accept assigned and unassigned thread checkpoints", () => {
   const parsed = parseHistoricalThreadLabelScanJob(
     workflowJob("label.thread.scan", {
       threadId: "thread-1",
@@ -68,5 +68,21 @@ test("historical scans protect manual changes with an assignment version", () =>
     labelId: "billing-label",
     definitionVersion: 2,
     assignmentVersion: 7,
+  });
+
+  const unassigned = parseHistoricalThreadLabelScanJob(
+    workflowJob("label.thread.scan", {
+      threadId: "thread-2",
+      labelId: "billing-label",
+      definitionVersion: 2,
+      assignmentVersion: null,
+    }),
+  );
+
+  assert.deepEqual(unassigned.checkpoint, {
+    threadId: "thread-2",
+    labelId: "billing-label",
+    definitionVersion: 2,
+    assignmentVersion: null,
   });
 });

@@ -48,6 +48,10 @@ function requiredPositiveInteger(value: unknown, name: string): number {
   return value;
 }
 
+function nullablePositiveInteger(value: unknown, name: string): number | null {
+  return value === null ? null : requiredPositiveInteger(value, name);
+}
+
 export function parseThreadLabelAnalysisJob(
   job: WorkflowStepJob,
 ): ThreadLabelAnalysisJob {
@@ -87,7 +91,7 @@ export function parseHistoricalThreadLabelScanJob(
         job.payload.definitionVersion,
         "Historical label definition version",
       ),
-      assignmentVersion: requiredPositiveInteger(
+      assignmentVersion: nullablePositiveInteger(
         job.payload.assignmentVersion,
         "Historical label assignment version",
       ),

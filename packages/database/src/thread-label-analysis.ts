@@ -47,7 +47,7 @@ export type HistoricalThreadLabelCheckpoint = {
   threadId: string;
   labelId: string;
   definitionVersion: number;
-  assignmentVersion: number;
+  assignmentVersion: number | null;
 };
 
 export type InboxThreadMessage = {
@@ -658,7 +658,7 @@ export async function enqueueHistoricalThreadLabelScan(
       assignmentVersion: threadLabelAssignments.assignmentVersion,
     })
     .from(threads)
-    .innerJoin(
+    .leftJoin(
       threadLabelAssignments,
       eq(threadLabelAssignments.threadId, threads.id),
     )
@@ -687,7 +687,7 @@ export async function enqueueHistoricalThreadLabelScan(
           definitionVersion: input.definitionVersion,
           assignmentVersion: candidate.assignmentVersion,
         },
-        idempotencyKey: `label.thread.scan:${candidate.threadId}:${candidate.assignmentVersion}:${input.labelId}:${input.definitionVersion}`,
+        idempotencyKey: `label.thread.scan:${candidate.threadId}:${candidate.assignmentVersion ?? "unassigned"}:${input.labelId}:${input.definitionVersion}`,
       })),
       database,
     );
@@ -724,7 +724,7 @@ export async function beginHistoricalThreadLabelScan(
       systemKey: labels.systemKey,
     })
     .from(threads)
-    .innerJoin(
+    .leftJoin(
       threadLabelAssignments,
       eq(threadLabelAssignments.threadId, threads.id),
     )
@@ -787,7 +787,7 @@ export async function completeHistoricalThreadLabelScan(
         systemKey: labels.systemKey,
       })
       .from(threads)
-      .innerJoin(
+      .leftJoin(
         threadLabelAssignments,
         eq(threadLabelAssignments.threadId, threads.id),
       )
@@ -802,7 +802,7 @@ export async function completeHistoricalThreadLabelScan(
           eq(labels.accountId, input.accountId),
         ),
       )
-      .for("update", { of: threadLabelAssignments })
+      .for("update", { of: threads })
       .limit(1);
     if (!target) return { status: "missing" };
     if (
@@ -818,19 +818,41 @@ export async function completeHistoricalThreadLabelScan(
       return { status: "superseded" };
     }
     if (!input.matched) return { status: "not_matched" };
-    await transaction
-      .update(threadLabelAssignments)
-      .set({
+    if (target.assignmentId) {
+      await transaction
+        .update(threadLabelAssignments)
+        .set({
+          labelId: target.labelId,
+          source: "ai",
+          confidence: input.confidence.toFixed(2),
+          modelId: input.modelId,
+          definitionVersion: target.definitionVersion,
+          assignmentVersion: sql`${threadLabelAssignments.assignmentVersion} + 1`,
+          assignedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(threadLabelAssignments.id, target.assignmentId));
+    } else {
+      await transaction.insert(threadLabelAssignments).values({
+        userId: input.userId,
+        accountId: input.accountId,
+        threadId: target.threadId,
         labelId: target.labelId,
         source: "ai",
         confidence: input.confidence.toFixed(2),
         modelId: input.modelId,
         definitionVersion: target.definitionVersion,
-        assignmentVersion: sql`${threadLabelAssignments.assignmentVersion} + 1`,
-        assignedAt: new Date(),
+      });
+    }
+    await transaction
+      .update(threads)
+      .set({
+        labelAnalysisState: "complete",
+        labelAnalysisError: null,
+        labelAnalyzedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(threadLabelAssignments.id, target.assignmentId));
+      .where(eq(threads.id, target.threadId));
     await insertMailboxChange(transaction, {
       userId: input.userId,
       accountId: input.accountId,
