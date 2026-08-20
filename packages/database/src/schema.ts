@@ -282,6 +282,7 @@ export const labels = pgTable(
     description: text("description").notNull().default(""),
     systemKey: text("system_key").$type<InvookSystemLabelKey>(),
     definitionVersion: integer("definition_version").notNull().default(1),
+    enablementVersion: integer("enablement_version").notNull().default(1),
     isEnabled: boolean("is_enabled").notNull().default(true),
     disabledAt: timestampWithTimezone("disabled_at"),
     providerType: text("provider_type").$type<"system">(),
@@ -325,6 +326,7 @@ export const labels = pgTable(
       sql`${table.isEnabled} or ${table.systemKey} is distinct from 'others'`,
     ),
     check("labels_definition_version_check", sql`${table.definitionVersion} > 0`),
+    check("labels_enablement_version_check", sql`${table.enablementVersion} > 0`),
   ],
 );
 

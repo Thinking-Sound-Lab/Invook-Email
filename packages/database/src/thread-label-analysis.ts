@@ -47,6 +47,7 @@ export type HistoricalThreadLabelCheckpoint = {
   threadId: string;
   labelId: string;
   definitionVersion: number;
+  enablementVersion: number;
   assignmentVersion: number | null;
 };
 
@@ -648,6 +649,7 @@ export async function enqueueHistoricalThreadLabelScan(
     accountId: string;
     labelId: string;
     definitionVersion: number;
+    enablementVersion: number;
     after: Date;
   },
   database: DatabaseExecutor,
@@ -685,9 +687,10 @@ export async function enqueueHistoricalThreadLabelScan(
           threadId: candidate.threadId,
           labelId: input.labelId,
           definitionVersion: input.definitionVersion,
+          enablementVersion: input.enablementVersion,
           assignmentVersion: candidate.assignmentVersion,
         },
-        idempotencyKey: `label.thread.scan:${candidate.threadId}:${candidate.assignmentVersion ?? "unassigned"}:${input.labelId}:${input.definitionVersion}`,
+        idempotencyKey: `label.thread.scan:${candidate.threadId}:${candidate.assignmentVersion ?? "unassigned"}:${input.labelId}:${input.definitionVersion}:${input.enablementVersion}`,
       })),
       database,
     );
@@ -720,6 +723,7 @@ export async function beginHistoricalThreadLabelScan(
       labelName: labels.name,
       labelDescription: labels.description,
       definitionVersion: labels.definitionVersion,
+      enablementVersion: labels.enablementVersion,
       isEnabled: labels.isEnabled,
       systemKey: labels.systemKey,
     })
@@ -745,6 +749,7 @@ export async function beginHistoricalThreadLabelScan(
     target.assignmentVersion !== input.checkpoint.assignmentVersion ||
     target.labelId !== input.checkpoint.labelId ||
     target.definitionVersion !== input.checkpoint.definitionVersion ||
+    target.enablementVersion !== input.checkpoint.enablementVersion ||
     !target.isEnabled ||
     target.systemKey === "others"
   ) {
@@ -776,30 +781,43 @@ export async function completeHistoricalThreadLabelScan(
   database: Database = getDatabase(),
 ): Promise<{ status: "missing" | "superseded" | "not_matched" | "complete" }> {
   return database.transaction(async (transaction) => {
+    const [definition] = await transaction
+      .select({
+        labelId: labels.id,
+        definitionVersion: labels.definitionVersion,
+        enablementVersion: labels.enablementVersion,
+        isEnabled: labels.isEnabled,
+        systemKey: labels.systemKey,
+      })
+      .from(labels)
+      .where(
+        and(
+          eq(labels.id, input.checkpoint.labelId),
+          eq(labels.kind, "invook"),
+          eq(labels.userId, input.userId),
+          eq(labels.accountId, input.accountId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!definition) return { status: "missing" };
+
     const [target] = await transaction
       .select({
         threadId: threads.id,
         assignmentId: threadLabelAssignments.id,
         assignmentVersion: threadLabelAssignments.assignmentVersion,
-        labelId: labels.id,
-        definitionVersion: labels.definitionVersion,
-        isEnabled: labels.isEnabled,
-        systemKey: labels.systemKey,
       })
       .from(threads)
       .leftJoin(
         threadLabelAssignments,
         eq(threadLabelAssignments.threadId, threads.id),
       )
-      .innerJoin(labels, eq(labels.id, input.checkpoint.labelId))
       .where(
         and(
           eq(threads.id, input.checkpoint.threadId),
           eq(threads.userId, input.userId),
           eq(threads.accountId, input.accountId),
-          eq(labels.kind, "invook"),
-          eq(labels.userId, input.userId),
-          eq(labels.accountId, input.accountId),
         ),
       )
       .for("update", { of: threads })
@@ -807,10 +825,11 @@ export async function completeHistoricalThreadLabelScan(
     if (!target) return { status: "missing" };
     if (
       target.assignmentVersion !== input.checkpoint.assignmentVersion ||
-      target.labelId !== input.checkpoint.labelId ||
-      target.definitionVersion !== input.checkpoint.definitionVersion ||
-      !target.isEnabled ||
-      target.systemKey === "others" ||
+      definition.labelId !== input.checkpoint.labelId ||
+      definition.definitionVersion !== input.checkpoint.definitionVersion ||
+      definition.enablementVersion !== input.checkpoint.enablementVersion ||
+      !definition.isEnabled ||
+      definition.systemKey === "others" ||
       !Number.isFinite(input.confidence) ||
       input.confidence < 0 ||
       input.confidence > 100
@@ -822,11 +841,11 @@ export async function completeHistoricalThreadLabelScan(
       await transaction
         .update(threadLabelAssignments)
         .set({
-          labelId: target.labelId,
+          labelId: definition.labelId,
           source: "ai",
           confidence: input.confidence.toFixed(2),
           modelId: input.modelId,
-          definitionVersion: target.definitionVersion,
+          definitionVersion: definition.definitionVersion,
           assignmentVersion: sql`${threadLabelAssignments.assignmentVersion} + 1`,
           assignedAt: new Date(),
           updatedAt: new Date(),
@@ -837,11 +856,11 @@ export async function completeHistoricalThreadLabelScan(
         userId: input.userId,
         accountId: input.accountId,
         threadId: target.threadId,
-        labelId: target.labelId,
+        labelId: definition.labelId,
         source: "ai",
         confidence: input.confidence.toFixed(2),
         modelId: input.modelId,
-        definitionVersion: target.definitionVersion,
+        definitionVersion: definition.definitionVersion,
       });
     }
     await transaction

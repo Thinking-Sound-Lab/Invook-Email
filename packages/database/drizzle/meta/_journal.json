@@ -218,6 +218,13 @@
       "when": 1787159478022,
       "tag": "0030_parallel_tarantula",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1787209765725,
+      "tag": "0031_lyrical_mojo",
+      "breakpoints": true
     }
   ]
 }

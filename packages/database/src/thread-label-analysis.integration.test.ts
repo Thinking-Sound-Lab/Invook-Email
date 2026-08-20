@@ -18,7 +18,10 @@ import {
 import {
   listMailboxThreads,
 } from "./mailbox-resources";
-import { replaceGmailMessageLabels } from "./repositories";
+import {
+  replaceGmailMessageLabels,
+  setInvookLabelEnabled,
+} from "./repositories";
 import {
   connectedAccounts,
   gmailReplicaStates,
@@ -46,7 +49,7 @@ test(
     const threadId = uuidv4();
     const inboxMessageId = uuidv4();
     const spamMessageId = uuidv4();
-    const sentAt = new Date("2026-08-18T09:00:00.000Z");
+    const sentAt = new Date();
 
     try {
       await database.insert(profiles).values({
@@ -174,6 +177,7 @@ test(
         threadId,
         labelId: billingLabelId,
         definitionVersion: 1,
+        enablementVersion: 1,
         assignmentVersion: null,
       };
       assert.equal(
@@ -183,6 +187,7 @@ test(
             accountId,
             labelId: billingLabelId,
             definitionVersion: 1,
+            enablementVersion: 1,
             after: new Date(sentAt.getTime() - 1_000),
           },
           database,
@@ -201,12 +206,57 @@ test(
         )).status,
         "ready",
       );
+      await setInvookLabelEnabled(
+        { userId, labelId: billingLabelId, isEnabled: false },
+        database,
+      );
+      const reEnabled = await setInvookLabelEnabled(
+        {
+          userId,
+          labelId: billingLabelId,
+          isEnabled: true,
+          applyToPastDays: 7,
+        },
+        database,
+      );
+      assert.deepEqual(reEnabled?.historicalAnalysis, {
+        windowDays: 7,
+        queuedThreadCount: 1,
+      });
+      const reEnabledCheckpoint = {
+        ...historicalCheckpoint,
+        enablementVersion: 3,
+      };
+      const historicalSteps = await database
+        .select({ payload: workflowSteps.input })
+        .from(workflowSteps)
+        .where(eq(workflowSteps.stepType, "label.thread.scan"));
+      assert.deepEqual(
+        historicalSteps
+          .map((step) => step.payload.enablementVersion)
+          .sort((left, right) => Number(left) - Number(right)),
+        [1, 3],
+      );
+      assert.equal(
+        (await beginHistoricalThreadLabelScan(
+          { userId, accountId, checkpoint: historicalCheckpoint },
+          database,
+        )).status,
+        "superseded",
+      );
+      assert.equal(
+        (await beginHistoricalThreadLabelScan(
+          { userId, accountId, checkpoint: reEnabledCheckpoint },
+          database,
+        )).status,
+        "ready",
+      );
       assert.deepEqual(
         await completeHistoricalThreadLabelScan(
           {
             userId,
             accountId,
-            checkpoint: historicalCheckpoint,
+            checkpoint: reEnabledCheckpoint,
             modelId: "test-model",
             matched: true,
             confidence: 95,
@@ -233,7 +283,7 @@ test(
           {
             userId,
             accountId,
-            checkpoint: historicalCheckpoint,
+            checkpoint: reEnabledCheckpoint,
             modelId: "test-model",
             matched: true,
             confidence: 95,

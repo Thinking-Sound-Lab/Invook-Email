@@ -2139,6 +2139,7 @@ export async function createInvookLabel(
               accountId: account.id,
               labelId: label.id,
               definitionVersion: label.definitionVersion,
+              enablementVersion: label.enablementVersion,
               after: new Date(Date.now() - windowDays * 24 * 60 * 60 * 1_000),
             },
             transaction,
@@ -2247,6 +2248,11 @@ export async function setInvookLabelEnabled(
       .set({
         isEnabled: input.isEnabled,
         disabledAt: input.isEnabled ? null : new Date(),
+        ...(input.isEnabled === currentLabel.isEnabled
+          ? {}
+          : {
+              enablementVersion: sql`${labels.enablementVersion} + 1`,
+            }),
         updatedAt: new Date(),
       })
       .where(
@@ -2258,6 +2264,7 @@ export async function setInvookLabelEnabled(
         description: labels.description,
         systemKey: labels.systemKey,
         definitionVersion: labels.definitionVersion,
+        enablementVersion: labels.enablementVersion,
         isEnabled: labels.isEnabled,
       });
     if (!label) throw new Error("The label state could not be saved.");
@@ -2272,13 +2279,19 @@ export async function setInvookLabelEnabled(
             accountId: currentLabel.accountId,
             labelId: label.id,
             definitionVersion: label.definitionVersion,
+            enablementVersion: label.enablementVersion,
             after: new Date(Date.now() - windowDays * 24 * 60 * 60 * 1_000),
           },
           transaction,
         )
       : 0;
     return {
-      ...label,
+      id: label.id,
+      name: label.name,
+      description: label.description,
+      systemKey: label.systemKey,
+      definitionVersion: label.definitionVersion,
+      isEnabled: label.isEnabled,
       historicalAnalysis: windowDays
         ? { windowDays, queuedThreadCount }
         : null,

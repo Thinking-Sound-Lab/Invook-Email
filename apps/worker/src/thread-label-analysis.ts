@@ -91,6 +91,10 @@ export function parseHistoricalThreadLabelScanJob(
         job.payload.definitionVersion,
         "Historical label definition version",
       ),
+      enablementVersion: requiredPositiveInteger(
+        job.payload.enablementVersion,
+        "Historical label enablement version",
+      ),
       assignmentVersion: nullablePositiveInteger(
         job.payload.assignmentVersion,
         "Historical label assignment version",

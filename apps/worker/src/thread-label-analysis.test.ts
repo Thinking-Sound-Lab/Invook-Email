@@ -59,6 +59,7 @@ test("historical scans accept assigned and unassigned thread checkpoints", () =>
       threadId: "thread-1",
       labelId: "billing-label",
       definitionVersion: 2,
+      enablementVersion: 3,
       assignmentVersion: 7,
     }),
   );
@@ -67,6 +68,7 @@ test("historical scans accept assigned and unassigned thread checkpoints", () =>
     threadId: "thread-1",
     labelId: "billing-label",
     definitionVersion: 2,
+    enablementVersion: 3,
     assignmentVersion: 7,
   });
 
@@ -75,6 +77,7 @@ test("historical scans accept assigned and unassigned thread checkpoints", () =>
       threadId: "thread-2",
       labelId: "billing-label",
       definitionVersion: 2,
+      enablementVersion: 4,
       assignmentVersion: null,
     }),
   );
@@ -83,6 +86,7 @@ test("historical scans accept assigned and unassigned thread checkpoints", () =>
     threadId: "thread-2",
     labelId: "billing-label",
     definitionVersion: 2,
+    enablementVersion: 4,
     assignmentVersion: null,
   });
 });
