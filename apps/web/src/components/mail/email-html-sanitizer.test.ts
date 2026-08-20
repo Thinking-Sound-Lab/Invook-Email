@@ -130,6 +130,9 @@ test("email HTML includes the isolated viewer root without a document wrapper", 
   const content = buildEmailHtmlContent("<p>Hello</p>");
 
   assert.match(content, /:host \{/);
+  assert.match(content, /color-scheme: only light/);
+  assert.match(content, /background-color: #ffffff/);
+  assert.match(content, /color: #202124/);
   assert.match(content, /class="invook-email-body" role="document"/);
   assert.doesNotMatch(content, /<!doctype|<html|<body|postMessage|ResizeObserver/);
 });

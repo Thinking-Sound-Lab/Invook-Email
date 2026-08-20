@@ -224,6 +224,7 @@ const EMAIL_CONTENT_STYLES = `
   }
   .invook-email-body {
     all: initial;
+    background-color: #ffffff;
     display: flow-root;
     min-width: 0;
     width: 100%;
