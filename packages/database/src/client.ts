@@ -113,11 +113,16 @@ async function listenForDatabaseNotifications(
 }
 
 export function listenForTemporalCommandNotifications(
-  onEntryAvailable: () => void,
+  input: {
+    onEntryAvailable: () => void;
+    onSubscriptionLost: () => void;
+  },
 ) {
   return listenForDatabaseNotifications(
     "invook_temporal_commands",
-    onEntryAvailable,
+    input.onEntryAvailable,
+    undefined,
+    input.onSubscriptionLost,
   );
 }
 

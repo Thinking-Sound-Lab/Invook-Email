@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import {
   and,
   asc,
-  count,
+  countDistinct,
   desc,
   eq,
   gt,
@@ -286,6 +286,56 @@ function checkpointMatches(
   );
 }
 
+function automaticThreadLabelAssignmentAllowed() {
+  return sql<boolean>`not exists (
+    select 1 from ${threadLabelAssignments} manual_assignment
+    where manual_assignment.thread_id = ${threads.id}
+      and manual_assignment.source = 'user'
+  )`;
+}
+
+async function saveAiThreadLabelAssignment(
+  input: {
+    userId: string;
+    accountId: string;
+    threadId: string;
+    labelId: string;
+    confidence: number;
+    modelId: string;
+    definitionVersion: number;
+  },
+  database: DatabaseExecutor,
+): Promise<boolean> {
+  const [assignment] = await database
+    .insert(threadLabelAssignments)
+    .values({
+      userId: input.userId,
+      accountId: input.accountId,
+      threadId: input.threadId,
+      labelId: input.labelId,
+      source: "ai",
+      confidence: input.confidence.toFixed(2),
+      modelId: input.modelId,
+      definitionVersion: input.definitionVersion,
+    })
+    .onConflictDoUpdate({
+      target: threadLabelAssignments.threadId,
+      set: {
+        labelId: input.labelId,
+        source: "ai",
+        confidence: input.confidence.toFixed(2),
+        modelId: input.modelId,
+        definitionVersion: input.definitionVersion,
+        assignmentVersion: sql`${threadLabelAssignments.assignmentVersion} + 1`,
+        assignedAt: new Date(),
+        updatedAt: new Date(),
+      },
+      setWhere: eq(threadLabelAssignments.source, "ai"),
+    })
+    .returning({ threadId: threadLabelAssignments.threadId });
+  return Boolean(assignment);
+}
+
 async function enqueueThreadLabelAnalysisWithExecutor(
   input: {
     userId: string;
@@ -319,10 +369,7 @@ async function enqueueThreadLabelAnalysisWithExecutor(
         eq(threads.labelAnalysisVersion, input.analysisVersion),
         eq(threads.labelAnalysisState, "pending"),
         inboxThreadConditionForBatch(),
-        sql<boolean>`not exists (
-          select 1 from ${threadLabelAssignments}
-          where ${threadLabelAssignments.threadId} = ${threads.id}
-        )`,
+        automaticThreadLabelAssignmentAllowed(),
       ),
     )
     .returning({ id: threads.id });
@@ -368,7 +415,7 @@ export async function enqueueLiveInboxThreadLabelAnalyses(
         eq(threads.accountId, input.accountId),
         inArray(threads.id, threadIds),
         eq(threads.labelAnalysisState, "pending"),
-        isNull(threadLabelAssignments.id),
+        automaticThreadLabelAssignmentAllowed(),
         inboxThreadConditionForBatch(),
       ),
     )
@@ -416,14 +463,15 @@ export async function enqueueRecentInboxThreadLabelFastLane(
             eq(mailSyncRuns.id, input.runId),
             eq(mailSyncRuns.accountId, input.accountId),
             inArray(mailSyncRuns.status, ["queued", "running"]),
-            eq(mailSyncRuns.discoveryComplete, true),
           ),
         )
         .limit(1);
       if (!activeRun) return 0;
     }
     const [alreadyAdmitted] = await transaction
-      .select({ value: count(workflowSteps.id) })
+      .select({
+        value: countDistinct(sql`${workflowSteps.input}->>'threadId'`),
+      })
       .from(workflowSteps)
       .where(
         and(
@@ -454,7 +502,7 @@ export async function enqueueRecentInboxThreadLabelFastLane(
           eq(threads.accountId, input.accountId),
           requestedThreadIds ? inArray(threads.id, requestedThreadIds) : undefined,
           eq(threads.labelAnalysisState, "pending"),
-          isNull(threadLabelAssignments.id),
+          automaticThreadLabelAssignmentAllowed(),
           inboxThreadConditionForBatch(),
           input.runId
             ? sql<boolean>`not exists (
@@ -505,7 +553,6 @@ export async function enqueueStartupThreadLabelFastLanes(
         and(
           eq(mailSyncRuns.accountId, account.accountId),
           inArray(mailSyncRuns.status, ["queued", "running"]),
-          eq(mailSyncRuns.discoveryComplete, true),
         ),
       )
       .limit(1);
@@ -540,7 +587,7 @@ export async function beginThreadLabelAnalysis(
         subject: threads.subject,
         labelAnalysisVersion: threads.labelAnalysisVersion,
         labelAnalysisState: threads.labelAnalysisState,
-        assignmentId: threadLabelAssignments.id,
+        assignmentSource: threadLabelAssignments.source,
       })
       .from(threads)
       .leftJoin(
@@ -560,7 +607,10 @@ export async function beginThreadLabelAnalysis(
     if (!checkpointMatches(thread, input.checkpoint)) {
       return { status: "superseded" };
     }
-    if (thread.assignmentId || thread.labelAnalysisState === "complete") {
+    if (
+      thread.assignmentSource === "user" ||
+      thread.labelAnalysisState !== "running"
+    ) {
       return { status: "resolved" };
     }
     const snapshot = await getDefinitionSnapshot(input.accountId, transaction);
@@ -611,7 +661,8 @@ export async function completeThreadLabelAnalysis(
       .select({
         id: threads.id,
         labelAnalysisVersion: threads.labelAnalysisVersion,
-        assignmentId: threadLabelAssignments.id,
+        labelAnalysisState: threads.labelAnalysisState,
+        assignmentSource: threadLabelAssignments.source,
       })
       .from(threads)
       .leftJoin(
@@ -631,7 +682,12 @@ export async function completeThreadLabelAnalysis(
     if (!checkpointMatches(thread, input.checkpoint)) {
       return { status: "superseded" };
     }
-    if (thread.assignmentId) return { status: "current" };
+    if (
+      thread.assignmentSource === "user" ||
+      thread.labelAnalysisState !== "running"
+    ) {
+      return { status: "current" };
+    }
     const snapshot = await getDefinitionSnapshot(input.accountId, transaction);
     if (snapshot.definitionHash !== input.checkpoint.definitionHash) {
       await transaction
@@ -663,21 +719,19 @@ export async function completeThreadLabelAnalysis(
     }
     const inboxMessages = await listInboxThreadMessages(thread.id, transaction);
     if (inboxMessages.length === 0) return { status: "superseded" };
-    const [assignment] = await transaction
-      .insert(threadLabelAssignments)
-      .values({
+    const assignmentSaved = await saveAiThreadLabelAssignment(
+      {
         userId: input.userId,
         accountId: input.accountId,
         threadId: thread.id,
         labelId: selectedDefinition.id,
-        source: "ai",
-        confidence: input.confidence.toFixed(2),
+        confidence: input.confidence,
         modelId: input.modelId,
         definitionVersion: selectedDefinition.definitionVersion,
-      })
-      .onConflictDoNothing({ target: threadLabelAssignments.threadId })
-      .returning({ threadId: threadLabelAssignments.threadId });
-    if (!assignment) return { status: "current" };
+      },
+      transaction,
+    );
+    if (!assignmentSaved) return { status: "current" };
     await transaction
       .update(threads)
       .set({
@@ -727,10 +781,7 @@ export async function failThreadLabelAnalysis(
           eq(threads.labelAnalysisVersion, input.checkpoint.analysisVersion),
           eq(threads.labelAnalysisDefinitionHash, input.checkpoint.definitionHash),
           eq(threads.labelAnalysisState, "running"),
-          sql<boolean>`not exists (
-            select 1 from ${threadLabelAssignments}
-            where ${threadLabelAssignments.threadId} = ${threads.id}
-          )`,
+          automaticThreadLabelAssignmentAllowed(),
         ),
       )
       .returning({ id: threads.id });
@@ -1234,7 +1285,7 @@ async function listThreadLabelBatchCandidateRows(
           eq(threads.userId, input.userId),
           eq(threads.accountId, input.accountId),
           eq(threads.labelAnalysisState, "pending"),
-          isNull(threadLabelAssignments.id),
+          automaticThreadLabelAssignmentAllowed(),
           input.candidateThreadIds
             ? inArray(threads.id, input.candidateThreadIds)
             : undefined,
@@ -1698,7 +1749,7 @@ export async function finalizeThreadLabelBatchSubmission(
           .select({
             id: threads.id,
             analysisVersion: threads.labelAnalysisVersion,
-            assignmentId: threadLabelAssignments.id,
+            assignmentSource: threadLabelAssignments.source,
           })
           .from(threads)
           .leftJoin(
@@ -1722,27 +1773,25 @@ export async function finalizeThreadLabelBatchSubmission(
           .limit(1);
         if (
           !thread ||
-          thread.assignmentId ||
+          thread.assignmentSource === "user" ||
           thread.analysisVersion !== checkpoint.analysisVersion ||
           checkpoint.definitionHash !== submission.definitionHash
         ) {
           continue;
         }
-        const [assignment] = await transaction
-          .insert(threadLabelAssignments)
-          .values({
+        const assignmentSaved = await saveAiThreadLabelAssignment(
+          {
             userId: submission.userId,
             accountId: submission.accountId,
             threadId: thread.id,
             labelId: definition.id,
-            source: "ai",
-            confidence: result.confidence.toFixed(2),
+            confidence: result.confidence,
             modelId: input.modelId,
             definitionVersion: definition.definitionVersion,
-          })
-          .onConflictDoNothing({ target: threadLabelAssignments.threadId })
-          .returning({ threadId: threadLabelAssignments.threadId });
-        if (!assignment) continue;
+          },
+          transaction,
+        );
+        if (!assignmentSaved) continue;
         await transaction
           .update(threads)
           .set({
@@ -1796,10 +1845,7 @@ export async function finalizeThreadLabelBatchSubmission(
             inArray(threads.id, failedIds),
             eq(threads.labelAnalysisState, "running"),
             eq(threads.labelAnalysisDefinitionHash, submission.definitionHash),
-            sql<boolean>`not exists (
-              select 1 from ${threadLabelAssignments}
-              where ${threadLabelAssignments.threadId} = ${threads.id}
-            )`,
+            automaticThreadLabelAssignmentAllowed(),
           ),
         )
         .returning({ id: threads.id });
@@ -1867,7 +1913,7 @@ export async function finalizeThreadLabelBatchSubmission(
                 eq(threads.userId, submission.userId),
                 eq(threads.accountId, submission.accountId),
                 eq(threads.labelAnalysisState, "pending"),
-                isNull(threadLabelAssignments.id),
+                automaticThreadLabelAssignmentAllowed(),
                 inboxThreadConditionForBatch(),
               ),
             )
@@ -1939,10 +1985,7 @@ export async function requeueRetryableThreadLabelBatchFailures(
             and(
               inArray(threads.id, threadIds),
               eq(threads.labelAnalysisState, "failed"),
-              sql<boolean>`not exists (
-                select 1 from ${threadLabelAssignments}
-                where ${threadLabelAssignments.threadId} = ${threads.id}
-              )`,
+              automaticThreadLabelAssignmentAllowed(),
             ),
           )
           .returning({ id: threads.id });
@@ -2019,10 +2062,7 @@ export async function requeueRetryableThreadLabelBatchFailures(
               inArray(threads.id, threadIds),
               eq(threads.labelAnalysisState, "failed"),
               inboxThreadConditionForBatch(),
-              sql<boolean>`not exists (
-                select 1 from ${threadLabelAssignments}
-                where ${threadLabelAssignments.threadId} = ${threads.id}
-              )`,
+              automaticThreadLabelAssignmentAllowed(),
             ),
           )
           .returning({ id: threads.id });

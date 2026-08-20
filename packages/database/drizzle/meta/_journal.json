@@ -232,6 +232,13 @@
       "when": 1787210360549,
       "tag": "0032_brave_kree",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1787221620491,
+      "tag": "0033_shallow_apocalypse",
+      "breakpoints": true
     }
   ]
 }

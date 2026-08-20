@@ -1,6 +1,6 @@
 export {
-  workflowActivityTaskQueues,
-  type WorkflowActivityTaskQueue,
+  tenantTaskQueueLanes,
+  type TenantTaskQueueLane,
   type WorkflowStepActivities,
   type WorkflowStepExecution,
   type WorkflowStepResult,

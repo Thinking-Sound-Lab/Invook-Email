@@ -20,6 +20,7 @@ import {
   enqueuePendingGmailHistoryCatchups,
   enqueueWorkflowStep,
   getActiveRepairMailSyncRunContext,
+  type TemporalCommandJob,
 } from "./workflows";
 import {
   connectedAccounts,
@@ -397,12 +398,7 @@ test(
       );
       assert.equal(await enqueuePendingGmailHistoryCatchups(database), 1);
 
-      let dispatchedJobs: Array<{
-        accountId: string | null;
-        stepType: string;
-        activityTaskQueue: string;
-        payload: Record<string, unknown>;
-      }> = [];
+      let dispatchedJobs: TemporalCommandJob[] = [];
       await dispatchTemporalCommandBatch(
         async (jobs) => {
           dispatchedJobs = jobs;
@@ -417,7 +413,7 @@ test(
         (job) => job.accountId === accountId,
       );
       const firstLabelIndex = accountJobs.findIndex(
-        (job) => job.activityTaskQueue === "mail-label-submit",
+        (job) => job.activityTaskLane === "bulk",
       );
       assert.ok(firstLabelIndex >= 2);
       assert.ok(
@@ -441,7 +437,7 @@ test(
       );
       assert.ok(
         accountJobs.slice(firstLabelIndex).every(
-          (job) => job.activityTaskQueue === "mail-label-submit",
+          (job) => job.activityTaskLane === "bulk",
         ),
       );
 

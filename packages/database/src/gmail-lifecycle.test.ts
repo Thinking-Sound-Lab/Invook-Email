@@ -111,10 +111,10 @@ test(
         },
       ]);
       const outbox = await database
-        .select({ activityTaskQueue: temporalCommands.activityTaskQueue })
+        .select({ activityTaskLane: temporalCommands.activityTaskLane })
         .from(temporalCommands)
         .where(eq(temporalCommands.workflowStepId, steps[0]?.id ?? ""));
-      assert.deepEqual(outbox, [{ activityTaskQueue: "gmail-control" }]);
+      assert.deepEqual(outbox, [{ activityTaskLane: "control" }]);
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));
       await client.end();
@@ -256,7 +256,7 @@ test(
           status: workflowSteps.status,
           input: workflowSteps.input,
           idempotencyKey: workflowSteps.idempotencyKey,
-          activityTaskQueue: temporalCommands.activityTaskQueue,
+          activityTaskLane: temporalCommands.activityTaskLane,
         })
         .from(workflowSteps)
         .innerJoin(
@@ -288,7 +288,7 @@ test(
         repairRecovery?.idempotencyKey,
         `gmail-repair-recovery:${accountId}:${runId}`,
       );
-      assert.equal(repairRecovery?.activityTaskQueue, "gmail-control");
+      assert.equal(repairRecovery?.activityTaskLane, "control");
       assert.deepEqual(
         await markWorkflowStepRunning(remainingStepId, 1, database),
         { shouldExecute: false, result: { status: "inactive" } },

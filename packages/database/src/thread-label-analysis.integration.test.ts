@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { v4 as uuidv4 } from "uuid";
@@ -13,6 +13,7 @@ import {
   claimThreadLabelBatchSubmission,
   completeThreadLabelAnalysis,
   enqueueLiveInboxThreadLabelAnalyses,
+  enqueueRecentInboxThreadLabelFastLane,
   enqueueThreadLabelBatchSubmission,
   finalizeThreadLabelBatchSubmission,
   getThreadLabelBatchSubmissionForStep,
@@ -22,7 +23,11 @@ import {
 import {
   listMailboxThreads,
 } from "./mailbox-resources";
-import { enqueueBatchEvent, replaceGmailMessageLabels } from "./repositories";
+import {
+  enqueueBatchEvent,
+  replaceGmailMessageLabels,
+  upsertMailboxMessage,
+} from "./repositories";
 import {
   connectedAccounts,
   gmailReplicaStates,
@@ -128,7 +133,7 @@ test(
         .select({
           id: workflowSteps.id,
           input: workflowSteps.input,
-          activityTaskQueue: temporalCommands.activityTaskQueue,
+          activityTaskLane: temporalCommands.activityTaskLane,
         })
         .from(workflowSteps)
         .innerJoin(
@@ -142,7 +147,7 @@ test(
           ),
         )
         .limit(1);
-      assert.equal(step?.activityTaskQueue, "mail-label-live");
+      assert.equal(step?.activityTaskLane, "live");
       assert.equal(step?.input.threadId, threadId);
       assert.equal(step?.input.analysisVersion, 1);
       assert.equal(step?.input.lane, "live");
@@ -191,6 +196,147 @@ test(
           .from(threadLabelAssignments)
           .where(eq(threadLabelAssignments.threadId, threadId)),
         [{ labelId: important.id, source: "ai" }],
+      );
+
+      const activeRunId = uuidv4();
+      const nextProviderMessageId = `provider-next-${messageId}`;
+      const nextSentAt = new Date("2026-08-20T10:00:00.000Z");
+      await database.insert(mailSyncRuns).values({
+        id: activeRunId,
+        userId,
+        accountId,
+        status: "running",
+        discoveryComplete: false,
+        startingHistoryCursor: "100",
+        idempotencyKey: `live-thread-label-sync:${activeRunId}`,
+      });
+      await upsertMailboxMessage(
+        {
+          userId,
+          accountId,
+          providerThreadId: `provider-thread-${threadId}`,
+          providerMessageId: nextProviderMessageId,
+          subject: "Invoice available",
+          snippet: "Your invoice is ready",
+          participants: ["billing@example.test", "owner@example.test"],
+          gmailLabels: [{ providerLabelId: "INBOX", name: "Inbox" }],
+          providerHistoryId: "101",
+          internalDate: nextSentAt,
+          sizeEstimate: 128,
+          headerLines: [],
+          sentAt: nextSentAt,
+          direction: "incoming",
+          sender: {
+            raw: "Billing <billing@example.test>",
+            email: "billing@example.test",
+          },
+          recipients: ["owner@example.test"],
+          bodyText: "Your invoice is ready for payment.",
+          bodyHtml: null,
+          rawObject: null,
+          isMemoryEligible: false,
+          ingestionMode: "initial",
+          memoryContactEmails: ["billing@example.test"],
+          attachments: [],
+        },
+        database,
+        activeRunId,
+      );
+      assert.deepEqual(
+        await database
+          .select({
+            state: threads.labelAnalysisState,
+            version: threads.labelAnalysisVersion,
+            labelId: threadLabelAssignments.labelId,
+            assignmentVersion: threadLabelAssignments.assignmentVersion,
+          })
+          .from(threads)
+          .innerJoin(
+            threadLabelAssignments,
+            eq(threadLabelAssignments.threadId, threads.id),
+          )
+          .where(eq(threads.id, threadId))
+          .then((rows) => rows[0]),
+        {
+          state: "pending",
+          version: 2,
+          labelId: important.id,
+          assignmentVersion: 1,
+        },
+      );
+      await database.insert(gmailSyncItems).values({
+        runId: activeRunId,
+        providerMessageId: nextProviderMessageId,
+        providerThreadId: `provider-thread-${threadId}`,
+        status: "complete",
+        completedAt: nextSentAt,
+      });
+      assert.equal(
+        await enqueueRecentInboxThreadLabelFastLane(
+          {
+            userId,
+            accountId,
+            runId: activeRunId,
+            threadIds: [threadId],
+          },
+          database,
+        ),
+        1,
+      );
+      const [replacementStep] = await database
+        .select({ input: workflowSteps.input })
+        .from(workflowSteps)
+        .where(
+          and(
+            eq(workflowSteps.accountId, accountId),
+            eq(workflowSteps.stepType, "label.thread.assign"),
+            sql`${workflowSteps.input}->>'analysisVersion' = '2'`,
+          ),
+        )
+        .limit(1);
+      assert.ok(replacementStep);
+      assert.equal(replacementStep.input.lane, "recent");
+      const replacementCheckpoint = {
+        threadId,
+        analysisVersion: 2,
+        definitionHash: String(replacementStep.input.definitionHash),
+      };
+      const replacement = await beginThreadLabelAnalysis(
+        { userId, accountId, checkpoint: replacementCheckpoint },
+        database,
+      );
+      assert.equal(replacement.status, "ready");
+      if (replacement.status !== "ready") return;
+      const billing = replacement.definitions.find(
+        (definition) => definition.name === "Billing",
+      );
+      assert.ok(billing);
+      assert.equal(
+        (
+          await completeThreadLabelAnalysis(
+            {
+              userId,
+              accountId,
+              checkpoint: replacementCheckpoint,
+              modelId: "test-live-model",
+              labelId: billing.id,
+              confidence: 97,
+            },
+            database,
+          )
+        ).status,
+        "complete",
+      );
+      assert.deepEqual(
+        await database
+          .select({
+            labelId: threadLabelAssignments.labelId,
+            source: threadLabelAssignments.source,
+            assignmentVersion: threadLabelAssignments.assignmentVersion,
+          })
+          .from(threadLabelAssignments)
+          .where(eq(threadLabelAssignments.threadId, threadId)),
+        [{ labelId: billing.id, source: "ai", assignmentVersion: 2 }],
       );
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));

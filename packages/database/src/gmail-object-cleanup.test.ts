@@ -117,7 +117,7 @@ test(
         .select()
         .from(temporalCommands)
         .where(eq(temporalCommands.workflowStepId, step.id));
-      assert.equal(outbox?.activityTaskQueue, "gmail-control");
+      assert.equal(outbox?.activityTaskLane, "bulk");
 
       await database
         .update(connectedAccounts)

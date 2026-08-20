@@ -5,18 +5,25 @@ import {
   WorkflowExecutionAlreadyStartedError,
 } from "@temporalio/client";
 import { WorkflowIdReusePolicy } from "@temporalio/common";
-import { NativeConnection, Worker } from "@temporalio/worker";
+import {
+  bundleWorkflowCode,
+  NativeConnection,
+  Worker,
+  type WorkflowBundleWithSourceMap,
+} from "@temporalio/worker";
+import { parse as parseUuid, validate as validateUuid } from "uuid";
 
 import type { TemporalCommandJob } from "@invook/database";
 import {
-  workflowActivityTaskQueues,
+  tenantTaskQueueLanes,
   workflowStepWorkflow,
-  type WorkflowActivityTaskQueue,
+  type TenantTaskQueueLane,
   type WorkflowStepActivities,
   type WorkflowStepExecution,
 } from "@invook/workflows";
 
 const gmailControlConcurrency = 5;
+const tenantWorkflowConcurrency = 4;
 export const gmailMessageConcurrency = parsePositiveInteger(
   process.env.GMAIL_MESSAGE_CONCURRENCY,
   5,
@@ -33,11 +40,12 @@ export interface TemporalCloudConfiguration {
   namespace: string;
   apiKey: string;
   taskQueuePrefix: string;
+  tenantShardCount: number;
+  tenantShardIndex: number;
 }
 
 interface CreateTemporalRuntimeInput {
   activities: WorkflowStepActivities;
-  enabledActivityTaskQueues: ReadonlySet<WorkflowActivityTaskQueue>;
 }
 
 export function parsePositiveInteger(
@@ -49,6 +57,19 @@ export function parsePositiveInteger(
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1) {
     throw new Error(`${name} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+export function parseNonNegativeInteger(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer.`);
   }
   return parsed;
 }
@@ -74,6 +95,21 @@ export function getTemporalCloudConfiguration(
       "TEMPORAL_TASK_QUEUE_PREFIX must contain lowercase letters, digits, and hyphens.",
     );
   }
+  const tenantShardCount = parsePositiveInteger(
+    environment.TEMPORAL_TENANT_SHARD_COUNT,
+    1,
+    "TEMPORAL_TENANT_SHARD_COUNT",
+  );
+  const tenantShardIndex = parseNonNegativeInteger(
+    environment.TEMPORAL_TENANT_SHARD_INDEX,
+    0,
+    "TEMPORAL_TENANT_SHARD_INDEX",
+  );
+  if (tenantShardIndex >= tenantShardCount) {
+    throw new Error(
+      "TEMPORAL_TENANT_SHARD_INDEX must be lower than TEMPORAL_TENANT_SHARD_COUNT.",
+    );
+  }
   return {
     address: requiredEnvironmentValue(
       environment.TEMPORAL_ADDRESS,
@@ -88,14 +124,43 @@ export function getTemporalCloudConfiguration(
       "TEMPORAL_API_KEY",
     ),
     taskQueuePrefix,
+    tenantShardCount,
+    tenantShardIndex,
   };
 }
 
-function activityTaskQueueName(
-  configuration: TemporalCloudConfiguration,
-  activityTaskQueue: WorkflowActivityTaskQueue,
+export function tenantTaskQueueName(
+  configuration: Pick<TemporalCloudConfiguration, "taskQueuePrefix">,
+  userId: string,
+  lane: TenantTaskQueueLane,
 ): string {
-  return `${configuration.taskQueuePrefix}-${activityTaskQueue}`;
+  if (!validateUuid(userId)) {
+    throw new Error("Temporal tenant routing requires a valid user ID.");
+  }
+  const taskQueue = `${configuration.taskQueuePrefix}-tenant-${userId.toLowerCase()}-${lane}`;
+  if (taskQueue.length > 255) {
+    throw new Error(
+      "The derived Temporal tenant task queue exceeds 255 characters.",
+    );
+  }
+  return taskQueue;
+}
+
+export function tenantShardForUserId(
+  userId: string,
+  shardCount: number,
+): number {
+  if (!validateUuid(userId)) {
+    throw new Error("Temporal tenant sharding requires a valid user ID.");
+  }
+  if (!Number.isInteger(shardCount) || shardCount < 1) {
+    throw new Error("Temporal tenant shard count must be a positive integer.");
+  }
+  let hash = 2_166_136_261;
+  for (const byte of parseUuid(userId)) {
+    hash = Math.imul(hash ^ byte, 16_777_619) >>> 0;
+  }
+  return hash % shardCount;
 }
 
 export function getWorkflowStartDelay(
@@ -108,48 +173,78 @@ export function getWorkflowStartDelay(
   return runAt - now;
 }
 
-function activityConcurrency(
-  activityTaskQueue: WorkflowActivityTaskQueue,
-): number {
-  switch (activityTaskQueue) {
-    case "gmail-control":
+function tenantActivityConcurrency(lane: TenantTaskQueueLane): number {
+  switch (lane) {
+    case "control":
       return gmailControlConcurrency;
-    case "gmail-messages":
-      return gmailMessageConcurrency;
-    case "gmail-message-batches":
-      return 1;
-    case "mail-indexing-live":
-      return 5;
-    case "mail-label-live":
-      return mailLabelConcurrency;
-    case "mail-label-submit":
-      return 1;
-    case "mail-label-batch":
-      return 2;
-    case "mail-label-events":
-      return 2;
-    default:
+    case "live":
+      return Math.max(mailLabelConcurrency, 5);
+    case "bulk":
       return 1;
   }
 }
 
+function workflowStepExecution(
+  command: TemporalCommandJob,
+  activityTaskQueue: string,
+): WorkflowStepExecution {
+  return {
+    id: command.id,
+    userId: command.userId,
+    accountId: command.accountId,
+    runId: command.runId,
+    stepType: command.stepType,
+    payload: command.payload,
+    attempts: command.attempts,
+    maxAttempts: command.maxAttempts,
+    activityTaskQueue,
+  };
+}
+
+export function taskQueueRouteForCommand(
+  configuration: TemporalCloudConfiguration,
+  command: TemporalCommandJob,
+): { workflowTaskQueue: string; activityTaskQueue: string } {
+  return {
+    workflowTaskQueue: tenantTaskQueueName(
+      configuration,
+      command.userId,
+      "control",
+    ),
+    activityTaskQueue: tenantTaskQueueName(
+      configuration,
+      command.userId,
+      command.activityTaskLane,
+    ),
+  };
+}
+
 export class TemporalRuntime {
+  private readonly activities: WorkflowStepActivities;
   private readonly client: Client;
   private readonly configuration: TemporalCloudConfiguration;
   private readonly connection: NativeConnection;
-  private readonly workers: Worker[];
-  private workerRun: Promise<void> | null = null;
+  private readonly tenantWorkersByUserId = new Map<string, Promise<Worker[]>>();
+  private readonly workerRuns = new Map<Worker, Promise<void>>();
+  private readonly workflowBundle: WorkflowBundleWithSourceMap;
+  private isClosing = false;
+  private isRunning = false;
+  private lifecyclePromise: Promise<void> | null = null;
+  private resolveLifecycle: (() => void) | null = null;
+  private rejectLifecycle: ((error: Error) => void) | null = null;
 
   private constructor(input: {
+    activities: WorkflowStepActivities;
     client: Client;
     configuration: TemporalCloudConfiguration;
     connection: NativeConnection;
-    workers: Worker[];
+    workflowBundle: WorkflowBundleWithSourceMap;
   }) {
+    this.activities = input.activities;
     this.client = input.client;
     this.configuration = input.configuration;
     this.connection = input.connection;
-    this.workers = input.workers;
+    this.workflowBundle = input.workflowBundle;
   }
 
   static async create(
@@ -165,51 +260,115 @@ export class TemporalRuntime {
       connection,
       namespace: configuration.namespace,
     });
-    const workflowWorker = await Worker.create({
-      connection,
-      namespace: configuration.namespace,
-      taskQueue: `${configuration.taskQueuePrefix}-workflows`,
+    const workflowBundle = await bundleWorkflowCode({
       workflowsPath: fileURLToPath(
         new URL("./temporal-workflows.ts", import.meta.url),
       ),
     });
-    const activityWorkers = await Promise.all(
-      workflowActivityTaskQueues
-        .filter((taskQueue) => input.enabledActivityTaskQueues.has(taskQueue))
-        .map((taskQueue) =>
-          Worker.create({
-            activities: input.activities,
-            connection,
-            namespace: configuration.namespace,
-            taskQueue: activityTaskQueueName(configuration, taskQueue),
-            maxConcurrentActivityTaskExecutions:
-              activityConcurrency(taskQueue),
-          }),
-        ),
-    );
     return new TemporalRuntime({
+      activities: input.activities,
       client,
       configuration,
       connection,
-      workers: [workflowWorker, ...activityWorkers],
+      workflowBundle,
     });
   }
 
+  private ownsTenant(userId: string): boolean {
+    return (
+      tenantShardForUserId(userId, this.configuration.tenantShardCount) ===
+      this.configuration.tenantShardIndex
+    );
+  }
+
+  private async createTenantWorkers(userId: string): Promise<Worker[]> {
+    return Promise.all(
+      tenantTaskQueueLanes.map((lane) => {
+        const concurrency = tenantActivityConcurrency(lane);
+        return Worker.create({
+          activities: this.activities,
+          connection: this.connection,
+          namespace: this.configuration.namespace,
+          taskQueue: tenantTaskQueueName(this.configuration, userId, lane),
+          maxConcurrentActivityTaskExecutions: concurrency,
+          maxConcurrentActivityTaskPolls: Math.min(concurrency, 2),
+          ...(lane === "control"
+            ? {
+                workflowBundle: this.workflowBundle,
+                maxConcurrentWorkflowTaskExecutions: tenantWorkflowConcurrency,
+                maxConcurrentWorkflowTaskPolls: 2,
+              }
+            : {}),
+        });
+      }),
+    );
+  }
+
+  private startWorker(worker: Worker): void {
+    if (this.workerRuns.has(worker)) return;
+    const workerRun = worker.run().then(
+      () => {
+        if (!this.isClosing) {
+          this.rejectLifecycle?.(
+            new Error("A Temporal Worker stopped before shutdown was requested."),
+          );
+        }
+      },
+      (error: unknown) => {
+        if (!this.isClosing) {
+          this.rejectLifecycle?.(
+            error instanceof Error
+              ? error
+              : new Error("An unknown Temporal Worker error occurred."),
+          );
+        }
+      },
+    );
+    this.workerRuns.set(worker, workerRun);
+  }
+
+  private async ensureTenantWorker(userId: string): Promise<void> {
+    if (!this.ownsTenant(userId)) return;
+    let workersPromise = this.tenantWorkersByUserId.get(userId);
+    if (!workersPromise) {
+      workersPromise = this.createTenantWorkers(userId);
+      this.tenantWorkersByUserId.set(userId, workersPromise);
+    }
+    try {
+      const workers = await workersPromise;
+      if (this.isRunning) workers.forEach((worker) => this.startWorker(worker));
+    } catch (error) {
+      this.tenantWorkersByUserId.delete(userId);
+      throw error;
+    }
+  }
+
+  async ensureTenantWorkers(userIds: Iterable<string>): Promise<void> {
+    if (this.isClosing) {
+      throw new Error("Temporal tenant Workers cannot start during shutdown.");
+    }
+    await Promise.all(
+      [...new Set(userIds)].map((userId) => this.ensureTenantWorker(userId)),
+    );
+  }
+
   async dispatch(commands: TemporalCommandJob[]): Promise<void> {
+    await this.ensureTenantWorkers(commands.map((command) => command.userId));
     await Promise.all(
       commands.map(async (command) => {
-        const input: WorkflowStepExecution = {
-          ...command,
-          activityTaskQueue: activityTaskQueueName(
-            this.configuration,
-            command.activityTaskQueue,
-          ),
-        };
+        const taskQueueRoute = taskQueueRouteForCommand(
+          this.configuration,
+          command,
+        );
+        const input = workflowStepExecution(
+          command,
+          taskQueueRoute.activityTaskQueue,
+        );
         try {
           const startDelay = getWorkflowStartDelay(command.payload);
           await this.client.workflow.start(workflowStepWorkflow, {
             args: [input],
-            taskQueue: `${this.configuration.taskQueuePrefix}-workflows`,
+            taskQueue: taskQueueRoute.workflowTaskQueue,
             workflowId: `workflow-step:${command.id}`,
             workflowIdReusePolicy: WorkflowIdReusePolicy.REJECT_DUPLICATE,
             ...(startDelay === undefined ? {} : { startDelay }),
@@ -223,17 +382,42 @@ export class TemporalRuntime {
   }
 
   run(): Promise<void> {
-    if (!this.workerRun) {
-      this.workerRun = Promise.all(
-        this.workers.map((worker) => worker.run()),
-      ).then(() => undefined);
+    if (this.lifecyclePromise) return this.lifecyclePromise;
+    this.lifecyclePromise = new Promise<void>((resolve, reject) => {
+      this.resolveLifecycle = resolve;
+      this.rejectLifecycle = reject;
+    });
+    this.isRunning = true;
+    for (const workersPromise of this.tenantWorkersByUserId.values()) {
+      void workersPromise
+        .then((workers) => {
+          if (!this.isClosing) {
+            workers.forEach((worker) => this.startWorker(worker));
+          }
+        })
+        .catch((error: unknown) => {
+          this.rejectLifecycle?.(
+            error instanceof Error
+              ? error
+              : new Error("An unknown Temporal tenant Worker error occurred."),
+          );
+        });
     }
-    return this.workerRun;
+    return this.lifecyclePromise;
   }
 
   async close(): Promise<void> {
-    await Promise.all(this.workers.map((worker) => worker.shutdown()));
-    if (this.workerRun) await this.workerRun;
+    if (this.isClosing) return;
+    this.isClosing = true;
+    const tenantWorkerResults = await Promise.allSettled(
+      this.tenantWorkersByUserId.values(),
+    );
+    const tenantWorkers = tenantWorkerResults.flatMap((result) =>
+      result.status === "fulfilled" ? result.value : [],
+    );
+    await Promise.all(tenantWorkers.map((worker) => worker.shutdown()));
+    await Promise.all(this.workerRuns.values());
     await this.connection.close();
+    this.resolveLifecycle?.();
   }
 }

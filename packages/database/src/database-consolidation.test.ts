@@ -33,6 +33,10 @@ const threadLabelBatchMigrationUrl = new URL(
   "../drizzle/0032_brave_kree.sql",
   import.meta.url,
 );
+const tenantTemporalRoutingMigrationUrl = new URL(
+  "../drizzle/0033_shallow_apocalypse.sql",
+  import.meta.url,
+);
 const schemaUrl = new URL("./schema.ts", import.meta.url);
 const migrationsUrl = new URL("../drizzle/", import.meta.url);
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -214,6 +218,27 @@ test("the thread-label Batch migration supersedes per-thread assignments safely"
   assert.match(migration, /superseded_by_batch/);
   assert.match(migration, /"label_analysis_state" = 'pending'/);
   assert.match(migration, /'mail-label-events'/);
+});
+
+test("the tenant Temporal migration replaces legacy queues with required lanes", async () => {
+  const migration = await readFile(tenantTemporalRoutingMigrationUrl, "utf8");
+
+  assertBefore(
+    migration,
+    'ADD COLUMN "activity_task_lane" text',
+    'ALTER COLUMN "activity_task_lane" SET NOT NULL',
+  );
+  assertBefore(
+    migration,
+    'ALTER COLUMN "activity_task_lane" SET NOT NULL',
+    'DROP COLUMN "activity_task_queue"',
+  );
+  assert.match(migration, /UPDATE "temporal_commands" command[\s\S]+FROM "workflow_steps" step/);
+  assert.match(migration, /'gmail\.history\.catchup'[\s\S]+THEN 'control'/);
+  assert.match(migration, /'gmail\.sync\.page'[\s\S]+THEN 'bulk'/);
+  assert.match(migration, /activity_task_lane_check[\s\S]+\('control', 'live', 'bulk'\)/);
+  assert.doesNotMatch(migration, /routing_version/);
+  assert.match(migration, /CREATE INDEX "workflow_steps_user_status_idx"/);
 });
 
 async function applyMigrationFile(
