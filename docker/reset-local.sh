@@ -151,7 +151,6 @@ UNION ALL SELECT 'connected_accounts=' || count(*) FROM connected_accounts
 UNION ALL SELECT 'messages=' || count(*) FROM messages
 UNION ALL SELECT 'message_embeddings=' || count(*) FROM message_embeddings
 UNION ALL SELECT 'drafts=' || count(*) FROM drafts
-UNION ALL SELECT 'gmail_drafts=' || count(*) FROM gmail_drafts
 UNION ALL SELECT 'memory_entries=' || count(*) FROM memory_entries
 UNION ALL SELECT 'workflow_steps=' || count(*) FROM workflow_steps
 UNION ALL SELECT 'temporal_commands=' || count(*) FROM temporal_commands;

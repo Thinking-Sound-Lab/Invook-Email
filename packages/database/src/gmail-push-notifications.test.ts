@@ -359,9 +359,19 @@ test(
         {
           userId,
           accountId,
-          stepType: "label.thread.assign",
+          stepType: "label.thread.scan",
           payload: {},
           idempotencyKey: `bulk-label:${accountId}`,
+        },
+        database,
+      );
+      await enqueueWorkflowStep(
+        {
+          userId,
+          accountId,
+          stepType: "label.batch.event",
+          payload: {},
+          idempotencyKey: `label-event:${accountId}`,
         },
         database,
       );
@@ -374,7 +384,7 @@ test(
           {
             userId,
             accountId,
-            stepType: "label.thread.assign",
+            stepType: "label.thread.scan",
             payload: {},
             idempotencyKey: `bulk-label:${accountId}:${index}`,
           },
@@ -388,6 +398,7 @@ test(
       assert.equal(await enqueuePendingGmailHistoryCatchups(database), 1);
 
       let dispatchedJobs: Array<{
+        accountId: string | null;
         stepType: string;
         activityTaskQueue: string;
         payload: Record<string, unknown>;
@@ -402,18 +413,34 @@ test(
         dispatchedJobs.length,
         TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE,
       );
-      assert.equal(dispatchedJobs[0]?.stepType, "gmail.history.catchup");
-      const firstLabelIndex = dispatchedJobs.findIndex(
+      const accountJobs = dispatchedJobs.filter(
+        (job) => job.accountId === accountId,
+      );
+      const firstLabelIndex = accountJobs.findIndex(
         (job) => job.activityTaskQueue === "mail-label-submit",
       );
-      assert.ok(firstLabelIndex > 0);
+      assert.ok(firstLabelIndex >= 2);
       assert.ok(
-        dispatchedJobs
+        accountJobs
           .slice(0, firstLabelIndex)
-          .every((job) => job.stepType === "gmail.history.catchup"),
+          .some((job) => job.stepType === "gmail.history.catchup"),
       );
       assert.ok(
-        dispatchedJobs.slice(firstLabelIndex).every(
+        accountJobs
+          .slice(0, firstLabelIndex)
+          .some((job) => job.stepType === "label.batch.event"),
+      );
+      assert.ok(
+        accountJobs
+          .slice(0, firstLabelIndex)
+          .every((job) =>
+            ["gmail.history.catchup", "label.batch.event"].includes(
+              job.stepType,
+            ),
+          ),
+      );
+      assert.ok(
+        accountJobs.slice(firstLabelIndex).every(
           (job) => job.activityTaskQueue === "mail-label-submit",
         ),
       );

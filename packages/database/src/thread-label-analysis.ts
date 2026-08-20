@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import {
   and,
   asc,
+  count,
   desc,
   eq,
+  gt,
   inArray,
   isNull,
   sql,
@@ -18,13 +20,18 @@ import {
 } from "./client";
 import {
   connectedAccounts,
+  gmailSyncItems,
   labels,
+  mailSyncRuns,
   messageLabels,
   messages,
+  threadLabelBatchSubmissions,
   threadLabelAssignments,
   threads,
+  workflowSteps,
 } from "./schema";
 import { insertMailboxChange } from "./mailbox-change-events";
+import { toPostgresTextProjection } from "./text";
 import {
   enqueueWorkflowStepsWithExecutor,
   enqueueWorkflowStepWithExecutor,
@@ -60,7 +67,9 @@ export type InboxThreadMessage = {
   sentAt: Date;
 };
 
-export const BUILT_IN_INVOOK_LABELS = [
+export const INITIAL_THREAD_LABEL_FAST_LANE_LIMIT = 200;
+
+const BUILT_IN_INVOOK_LABELS = [
   {
     name: "Important",
     normalizedName: "important",
@@ -265,40 +274,41 @@ export async function refreshThreadProjection(
   return true;
 }
 
-export async function enqueueThreadLabelAnalysisWithExecutor(
+type ThreadLabelFastLane = "live" | "recent";
+
+function checkpointMatches(
+  thread: { id: string; labelAnalysisVersion: number },
+  checkpoint: ThreadLabelAnalysisCheckpoint,
+): boolean {
+  return (
+    thread.id === checkpoint.threadId &&
+    thread.labelAnalysisVersion === checkpoint.analysisVersion
+  );
+}
+
+async function enqueueThreadLabelAnalysisWithExecutor(
   input: {
     userId: string;
     accountId: string;
     threadId: string;
     analysisVersion: number;
+    lane: ThreadLabelFastLane;
+    runId?: string;
   },
   database: DatabaseExecutor,
-): Promise<{ stepId: string; definitionHash: string }> {
+): Promise<{ stepId: string; definitionHash: string } | null> {
   await ensureBuiltInInvookLabels(
     { userId: input.userId, accountId: input.accountId },
     database,
   );
   const snapshot = await getDefinitionSnapshot(input.accountId, database);
-  const stepId = await enqueueWorkflowStepWithExecutor(
-    {
-      userId: input.userId,
-      accountId: input.accountId,
-      stepType: "label.thread.assign",
-      payload: {
-        threadId: input.threadId,
-        analysisVersion: input.analysisVersion,
-        definitionHash: snapshot.definitionHash,
-      },
-      idempotencyKey: `label.thread.assign:${input.threadId}:${input.analysisVersion}:${snapshot.definitionHash}`,
-    },
-    database,
-  );
-  await database
+  const [reserved] = await database
     .update(threads)
     .set({
-      labelAnalysisState: "pending",
+      labelAnalysisState: "running",
       labelAnalysisDefinitionHash: snapshot.definitionHash,
       labelAnalysisError: null,
+      labelAnalyzedAt: null,
       updatedAt: new Date(),
     })
     .where(
@@ -307,19 +317,43 @@ export async function enqueueThreadLabelAnalysisWithExecutor(
         eq(threads.userId, input.userId),
         eq(threads.accountId, input.accountId),
         eq(threads.labelAnalysisVersion, input.analysisVersion),
+        eq(threads.labelAnalysisState, "pending"),
+        inboxThreadConditionForBatch(),
+        sql<boolean>`not exists (
+          select 1 from ${threadLabelAssignments}
+          where ${threadLabelAssignments.threadId} = ${threads.id}
+        )`,
       ),
-    );
+    )
+    .returning({ id: threads.id });
+  if (!reserved) return null;
+  const stepId = await enqueueWorkflowStepWithExecutor(
+    {
+      runId: input.runId,
+      userId: input.userId,
+      accountId: input.accountId,
+      stepType: "label.thread.assign",
+      payload: {
+        threadId: input.threadId,
+        analysisVersion: input.analysisVersion,
+        definitionHash: snapshot.definitionHash,
+        lane: input.lane,
+      },
+      idempotencyKey: `label.thread.assign:${input.threadId}:${input.analysisVersion}:${snapshot.definitionHash}`,
+    },
+    database,
+  );
   return { stepId, definitionHash: snapshot.definitionHash };
 }
 
-export async function enqueueUnassignedInboxThreadAnalyses(
-  input: { userId?: string; accountId?: string } = {},
-  database: Database = getDatabase(),
+export async function enqueueLiveInboxThreadLabelAnalyses(
+  input: { userId: string; accountId: string; threadIds: string[] },
+  database: DatabaseExecutor,
 ): Promise<number> {
+  const threadIds = Array.from(new Set(input.threadIds));
+  if (threadIds.length === 0) return 0;
   const candidates = await database
     .select({
-      userId: threads.userId,
-      accountId: threads.accountId,
       threadId: threads.id,
       analysisVersion: threads.labelAnalysisVersion,
     })
@@ -330,47 +364,157 @@ export async function enqueueUnassignedInboxThreadAnalyses(
     )
     .where(
       and(
+        eq(threads.userId, input.userId),
+        eq(threads.accountId, input.accountId),
+        inArray(threads.id, threadIds),
+        eq(threads.labelAnalysisState, "pending"),
         isNull(threadLabelAssignments.id),
-        input.userId ? eq(threads.userId, input.userId) : undefined,
-        input.accountId ? eq(threads.accountId, input.accountId) : undefined,
-        sql<boolean>`exists (
-          select 1 from ${messages} eligible_message
-          where eligible_message.thread_id = ${threads.id}
-            and exists (
-              select 1 from ${messageLabels} eligible_membership
-              inner join ${labels} eligible_label
-                on eligible_label.id = eligible_membership.label_id
-              where eligible_membership.message_id = eligible_message.id
-                and eligible_label.kind = 'gmail'
-                and eligible_label.provider_label_id = 'INBOX'
-            )
-            and not exists (
-              select 1 from ${messageLabels} excluded_membership
-              inner join ${labels} excluded_label
-                on excluded_label.id = excluded_membership.label_id
-              where excluded_membership.message_id = eligible_message.id
-                and excluded_label.kind = 'gmail'
-                and excluded_label.provider_label_id in ('SPAM', 'TRASH')
-            )
-        )`,
+        inboxThreadConditionForBatch(),
       ),
-    );
-  let insertedCount = 0;
+    )
+    .orderBy(desc(threads.latestMessageAt), desc(threads.id));
+  let enqueuedCount = 0;
   for (const candidate of candidates) {
-    await enqueueThreadLabelAnalysisWithExecutor(candidate, database);
-    insertedCount += 1;
+    const enqueued = await enqueueThreadLabelAnalysisWithExecutor(
+      {
+        userId: input.userId,
+        accountId: input.accountId,
+        threadId: candidate.threadId,
+        analysisVersion: candidate.analysisVersion,
+        lane: "live",
+      },
+      database,
+    );
+    if (enqueued) enqueuedCount += 1;
   }
-  return insertedCount;
+  return enqueuedCount;
 }
 
-function checkpointMatches(
-  thread: { id: string; labelAnalysisVersion: number },
-  checkpoint: ThreadLabelAnalysisCheckpoint,
-): boolean {
-  return (
-    thread.id === checkpoint.threadId &&
-    thread.labelAnalysisVersion === checkpoint.analysisVersion
-  );
+export async function enqueueRecentInboxThreadLabelFastLane(
+  input: {
+    userId: string;
+    accountId: string;
+    runId?: string;
+    threadIds?: string[];
+  },
+  database: Database = getDatabase(),
+): Promise<number> {
+  const requestedThreadIds = input.threadIds
+    ? Array.from(new Set(input.threadIds))
+    : null;
+  if (requestedThreadIds?.length === 0) return 0;
+  return database.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`thread-label-fast:${input.accountId}:${input.runId ?? "bootstrap"}`}, 43))`,
+    );
+    if (input.runId) {
+      const [activeRun] = await transaction
+        .select({ id: mailSyncRuns.id })
+        .from(mailSyncRuns)
+        .where(
+          and(
+            eq(mailSyncRuns.id, input.runId),
+            eq(mailSyncRuns.accountId, input.accountId),
+            inArray(mailSyncRuns.status, ["queued", "running"]),
+            eq(mailSyncRuns.discoveryComplete, true),
+          ),
+        )
+        .limit(1);
+      if (!activeRun) return 0;
+    }
+    const [alreadyAdmitted] = await transaction
+      .select({ value: count(workflowSteps.id) })
+      .from(workflowSteps)
+      .where(
+        and(
+          eq(workflowSteps.accountId, input.accountId),
+          eq(workflowSteps.stepType, "label.thread.assign"),
+          sql`${workflowSteps.input}->>'lane' = 'recent'`,
+          input.runId ? eq(workflowSteps.runId, input.runId) : undefined,
+        ),
+      );
+    const remaining = Math.max(
+      0,
+      INITIAL_THREAD_LABEL_FAST_LANE_LIMIT - (alreadyAdmitted?.value ?? 0),
+    );
+    if (remaining === 0) return 0;
+    const candidates = await transaction
+      .select({
+        threadId: threads.id,
+        analysisVersion: threads.labelAnalysisVersion,
+      })
+      .from(threads)
+      .leftJoin(
+        threadLabelAssignments,
+        eq(threadLabelAssignments.threadId, threads.id),
+      )
+      .where(
+        and(
+          eq(threads.userId, input.userId),
+          eq(threads.accountId, input.accountId),
+          requestedThreadIds ? inArray(threads.id, requestedThreadIds) : undefined,
+          eq(threads.labelAnalysisState, "pending"),
+          isNull(threadLabelAssignments.id),
+          inboxThreadConditionForBatch(),
+          input.runId
+            ? sql<boolean>`not exists (
+                select 1
+                from ${gmailSyncItems} pending_thread_item
+                where pending_thread_item.run_id = ${input.runId}
+                  and pending_thread_item.provider_thread_id = ${threads.providerThreadId}
+                  and pending_thread_item.status <> 'complete'
+              )`
+            : undefined,
+        ),
+      )
+      .orderBy(desc(threads.latestMessageAt), desc(threads.id))
+      .limit(remaining)
+      .for("update", { of: threads, skipLocked: true });
+    let enqueuedCount = 0;
+    for (const candidate of candidates) {
+      const enqueued = await enqueueThreadLabelAnalysisWithExecutor(
+        {
+          userId: input.userId,
+          accountId: input.accountId,
+          threadId: candidate.threadId,
+          analysisVersion: candidate.analysisVersion,
+          lane: "recent",
+          runId: input.runId,
+        },
+        transaction,
+      );
+      if (enqueued) enqueuedCount += 1;
+    }
+    return enqueuedCount;
+  });
+}
+
+export async function enqueueStartupThreadLabelFastLanes(
+  database: Database = getDatabase(),
+): Promise<number> {
+  const accounts = await database
+    .select({ userId: connectedAccounts.userId, accountId: connectedAccounts.id })
+    .from(connectedAccounts)
+    .where(eq(connectedAccounts.status, "connected"));
+  let enqueuedCount = 0;
+  for (const account of accounts) {
+    const [activeRun] = await database
+      .select({ id: mailSyncRuns.id })
+      .from(mailSyncRuns)
+      .where(
+        and(
+          eq(mailSyncRuns.accountId, account.accountId),
+          inArray(mailSyncRuns.status, ["queued", "running"]),
+          eq(mailSyncRuns.discoveryComplete, true),
+        ),
+      )
+      .limit(1);
+    enqueuedCount += await enqueueRecentInboxThreadLabelFastLane(
+      { ...account, runId: activeRun?.id },
+      database,
+    );
+  }
+  return enqueuedCount;
 }
 
 export async function beginThreadLabelAnalysis(
@@ -421,12 +565,17 @@ export async function beginThreadLabelAnalysis(
     }
     const snapshot = await getDefinitionSnapshot(input.accountId, transaction);
     if (snapshot.definitionHash !== input.checkpoint.definitionHash) {
+      await transaction
+        .update(threads)
+        .set({ labelAnalysisState: "pending", updatedAt: new Date() })
+        .where(eq(threads.id, thread.id));
       await enqueueThreadLabelAnalysisWithExecutor(
         {
           userId: input.userId,
           accountId: input.accountId,
           threadId: thread.id,
           analysisVersion: thread.labelAnalysisVersion,
+          lane: "live",
         },
         transaction,
       );
@@ -434,15 +583,6 @@ export async function beginThreadLabelAnalysis(
     }
     const inboxMessages = await listInboxThreadMessages(thread.id, transaction);
     if (inboxMessages.length === 0) return { status: "ineligible" };
-
-    await transaction
-      .update(threads)
-      .set({
-        labelAnalysisState: "running",
-        labelAnalysisError: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(threads.id, thread.id));
     return {
       status: "ready",
       thread: { id: thread.id, subject: thread.subject, messages: inboxMessages },
@@ -492,15 +632,19 @@ export async function completeThreadLabelAnalysis(
       return { status: "superseded" };
     }
     if (thread.assignmentId) return { status: "current" };
-
     const snapshot = await getDefinitionSnapshot(input.accountId, transaction);
     if (snapshot.definitionHash !== input.checkpoint.definitionHash) {
+      await transaction
+        .update(threads)
+        .set({ labelAnalysisState: "pending", updatedAt: new Date() })
+        .where(eq(threads.id, thread.id));
       await enqueueThreadLabelAnalysisWithExecutor(
         {
           userId: input.userId,
           accountId: input.accountId,
           threadId: thread.id,
           analysisVersion: thread.labelAnalysisVersion,
+          lane: "live",
         },
         transaction,
       );
@@ -519,17 +663,21 @@ export async function completeThreadLabelAnalysis(
     }
     const inboxMessages = await listInboxThreadMessages(thread.id, transaction);
     if (inboxMessages.length === 0) return { status: "superseded" };
-
-    await transaction.insert(threadLabelAssignments).values({
-      userId: input.userId,
-      accountId: input.accountId,
-      threadId: thread.id,
-      labelId: selectedDefinition.id,
-      source: "ai",
-      confidence: input.confidence.toFixed(2),
-      modelId: input.modelId,
-      definitionVersion: selectedDefinition.definitionVersion,
-    });
+    const [assignment] = await transaction
+      .insert(threadLabelAssignments)
+      .values({
+        userId: input.userId,
+        accountId: input.accountId,
+        threadId: thread.id,
+        labelId: selectedDefinition.id,
+        source: "ai",
+        confidence: input.confidence.toFixed(2),
+        modelId: input.modelId,
+        definitionVersion: selectedDefinition.definitionVersion,
+      })
+      .onConflictDoNothing({ target: threadLabelAssignments.threadId })
+      .returning({ threadId: threadLabelAssignments.threadId });
+    if (!assignment) return { status: "current" };
     await transaction
       .update(threads)
       .set({
@@ -541,14 +689,14 @@ export async function completeThreadLabelAnalysis(
       })
       .where(eq(threads.id, thread.id));
     const eventId = await insertMailboxChange(transaction, {
-        userId: input.userId,
-        accountId: input.accountId,
-        changeType: "labels_changed",
-        payload: {
-          kind: "analysis_resolution",
-          affectedThreadIds: [thread.id],
-        },
-      });
+      userId: input.userId,
+      accountId: input.accountId,
+      changeType: "labels_changed",
+      payload: {
+        kind: "analysis_resolution",
+        affectedThreadIds: [thread.id],
+      },
+    });
     return { status: "complete", eventId };
   });
 }
@@ -562,30 +710,42 @@ export async function failThreadLabelAnalysis(
   },
   database: Database = getDatabase(),
 ): Promise<boolean> {
-  const updated = await database
-    .update(threads)
-    .set({
-      labelAnalysisState: "failed",
-      labelAnalysisError: input.errorCode,
-      labelAnalyzedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(threads.id, input.checkpoint.threadId),
-        eq(threads.userId, input.userId),
-        eq(threads.accountId, input.accountId),
-        eq(threads.labelAnalysisVersion, input.checkpoint.analysisVersion),
-        eq(threads.labelAnalysisDefinitionHash, input.checkpoint.definitionHash),
-        inArray(threads.labelAnalysisState, ["pending", "running"]),
-        sql<boolean>`not exists (
-          select 1 from ${threadLabelAssignments}
-          where ${threadLabelAssignments.threadId} = ${threads.id}
-        )`,
-      ),
-    )
-    .returning({ id: threads.id });
-  return updated.length > 0;
+  return database.transaction(async (transaction) => {
+    const [updated] = await transaction
+      .update(threads)
+      .set({
+        labelAnalysisState: "pending",
+        labelAnalysisError: input.errorCode,
+        labelAnalyzedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(threads.id, input.checkpoint.threadId),
+          eq(threads.userId, input.userId),
+          eq(threads.accountId, input.accountId),
+          eq(threads.labelAnalysisVersion, input.checkpoint.analysisVersion),
+          eq(threads.labelAnalysisDefinitionHash, input.checkpoint.definitionHash),
+          eq(threads.labelAnalysisState, "running"),
+          sql<boolean>`not exists (
+            select 1 from ${threadLabelAssignments}
+            where ${threadLabelAssignments.threadId} = ${threads.id}
+          )`,
+        ),
+      )
+      .returning({ id: threads.id });
+    if (!updated) return false;
+    await enqueueThreadLabelBatchSubmission(
+      {
+        userId: input.userId,
+        accountId: input.accountId,
+        sourceKey: `live-fallback:${input.checkpoint.threadId}:${input.checkpoint.analysisVersion}:${input.checkpoint.definitionHash}`,
+        flushRemainder: true,
+      },
+      transaction,
+    );
+    return true;
+  });
 }
 
 export async function listInvookLabelPreviewCandidates(
@@ -963,16 +1123,947 @@ export async function setUserThreadLabel(
   });
 }
 
-export async function getThreadLabelAnalysisCounts(
+const THREAD_LABEL_BATCH_LIMIT = 2_000;
+const THREAD_LABEL_CANDIDATE_PAGE_SIZE = 500;
+const THREAD_LABEL_BATCH_RETRY_LIMIT = 6;
+const THREAD_LABEL_CAPACITY_RETRY_DELAY_MS = 5 * 60 * 1_000;
+const THREAD_LABEL_CAPACITY_ERROR_CODE = "openai_batch_capacity_exhausted";
+
+export type ThreadLabelBatchManifestEntry = {
+  threadId: string;
+  analysisVersion: number;
+  definitionHash: string;
+  fallbackLabelId: string;
+};
+
+export type ThreadLabelBatchCandidate = ThreadLabelBatchManifestEntry & {
+  thread: {
+    subject: string;
+    messages: Array<{
+      subject: string;
+      sender: string;
+      recipients: string[];
+      bodyText: string;
+      sentAt: string;
+    }>;
+  };
+  definitions: ThreadLabelDefinition[];
+};
+
+export async function enqueueThreadLabelBatchSubmission(
+  input: {
+    userId: string;
+    accountId: string;
+    sourceKey: string;
+    flushRemainder: boolean;
+    retryAttempt?: number;
+    threadIds?: string[];
+    runAt?: Date;
+  },
+  database: DatabaseExecutor = getDatabase(),
+): Promise<string> {
+  const threadIds = input.threadIds
+    ? Array.from(new Set(input.threadIds))
+    : undefined;
+  if (threadIds && (threadIds.length === 0 || threadIds.length > 2_000)) {
+    throw new Error("A thread-label Batch retry must contain 1 to 2,000 threads.");
+  }
+  return enqueueWorkflowStepWithExecutor(
+    {
+      userId: input.userId,
+      accountId: input.accountId,
+      stepType: "label.batch.submit",
+      payload: {
+        flushRemainder: input.flushRemainder,
+        ...(input.retryAttempt === undefined
+          ? {}
+          : { retryAttempt: input.retryAttempt }),
+        ...(threadIds ? { threadIds } : {}),
+        ...(input.runAt ? { runAt: input.runAt.toISOString() } : {}),
+      },
+      idempotencyKey: `label.batch.submit:${input.sourceKey}`,
+    },
+    database,
+  );
+}
+
+async function lockThreadLabelBatchAccount(
   accountId: string,
+  database: DatabaseExecutor,
+): Promise<void> {
+  await database.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${accountId}, 41))`,
+  );
+}
+
+async function listThreadLabelBatchCandidateRows(
+  input: {
+    userId: string;
+    accountId: string;
+    activeRunId: string | null;
+    candidateThreadIds?: string[];
+    flushRemainder: boolean;
+    limit: number;
+  },
+  database: DatabaseExecutor,
+): Promise<Array<{ threadId: string; subject: string; analysisVersion: number }>> {
+  const candidates: Array<{
+    threadId: string;
+    subject: string;
+    analysisVersion: number;
+  }> = [];
+  let afterThreadId: string | null = null;
+  while (candidates.length < input.limit) {
+    const pageLimit = Math.min(
+      THREAD_LABEL_CANDIDATE_PAGE_SIZE,
+      input.limit - candidates.length,
+    );
+    const page = await database
+      .select({
+        threadId: threads.id,
+        subject: threads.subject,
+        analysisVersion: threads.labelAnalysisVersion,
+      })
+      .from(threads)
+      .leftJoin(
+        threadLabelAssignments,
+        eq(threadLabelAssignments.threadId, threads.id),
+      )
+      .where(
+        and(
+          eq(threads.userId, input.userId),
+          eq(threads.accountId, input.accountId),
+          eq(threads.labelAnalysisState, "pending"),
+          isNull(threadLabelAssignments.id),
+          input.candidateThreadIds
+            ? inArray(threads.id, input.candidateThreadIds)
+            : undefined,
+          afterThreadId ? gt(threads.id, afterThreadId) : undefined,
+          inboxThreadConditionForBatch(),
+          input.activeRunId
+            ? sql<boolean>`exists (
+                select 1
+                from ${mailSyncRuns} label_run
+                where label_run.id = ${input.activeRunId}
+                  and label_run.account_id = ${input.accountId}
+                  and label_run.status in ('queued', 'running')
+                  and label_run.discovery_complete = true
+              ) and not exists (
+                select 1
+                from ${gmailSyncItems} unidentified_thread_item
+                where unidentified_thread_item.run_id = ${input.activeRunId}
+                  and unidentified_thread_item.provider_thread_id is null
+                  and unidentified_thread_item.status <> 'complete'
+              ) and not exists (
+                select 1
+                from ${gmailSyncItems} pending_thread_item
+                where pending_thread_item.run_id = ${input.activeRunId}
+                  and pending_thread_item.provider_thread_id = ${threads.providerThreadId}
+                  and pending_thread_item.status <> 'complete'
+              )`
+            : undefined,
+        ),
+      )
+      .orderBy(asc(threads.id))
+      .limit(pageLimit)
+      .for("update", { of: threads, skipLocked: true });
+    candidates.push(...page);
+    if (page.length < pageLimit) break;
+    afterThreadId = page.at(-1)?.threadId ?? null;
+    if (!afterThreadId) break;
+  }
+  return candidates;
+}
+
+function inboxThreadConditionForBatch() {
+  return sql<boolean>`exists (
+    select 1
+    from ${messages} batch_inbox_message
+    where batch_inbox_message.thread_id = ${threads.id}
+      and ${inboxMembership(sql.raw("batch_inbox_message.id"))}
+  )`;
+}
+
+async function hydrateThreadLabelBatchCandidates(
+  input: {
+    manifest: ThreadLabelBatchManifestEntry[];
+    definitions: ThreadLabelDefinition[];
+  },
+  database: DatabaseExecutor,
+): Promise<ThreadLabelBatchCandidate[]> {
+  if (input.manifest.length === 0) return [];
+  const threadIds = input.manifest.map((entry) => entry.threadId);
+  const [threadRows, messageRows] = await Promise.all([
+    database
+      .select({ id: threads.id, subject: threads.subject })
+      .from(threads)
+      .where(inArray(threads.id, threadIds)),
+    database
+      .select({
+        threadId: messages.threadId,
+        subject: messages.subject,
+        sender: messages.sender,
+        recipients: messages.recipients,
+        bodyText: messages.bodyText,
+        sentAt: messages.sentAt,
+      })
+      .from(messages)
+      .where(
+        and(
+          inArray(messages.threadId, threadIds),
+          inboxMembership(messages.id),
+          sql<boolean>`${messages.id} in (
+            select bounded_batch_message.id
+            from ${messages} bounded_batch_message
+            where bounded_batch_message.thread_id = ${messages.threadId}
+              and ${inboxMembership(sql.raw("bounded_batch_message.id"))}
+            order by bounded_batch_message.sent_at desc, bounded_batch_message.id desc
+            limit 20
+          )`,
+        ),
+      )
+      .orderBy(asc(messages.threadId), asc(messages.sentAt), asc(messages.id)),
+  ]);
+  const subjectsByThreadId = new Map(
+    threadRows.map((thread) => [thread.id, thread.subject]),
+  );
+  const messagesByThreadId = new Map<
+    string,
+    ThreadLabelBatchCandidate["thread"]["messages"]
+  >();
+  for (const message of messageRows) {
+    const current = messagesByThreadId.get(message.threadId) ?? [];
+    current.push({
+      subject: message.subject,
+      sender: message.sender.raw,
+      recipients: message.recipients,
+      bodyText: message.bodyText,
+      sentAt: message.sentAt.toISOString(),
+    });
+    messagesByThreadId.set(message.threadId, current);
+  }
+  return input.manifest.flatMap((entry) => {
+    const subject = subjectsByThreadId.get(entry.threadId);
+    const threadMessages = messagesByThreadId.get(entry.threadId);
+    return subject === undefined || !threadMessages?.length
+      ? []
+      : [{
+          ...entry,
+          thread: { subject, messages: threadMessages },
+          definitions: input.definitions,
+        }];
+  });
+}
+
+export async function getThreadLabelBatchSubmissionForStep(
+  workflowStepId: string,
   database: Database = getDatabase(),
-): Promise<{ pending: number; running: number; complete: number; failed: number }> {
+) {
+  const [submission] = await database
+    .select()
+    .from(threadLabelBatchSubmissions)
+    .where(eq(threadLabelBatchSubmissions.workflowStepId, workflowStepId))
+    .limit(1);
+  return submission ?? null;
+}
+
+export async function claimThreadLabelBatchSubmission(
+  input: {
+    workflowStepId: string;
+    userId: string;
+    accountId: string;
+    flushRemainder: boolean;
+    modelId: string;
+    threadIds?: string[];
+  },
+  database: Database = getDatabase(),
+): Promise<null | {
+  submissionId: string;
+  candidates: ThreadLabelBatchCandidate[];
+}> {
+  return database.transaction(async (transaction) => {
+    await lockThreadLabelBatchAccount(input.accountId, transaction);
+    const [account] = await transaction
+      .select({ id: connectedAccounts.id })
+      .from(connectedAccounts)
+      .where(
+        and(
+          eq(connectedAccounts.id, input.accountId),
+          eq(connectedAccounts.userId, input.userId),
+          eq(connectedAccounts.status, "connected"),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!account) {
+      throw new Error("The thread-label Batch account is unavailable.");
+    }
+    const [existing] = await transaction
+      .select()
+      .from(threadLabelBatchSubmissions)
+      .where(eq(threadLabelBatchSubmissions.workflowStepId, input.workflowStepId))
+      .limit(1);
+    if (existing) {
+      const snapshot = await getDefinitionSnapshot(input.accountId, transaction);
+      return {
+        submissionId: existing.id,
+        candidates: await hydrateThreadLabelBatchCandidates(
+          { manifest: existing.manifest, definitions: snapshot.definitions },
+          transaction,
+        ),
+      };
+    }
+
+    const [activeSubmission] = await transaction
+      .select({ id: threadLabelBatchSubmissions.id })
+      .from(threadLabelBatchSubmissions)
+      .where(
+        and(
+          eq(threadLabelBatchSubmissions.accountId, input.accountId),
+          inArray(threadLabelBatchSubmissions.status, [
+            "preparing",
+            "submitted",
+          ]),
+        ),
+      )
+      .limit(1);
+    if (activeSubmission) return null;
+
+    const [activeRun] = await transaction
+      .select({ id: mailSyncRuns.id })
+      .from(mailSyncRuns)
+      .where(
+        and(
+          eq(mailSyncRuns.accountId, input.accountId),
+          inArray(mailSyncRuns.status, ["queued", "running"]),
+        ),
+      )
+      .limit(1);
+    const shouldFlushRemainder = input.flushRemainder && !activeRun;
+
+    await ensureBuiltInInvookLabels(
+      { userId: input.userId, accountId: input.accountId },
+      transaction,
+    );
+    const currentSnapshot = await getDefinitionSnapshot(
+      input.accountId,
+      transaction,
+    );
+    const rows = await listThreadLabelBatchCandidateRows(
+      {
+        userId: input.userId,
+        accountId: input.accountId,
+        activeRunId: activeRun?.id ?? null,
+        candidateThreadIds: input.threadIds,
+        flushRemainder: shouldFlushRemainder,
+        limit: THREAD_LABEL_BATCH_LIMIT + 1,
+      },
+      transaction,
+    );
+    if (
+      rows.length === 0 ||
+      (!shouldFlushRemainder && rows.length < THREAD_LABEL_BATCH_LIMIT)
+    ) {
+      return null;
+    }
+    const selected = rows.slice(0, THREAD_LABEL_BATCH_LIMIT);
+    const manifest: ThreadLabelBatchManifestEntry[] = selected.map((thread) => ({
+      threadId: thread.threadId,
+      analysisVersion: thread.analysisVersion,
+      definitionHash: currentSnapshot.definitionHash,
+      fallbackLabelId: currentSnapshot.fallback.id,
+    }));
+    const [submission] = await transaction
+      .insert(threadLabelBatchSubmissions)
+      .values({
+        workflowStepId: input.workflowStepId,
+        userId: input.userId,
+        accountId: input.accountId,
+        modelId: input.modelId,
+        definitionHash: currentSnapshot.definitionHash,
+        flushRemainder: shouldFlushRemainder,
+        hasMore: rows.length > THREAD_LABEL_BATCH_LIMIT,
+        requestCount: manifest.length,
+        manifest,
+      })
+      .returning({ id: threadLabelBatchSubmissions.id });
+    if (!submission) throw new Error("The thread-label Batch could not be claimed.");
+    await transaction
+      .update(threads)
+      .set({
+        labelAnalysisState: "running",
+        labelAnalysisDefinitionHash: currentSnapshot.definitionHash,
+        labelAnalysisError: null,
+        updatedAt: new Date(),
+      })
+      .where(inArray(threads.id, selected.map((thread) => thread.threadId)));
+    return {
+      submissionId: submission.id,
+      candidates: await hydrateThreadLabelBatchCandidates(
+        { manifest, definitions: currentSnapshot.definitions },
+        transaction,
+      ),
+    };
+  });
+}
+
+export async function finalizeThreadLabelBatchPreparation(
+  input: {
+    submissionId: string;
+    manifest: ThreadLabelBatchManifestEntry[];
+    excludedThreadIds: string[];
+  },
+  database: Database = getDatabase(),
+) {
+  return database.transaction(async (transaction) => {
+    const [submission] = await transaction
+      .update(threadLabelBatchSubmissions)
+      .set({
+        manifest: input.manifest,
+        requestCount: input.manifest.length,
+        hasMore: sql`${threadLabelBatchSubmissions.hasMore} or ${input.excludedThreadIds.length > 0}`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(threadLabelBatchSubmissions.id, input.submissionId),
+          eq(threadLabelBatchSubmissions.status, "preparing"),
+          isNull(threadLabelBatchSubmissions.inputFileId),
+          isNull(threadLabelBatchSubmissions.providerBatchId),
+        ),
+      )
+      .returning();
+    if (!submission) {
+      const [current] = await transaction
+        .select()
+        .from(threadLabelBatchSubmissions)
+        .where(eq(threadLabelBatchSubmissions.id, input.submissionId))
+        .limit(1);
+      if (!current) throw new Error("The thread-label Batch was not found.");
+      return current;
+    }
+    if (input.excludedThreadIds.length > 0) {
+      await transaction
+        .update(threads)
+        .set({ labelAnalysisState: "pending", updatedAt: new Date() })
+        .where(
+          and(
+            inArray(threads.id, input.excludedThreadIds),
+            eq(threads.labelAnalysisState, "running"),
+            eq(threads.labelAnalysisDefinitionHash, submission.definitionHash),
+          ),
+        );
+    }
+    return submission;
+  });
+}
+
+export async function recordThreadLabelBatchInputFile(
+  input: { submissionId: string; inputFileId: string },
+  database: Database = getDatabase(),
+): Promise<string> {
+  const [submission] = await database
+    .update(threadLabelBatchSubmissions)
+    .set({
+      inputFileId: sql`coalesce(${threadLabelBatchSubmissions.inputFileId}, ${input.inputFileId})`,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(threadLabelBatchSubmissions.id, input.submissionId),
+        eq(threadLabelBatchSubmissions.status, "preparing"),
+      ),
+    )
+    .returning({ inputFileId: threadLabelBatchSubmissions.inputFileId });
+  if (!submission?.inputFileId) {
+    throw new Error("The thread-label Batch input file could not be recorded.");
+  }
+  return submission.inputFileId;
+}
+
+export async function recordThreadLabelProviderBatch(
+  input: { submissionId: string; providerBatchId: string; inputFileId: string },
+  database: Database = getDatabase(),
+) {
+  const [submission] = await database
+    .update(threadLabelBatchSubmissions)
+    .set({
+      providerBatchId: input.providerBatchId,
+      inputFileId: input.inputFileId,
+      status: "submitted",
+      submittedAt: sql`coalesce(${threadLabelBatchSubmissions.submittedAt}, now())`,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(threadLabelBatchSubmissions.id, input.submissionId),
+        inArray(threadLabelBatchSubmissions.status, ["preparing", "submitted"]),
+      ),
+    )
+    .returning();
+  if (!submission) throw new Error("The OpenAI thread-label Batch could not be recorded.");
+  return submission;
+}
+
+export async function listSubmittedThreadLabelBatchIds(
+  database: Database = getDatabase(),
+): Promise<string[]> {
   const rows = await database
-    .select({ state: threads.labelAnalysisState, value: sql<number>`count(*)` })
-    .from(threads)
-    .where(eq(threads.accountId, accountId))
-    .groupBy(threads.labelAnalysisState);
-  const counts = { pending: 0, running: 0, complete: 0, failed: 0 };
-  for (const row of rows) counts[row.state] = Number(row.value);
-  return counts;
+    .select({ providerBatchId: threadLabelBatchSubmissions.providerBatchId })
+    .from(threadLabelBatchSubmissions)
+    .where(
+      and(
+        eq(threadLabelBatchSubmissions.status, "submitted"),
+        sql`${threadLabelBatchSubmissions.providerBatchId} is not null`,
+      ),
+    );
+  return rows.flatMap((row) => row.providerBatchId ? [row.providerBatchId] : []);
+}
+
+export async function finalizeThreadLabelBatchSubmission(
+  input: {
+    submissionId: string;
+    providerState: string;
+    providerErrorCode: string | null;
+    retryableFailure: boolean;
+    outputFileId: string | null;
+    errorFileId: string | null;
+    modelId: string;
+    results: Array<{ threadId: string; labelId: string; confidence: number }>;
+    failedThreadIds: string[];
+  },
+  database: Database = getDatabase(),
+): Promise<{
+  alreadyFinalized: boolean;
+  appliedCount: number;
+  continuationStepId: string | null;
+}> {
+  return database.transaction(async (transaction) => {
+    const providerErrorCode = input.providerErrorCode
+      ? toPostgresTextProjection(input.providerErrorCode)
+      : null;
+    const [identity] = await transaction
+      .select({
+        accountId: threadLabelBatchSubmissions.accountId,
+        workflowInput: workflowSteps.input,
+      })
+      .from(threadLabelBatchSubmissions)
+      .innerJoin(
+        workflowSteps,
+        eq(workflowSteps.id, threadLabelBatchSubmissions.workflowStepId),
+      )
+      .where(eq(threadLabelBatchSubmissions.id, input.submissionId))
+      .limit(1);
+    if (!identity) throw new Error("The thread-label Batch could not be matched.");
+    await lockThreadLabelBatchAccount(identity.accountId, transaction);
+    const [submission] = await transaction
+      .select()
+      .from(threadLabelBatchSubmissions)
+      .where(eq(threadLabelBatchSubmissions.id, input.submissionId))
+      .for("update")
+      .limit(1);
+    if (!submission) throw new Error("The thread-label Batch could not be matched.");
+    if (submission.status === "complete" || submission.status === "failed") {
+      return { alreadyFinalized: true, appliedCount: 0, continuationStepId: null };
+    }
+    if (submission.status !== "submitted") {
+      throw new Error(`The thread-label Batch is ${submission.status}.`);
+    }
+    const manifestByThreadId = new Map(
+      submission.manifest.map((entry) => [entry.threadId, entry]),
+    );
+    const snapshot = await getDefinitionSnapshot(submission.accountId, transaction);
+    const definitionsById = new Map(
+      [...snapshot.definitions, snapshot.fallback].map((definition) => [
+        definition.id,
+        definition,
+      ]),
+    );
+    const appliedThreadIds: string[] = [];
+    const shouldReplan = snapshot.definitionHash !== submission.definitionHash;
+    if (!shouldReplan) {
+      for (const result of input.results) {
+        const checkpoint = manifestByThreadId.get(result.threadId);
+        const definition = definitionsById.get(result.labelId);
+        if (
+          !checkpoint ||
+          !definition ||
+          !Number.isFinite(result.confidence) ||
+          result.confidence < 0 ||
+          result.confidence > 100
+        ) {
+          continue;
+        }
+        const [thread] = await transaction
+          .select({
+            id: threads.id,
+            analysisVersion: threads.labelAnalysisVersion,
+            assignmentId: threadLabelAssignments.id,
+          })
+          .from(threads)
+          .leftJoin(
+            threadLabelAssignments,
+            eq(threadLabelAssignments.threadId, threads.id),
+          )
+          .where(
+            and(
+              eq(threads.id, checkpoint.threadId),
+              eq(threads.userId, submission.userId),
+              eq(threads.accountId, submission.accountId),
+              eq(threads.labelAnalysisState, "running"),
+              eq(
+                threads.labelAnalysisDefinitionHash,
+                submission.definitionHash,
+              ),
+              inboxThreadConditionForBatch(),
+            ),
+          )
+          .for("update", { of: threads })
+          .limit(1);
+        if (
+          !thread ||
+          thread.assignmentId ||
+          thread.analysisVersion !== checkpoint.analysisVersion ||
+          checkpoint.definitionHash !== submission.definitionHash
+        ) {
+          continue;
+        }
+        const [assignment] = await transaction
+          .insert(threadLabelAssignments)
+          .values({
+            userId: submission.userId,
+            accountId: submission.accountId,
+            threadId: thread.id,
+            labelId: definition.id,
+            source: "ai",
+            confidence: result.confidence.toFixed(2),
+            modelId: input.modelId,
+            definitionVersion: definition.definitionVersion,
+          })
+          .onConflictDoNothing({ target: threadLabelAssignments.threadId })
+          .returning({ threadId: threadLabelAssignments.threadId });
+        if (!assignment) continue;
+        await transaction
+          .update(threads)
+          .set({
+            labelAnalysisState: "complete",
+            labelAnalysisError: null,
+            labelAnalyzedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(threads.id, thread.id));
+        appliedThreadIds.push(thread.id);
+      }
+    }
+    const rawRetryAttempt = identity.workflowInput.retryAttempt;
+    const retryAttempt =
+      typeof rawRetryAttempt === "number" &&
+      Number.isInteger(rawRetryAttempt) &&
+      rawRetryAttempt >= 0
+        ? rawRetryAttempt
+        : 0;
+    const canRetry = retryAttempt < THREAD_LABEL_BATCH_RETRY_LIMIT;
+    const shouldRetryFailures =
+      canRetry &&
+      (shouldReplan ||
+        input.retryableFailure ||
+        input.providerState === "completed");
+    const failedIds = Array.from(
+      new Set([
+        ...input.failedThreadIds,
+        ...submission.manifest
+          .map((entry) => entry.threadId)
+          .filter((threadId) => !appliedThreadIds.includes(threadId)),
+      ]),
+    );
+    let retriedThreadIds: string[] = [];
+    if (failedIds.length > 0) {
+      const unresolvedThreads = await transaction
+        .update(threads)
+        .set({
+          labelAnalysisState: shouldRetryFailures ? "pending" : "failed",
+          labelAnalysisError: shouldReplan
+            ? null
+            : providerErrorCode ??
+              (input.providerState === "completed"
+                ? "openai_batch_invalid_result"
+                : `openai_batch_${input.providerState}`),
+          labelAnalyzedAt: shouldRetryFailures ? null : new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            inArray(threads.id, failedIds),
+            eq(threads.labelAnalysisState, "running"),
+            eq(threads.labelAnalysisDefinitionHash, submission.definitionHash),
+            sql<boolean>`not exists (
+              select 1 from ${threadLabelAssignments}
+              where ${threadLabelAssignments.threadId} = ${threads.id}
+            )`,
+          ),
+        )
+        .returning({ id: threads.id });
+      if (shouldRetryFailures) {
+        retriedThreadIds = unresolvedThreads.map((thread) => thread.id);
+      }
+    }
+    await transaction
+      .update(threadLabelBatchSubmissions)
+      .set({
+        status: input.providerState === "completed" ? "complete" : "failed",
+        providerState: input.providerState,
+        outputFileId: input.outputFileId,
+        errorFileId: input.errorFileId,
+        lastError: providerErrorCode,
+        completedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(threadLabelBatchSubmissions.id, submission.id));
+    if (appliedThreadIds.length > 0) {
+      await insertMailboxChange(transaction, {
+        userId: submission.userId,
+        accountId: submission.accountId,
+        changeType: "labels_changed",
+        payload: {
+          kind: "analysis_resolution",
+          affectedThreadIds: appliedThreadIds,
+        },
+      });
+    }
+    const retryStepId =
+      retriedThreadIds.length > 0
+        ? await enqueueThreadLabelBatchSubmission(
+            {
+              userId: submission.userId,
+              accountId: submission.accountId,
+              sourceKey: `${input.retryableFailure ? "provider" : shouldReplan ? "definition" : "result"}-retry:${submission.id}:${retryAttempt + 1}`,
+              flushRemainder: true,
+              retryAttempt: retryAttempt + 1,
+              threadIds: retriedThreadIds,
+              ...(input.retryableFailure
+                ? {
+                    runAt: new Date(
+                      Date.now() + THREAD_LABEL_CAPACITY_RETRY_DELAY_MS,
+                    ),
+                  }
+                : {}),
+            },
+            transaction,
+          )
+        : null;
+    const [pendingContinuation] =
+      !retryStepId &&
+      !submission.hasMore &&
+      (input.providerState === "completed" || shouldReplan)
+        ? await transaction
+            .select({ id: threads.id })
+            .from(threads)
+            .leftJoin(
+              threadLabelAssignments,
+              eq(threadLabelAssignments.threadId, threads.id),
+            )
+            .where(
+              and(
+                eq(threads.userId, submission.userId),
+                eq(threads.accountId, submission.accountId),
+                eq(threads.labelAnalysisState, "pending"),
+                isNull(threadLabelAssignments.id),
+                inboxThreadConditionForBatch(),
+              ),
+            )
+            .limit(1)
+        : [];
+    const shouldContinueImmediately =
+      !retryStepId &&
+      (input.providerState === "completed" || shouldReplan) &&
+      (submission.hasMore || Boolean(pendingContinuation));
+    const continuationStepId =
+      retryStepId ??
+      (shouldContinueImmediately
+        ? await enqueueThreadLabelBatchSubmission(
+            {
+              userId: submission.userId,
+              accountId: submission.accountId,
+              sourceKey: `continue:${submission.id}`,
+              flushRemainder: submission.flushRemainder,
+            },
+            transaction,
+          )
+        : null);
+    return {
+      alreadyFinalized: false,
+      appliedCount: appliedThreadIds.length,
+      continuationStepId,
+    };
+  });
+}
+
+export async function requeueRetryableThreadLabelBatchFailures(
+  database: Database = getDatabase(),
+): Promise<number> {
+  return database.transaction(async (transaction) => {
+    const submissions = await transaction
+      .select({
+        id: threadLabelBatchSubmissions.id,
+        userId: threadLabelBatchSubmissions.userId,
+        accountId: threadLabelBatchSubmissions.accountId,
+        manifest: threadLabelBatchSubmissions.manifest,
+      })
+      .from(threadLabelBatchSubmissions)
+      .where(
+        and(
+          eq(threadLabelBatchSubmissions.providerState, "failed"),
+          sql<boolean>`(
+            ${threadLabelBatchSubmissions.status} = 'complete'
+            or ${threadLabelBatchSubmissions.lastError} ilike 'Enqueued token limit reached%'
+          )`,
+        ),
+      );
+    let requeuedCount = 0;
+    for (const submission of submissions) {
+      await lockThreadLabelBatchAccount(submission.accountId, transaction);
+      const requeuedThreadIds: string[] = [];
+      for (let offset = 0; offset < submission.manifest.length; offset += 500) {
+        const threadIds = submission.manifest
+          .slice(offset, offset + 500)
+          .map((entry) => entry.threadId);
+        const requeued = await transaction
+          .update(threads)
+          .set({
+            labelAnalysisState: "pending",
+            labelAnalysisError: THREAD_LABEL_CAPACITY_ERROR_CODE,
+            labelAnalyzedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              inArray(threads.id, threadIds),
+              eq(threads.labelAnalysisState, "failed"),
+              sql<boolean>`not exists (
+                select 1 from ${threadLabelAssignments}
+                where ${threadLabelAssignments.threadId} = ${threads.id}
+              )`,
+            ),
+          )
+          .returning({ id: threads.id });
+        requeuedCount += requeued.length;
+        requeuedThreadIds.push(...requeued.map((thread) => thread.id));
+      }
+      await transaction
+        .update(threadLabelBatchSubmissions)
+        .set({
+          status: "failed",
+          lastError: THREAD_LABEL_CAPACITY_ERROR_CODE,
+          updatedAt: new Date(),
+        })
+        .where(eq(threadLabelBatchSubmissions.id, submission.id));
+      if (requeuedThreadIds.length > 0) {
+        await enqueueThreadLabelBatchSubmission(
+          {
+            userId: submission.userId,
+            accountId: submission.accountId,
+            sourceKey: `recovered-capacity:${submission.id}`,
+            flushRemainder: true,
+            retryAttempt: 1,
+            threadIds: requeuedThreadIds,
+          },
+          transaction,
+        );
+      }
+    }
+
+    const completedSubmissions = await transaction
+      .select({
+        id: threadLabelBatchSubmissions.id,
+        userId: threadLabelBatchSubmissions.userId,
+        accountId: threadLabelBatchSubmissions.accountId,
+        manifest: threadLabelBatchSubmissions.manifest,
+        workflowInput: workflowSteps.input,
+      })
+      .from(threadLabelBatchSubmissions)
+      .innerJoin(
+        workflowSteps,
+        eq(workflowSteps.id, threadLabelBatchSubmissions.workflowStepId),
+      )
+      .where(
+        and(
+          eq(threadLabelBatchSubmissions.status, "complete"),
+          eq(threadLabelBatchSubmissions.providerState, "completed"),
+        ),
+      );
+    for (const submission of completedSubmissions) {
+      const rawRetryAttempt = submission.workflowInput.retryAttempt;
+      const retryAttempt =
+        typeof rawRetryAttempt === "number" &&
+        Number.isInteger(rawRetryAttempt) &&
+        rawRetryAttempt >= 0
+          ? rawRetryAttempt
+          : 0;
+      if (retryAttempt >= THREAD_LABEL_BATCH_RETRY_LIMIT) continue;
+      await lockThreadLabelBatchAccount(submission.accountId, transaction);
+      const recoveredThreadIds: string[] = [];
+      for (let offset = 0; offset < submission.manifest.length; offset += 500) {
+        const threadIds = submission.manifest
+          .slice(offset, offset + 500)
+          .map((entry) => entry.threadId);
+        const recovered = await transaction
+          .update(threads)
+          .set({
+            labelAnalysisState: "pending",
+            labelAnalysisError: "openai_batch_invalid_result",
+            labelAnalyzedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              inArray(threads.id, threadIds),
+              eq(threads.labelAnalysisState, "failed"),
+              inboxThreadConditionForBatch(),
+              sql<boolean>`not exists (
+                select 1 from ${threadLabelAssignments}
+                where ${threadLabelAssignments.threadId} = ${threads.id}
+              )`,
+            ),
+          )
+          .returning({ id: threads.id });
+        recoveredThreadIds.push(...recovered.map((thread) => thread.id));
+      }
+      if (recoveredThreadIds.length === 0) continue;
+      requeuedCount += recoveredThreadIds.length;
+      await enqueueThreadLabelBatchSubmission(
+        {
+          userId: submission.userId,
+          accountId: submission.accountId,
+          sourceKey: `recovered-result:${submission.id}:${retryAttempt + 1}`,
+          flushRemainder: true,
+          retryAttempt: retryAttempt + 1,
+          threadIds: recoveredThreadIds,
+        },
+        transaction,
+      );
+    }
+    return requeuedCount;
+  });
+}
+
+export async function enqueueStartupThreadLabelBatchSubmissions(
+  database: Database = getDatabase(),
+): Promise<number> {
+  const accounts = await database
+    .select({ userId: connectedAccounts.userId, accountId: connectedAccounts.id })
+    .from(connectedAccounts)
+    .where(eq(connectedAccounts.status, "connected"));
+  let count = 0;
+  for (const account of accounts) {
+    await enqueueThreadLabelBatchSubmission(
+      {
+        ...account,
+        sourceKey: `startup:hybrid-v1:${account.accountId}`,
+        flushRemainder: true,
+      },
+      database,
+    );
+    count += 1;
+  }
+  return count;
 }

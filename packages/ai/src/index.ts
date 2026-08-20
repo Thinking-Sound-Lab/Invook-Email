@@ -12,6 +12,7 @@ export * from "./memory-batch";
 export * from "./embedding";
 export * from "./mail-agent";
 export * from "./thread-label-classifier";
+export * from "./thread-label-batch";
 export * from "./model";
 
 const feedbackMemorySchema = z.object({

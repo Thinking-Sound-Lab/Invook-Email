@@ -1,6 +1,7 @@
 import {
   AiConfigurationError,
   classifyStoredThreadLabel,
+  isAiConfigured,
   ThreadLabelClassificationContractError,
 } from "@invook/ai";
 import {
@@ -52,29 +53,6 @@ function nullablePositiveInteger(value: unknown, name: string): number | null {
   return value === null ? null : requiredPositiveInteger(value, name);
 }
 
-export function parseThreadLabelAnalysisJob(
-  job: WorkflowStepJob,
-): ThreadLabelAnalysisJob {
-  if (job.stepType !== "label.thread.assign") {
-    throw new Error(`Unsupported thread label step: ${job.stepType}`);
-  }
-  return {
-    userId: requiredString(job.userId, "Thread label user ID"),
-    accountId: requiredString(job.accountId, "Thread label account ID"),
-    checkpoint: {
-      threadId: requiredString(job.payload.threadId, "Thread label thread ID"),
-      analysisVersion: requiredPositiveInteger(
-        job.payload.analysisVersion,
-        "Thread label analysis version",
-      ),
-      definitionHash: requiredSha256(
-        job.payload.definitionHash,
-        "Thread label definition hash",
-      ),
-    },
-  };
-}
-
 export function parseHistoricalThreadLabelScanJob(
   job: WorkflowStepJob,
 ): HistoricalThreadLabelScanJob {
@@ -98,6 +76,29 @@ export function parseHistoricalThreadLabelScanJob(
       assignmentVersion: nullablePositiveInteger(
         job.payload.assignmentVersion,
         "Historical label assignment version",
+      ),
+    },
+  };
+}
+
+export function parseThreadLabelAnalysisJob(
+  job: WorkflowStepJob,
+): ThreadLabelAnalysisJob {
+  if (job.stepType !== "label.thread.assign") {
+    throw new Error(`Unsupported thread label step: ${job.stepType}`);
+  }
+  return {
+    userId: requiredString(job.userId, "Thread label user ID"),
+    accountId: requiredString(job.accountId, "Thread label account ID"),
+    checkpoint: {
+      threadId: requiredString(job.payload.threadId, "Thread label thread ID"),
+      analysisVersion: requiredPositiveInteger(
+        job.payload.analysisVersion,
+        "Thread label analysis version",
+      ),
+      definitionHash: requiredSha256(
+        job.payload.definitionHash,
+        "Thread label definition hash",
       ),
     },
   };
@@ -129,6 +130,16 @@ export async function runThreadLabelAnalysis(
   job: WorkflowStepJob,
 ): Promise<Record<string, unknown>> {
   const parsed = parseThreadLabelAnalysisJob(job);
+  if (!isAiConfigured()) {
+    const deferred = await failThreadLabelAnalysis({
+      ...parsed,
+      errorCode: "label_analysis_model_unavailable",
+    });
+    return {
+      status: deferred ? "batch_fallback" : "superseded",
+      threadId: parsed.checkpoint.threadId,
+    };
+  }
   const analysis = await beginThreadLabelAnalysis(parsed);
   if (analysis.status !== "ready") {
     return { status: analysis.status, threadId: parsed.checkpoint.threadId };

@@ -119,7 +119,7 @@ Deleting removes the active record and its text. A non-reversible fingerprint to
 
 ## Batch analysis
 
-Embeddings are not required for Memory v3 or labels. Labels do not use provider Batch: after initial import, each unlabelled Gmail Inbox thread is analyzed once through the separately bounded `mail-label-submit` queue. New messages and content changes never reclassify an already-labelled thread.
+Embeddings are not required for Memory v3 or labels. The newest 200 fully stored, unassigned Gmail Inbox threads in an import and each newly received eligible thread use a dedicated fast structured-classification queue. Older history accumulates into serialized durable OpenAI Batch submissions of at most 2,000 threads, 200 MB, and the configured input-token ceiling. Full historical batches may be submitted after Gmail discovery completes while remaining messages are still being stored; Gmail finalization flushes the remainder. New messages and content changes never reclassify an already-labelled thread.
 
 For initial Memory, the worker uses the selected OpenAI or Azure OpenAI native Batch API as follows:
 
@@ -179,6 +179,8 @@ One classifier assigns exactly one enabled Invook-owned label to an eligible Gma
 
 `thread_label_assignments` is the single visible and durable relationship, constrained to one row per thread. It stores AI or user source, confidence and model provenance, definition version, and an assignment version used to protect historical scans from overwriting later manual choices. Archive, Trash, and Spam preserve the assignment but remove the thread from All and Invook-label views; restoring it to Inbox reveals the same assignment without reclassification. An unlabelled thread first moved into Inbox is classified. Manual replacement is the only ordinary way an assigned thread changes label.
 
+All is Gmail `INBOX`: a stored Inbox thread is visible immediately even when it has no Invook assignment. While either fast or Batch analysis is pending, the row renders normally without a placeholder label or analysis indicator. Label-specific views and counts include only completed assignments. Fast and Batch completions apply validated results, emit mailbox change events, and treat any existing manual assignment as authoritative. Signed terminal webhooks and startup reconciliation durably recover Batch completion; provider-capacity failures and invalid individual results retry only their bounded durable manifest entries rather than permanently hiding their classifications.
+
 ## Architecture
 
 ```text
@@ -219,6 +221,7 @@ Drizzle owns the PostgreSQL schema and ordered SQL migrations. Current applicati
 - `messages`
 - `message_labels`
 - `thread_label_assignments`
+- `thread_label_batch_submissions`
 - `message_attachments`
 - `drafts`
 - `message_embeddings`

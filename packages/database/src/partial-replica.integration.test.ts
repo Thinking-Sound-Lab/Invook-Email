@@ -484,9 +484,9 @@ test(
       await database
         .delete(threadLabelAssignments)
         .where(eq(threadLabelAssignments.threadId, threadId));
-      assert.equal(
+      assert.deepEqual(
         await getGmailThreadMutationContext({ userId, threadId }, database),
-        null,
+        { accountId, providerThreadId: `provider-thread-${threadId}` },
       );
     });
   },

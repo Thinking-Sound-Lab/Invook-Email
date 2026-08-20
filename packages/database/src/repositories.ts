@@ -39,7 +39,6 @@ import {
 } from "./embedding-indexing";
 import {
   enqueueHistoricalThreadLabelScan,
-  enqueueThreadLabelAnalysisWithExecutor,
   ensureBuiltInInvookLabels,
   refreshThreadProjection,
 } from "./thread-label-analysis";
@@ -68,6 +67,7 @@ import {
   messages,
   messageLabels,
   threadLabelAssignments,
+  threadLabelBatchSubmissions,
   threads,
   workflowSteps,
 } from "./schema";
@@ -86,7 +86,6 @@ import {
 } from "./workflows";
 import {
   DRAFT_FEEDBACK_VERSION,
-  MAIL_INDEX_VERSION,
   MEMORY_SCHEMA_VERSION,
 } from "./versions";
 
@@ -1676,7 +1675,6 @@ export async function upsertMailboxMessage(
       }
     }
 
-    let analysisQueued = false;
     if (changed) {
       await refreshThreadProjection(transaction, threadId, {
         incrementContentVersion: contentChanged,
@@ -1684,7 +1682,6 @@ export async function upsertMailboxMessage(
       const [currentThread] = await transaction
         .select({
           isInbox: inboxThreadCondition(),
-          analysisVersion: threads.labelAnalysisVersion,
           assignmentId: threadLabelAssignments.id,
         })
         .from(threads)
@@ -1697,10 +1694,10 @@ export async function upsertMailboxMessage(
       if (
         input.ingestionMode === "incremental" &&
         currentThread?.isInbox &&
-        !threadEligibilityBefore?.isInbox &&
-        !currentThread.assignmentId
+        !currentThread.assignmentId &&
+        (contentChanged || !threadEligibilityBefore?.isInbox)
       ) {
-        const [versionedThread] = await transaction
+        await transaction
           .update(threads)
           .set({
             labelAnalysisVersion: sql`${threads.labelAnalysisVersion} + 1`,
@@ -1709,24 +1706,11 @@ export async function upsertMailboxMessage(
             labelAnalyzedAt: null,
             updatedAt: new Date(),
           })
-          .where(eq(threads.id, threadId))
-          .returning({ analysisVersion: threads.labelAnalysisVersion });
-        if (versionedThread) {
-          await enqueueThreadLabelAnalysisWithExecutor(
-            {
-              userId: input.userId,
-              accountId: input.accountId,
-              threadId,
-              analysisVersion: versionedThread.analysisVersion,
-            },
-            transaction,
-          );
-          analysisQueued = true;
-        }
+          .where(eq(threads.id, threadId));
       }
     }
 
-    return { messageId, threadId, changed, analysisQueued };
+    return { messageId, threadId, changed };
   });
 }
 
@@ -2004,7 +1988,7 @@ export async function replaceGmailMessageLabels(
         .where(eq(threads.id, message.threadId))
         .limit(1);
       if (threadAfter?.isInbox) {
-        const [versionedThread] = await transaction
+        await transaction
           .update(threads)
           .set({
             labelAnalysisVersion: sql`${threads.labelAnalysisVersion} + 1`,
@@ -2013,26 +1997,14 @@ export async function replaceGmailMessageLabels(
             labelAnalyzedAt: null,
             updatedAt: new Date(),
           })
-          .where(eq(threads.id, message.threadId))
-          .returning({ analysisVersion: threads.labelAnalysisVersion });
-        if (versionedThread) {
-          await enqueueThreadLabelAnalysisWithExecutor(
-            {
-              userId: input.userId,
-              accountId: input.accountId,
-              threadId: message.threadId,
-              analysisVersion: versionedThread.analysisVersion,
-            },
-            transaction,
-          );
-        }
+          .where(eq(threads.id, message.threadId));
       }
     }
     return {
       found: true,
       changed,
       threadId: message.threadId,
-      isVisible: assignmentId !== null,
+      isVisible: true,
     };
   });
 }
@@ -4071,7 +4043,38 @@ export async function enqueueBatchEvent(
           )
           .orderBy(desc(workflowSteps.updatedAt))
           .limit(1);
-    const submission = embeddingSubmission ?? derivationSubmission;
+    const [threadLabelSubmission] =
+      input.provider === "openai" && !embeddingSubmission
+        ? await transaction
+            .select({
+              id: threadLabelBatchSubmissions.workflowStepId,
+              userId: threadLabelBatchSubmissions.userId,
+              accountId: threadLabelBatchSubmissions.accountId,
+              stepType: workflowSteps.stepType,
+            })
+            .from(threadLabelBatchSubmissions)
+            .innerJoin(
+              workflowSteps,
+              eq(workflowSteps.id, threadLabelBatchSubmissions.workflowStepId),
+            )
+            .where(
+              and(
+                eq(threadLabelBatchSubmissions.provider, "openai"),
+                eq(
+                  threadLabelBatchSubmissions.providerBatchId,
+                  input.providerBatchId,
+                ),
+                inArray(threadLabelBatchSubmissions.status, [
+                  "submitted",
+                  "complete",
+                  "failed",
+                ]),
+              ),
+            )
+            .limit(1)
+        : [];
+    const submission =
+      embeddingSubmission ?? threadLabelSubmission ?? derivationSubmission;
     if (!submission) return null;
 
     const payload = {
@@ -4088,7 +4091,9 @@ export async function enqueueBatchEvent(
     if (submission) {
       const eventJobType = submission.stepType.startsWith("embedding.")
         ? "embedding.batch.event"
-        : "memory.batch.event";
+        : submission.stepType.startsWith("label.")
+          ? "label.batch.event"
+          : "memory.batch.event";
       await enqueueWorkflowStep(
         {
           userId: submission.userId,

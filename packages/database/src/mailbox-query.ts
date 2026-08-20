@@ -121,32 +121,6 @@ export async function queryInvookMailbox(
   const conditions = [
     eq(messages.userId, input.userId),
     eq(messages.accountId, account.id),
-    sql<boolean>`(
-      exists (
-        select 1 from ${threadLabelAssignments} visible_assignment
-        where visible_assignment.thread_id = ${messages.threadId}
-      )
-      or not exists (
-        select 1 from ${messages} visible_thread_message
-        where visible_thread_message.thread_id = ${messages.threadId}
-          and exists (
-            select 1 from ${messageLabels} visible_inbox_membership
-            inner join ${labels} visible_inbox_label
-              on visible_inbox_label.id = visible_inbox_membership.label_id
-            where visible_inbox_membership.message_id = visible_thread_message.id
-              and visible_inbox_label.kind = 'gmail'
-              and visible_inbox_label.provider_label_id = 'INBOX'
-          )
-          and not exists (
-            select 1 from ${messageLabels} visible_excluded_membership
-            inner join ${labels} visible_excluded_label
-              on visible_excluded_label.id = visible_excluded_membership.label_id
-            where visible_excluded_membership.message_id = visible_thread_message.id
-              and visible_excluded_label.kind = 'gmail'
-              and visible_excluded_label.provider_label_id in ('SPAM', 'TRASH')
-          )
-      )
-    )`,
   ];
   if (input.candidateMessageIds) {
     conditions.push(inArray(messages.id, input.candidateMessageIds));
