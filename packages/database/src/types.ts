@@ -19,7 +19,7 @@ export type WorkflowStepJob = {
 
 export type WorkflowStepInput = {
   runId?: string | null;
-  userId?: string | null;
+  userId: string;
   accountId?: string | null;
   stepType: string;
   payload?: Record<string, unknown>;

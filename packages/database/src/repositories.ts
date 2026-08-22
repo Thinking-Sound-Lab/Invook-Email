@@ -1683,6 +1683,7 @@ export async function upsertMailboxMessage(
         .select({
           isInbox: inboxThreadCondition(),
           assignmentId: threadLabelAssignments.id,
+          assignmentSource: threadLabelAssignments.source,
         })
         .from(threads)
         .leftJoin(
@@ -1691,12 +1692,17 @@ export async function upsertMailboxMessage(
         )
         .where(eq(threads.id, threadId))
         .limit(1);
-      if (
+      const shouldPlanIncrementalLabel =
         input.ingestionMode === "incremental" &&
         currentThread?.isInbox &&
         !currentThread.assignmentId &&
-        (contentChanged || !threadEligibilityBefore?.isInbox)
-      ) {
+        (contentChanged || !threadEligibilityBefore?.isInbox);
+      const shouldRefreshSnapshotLabel =
+        Boolean(activeRunId) &&
+        currentThread?.isInbox &&
+        currentThread.assignmentSource !== "user" &&
+        (contentChanged || !threadEligibilityBefore?.isInbox);
+      if (shouldPlanIncrementalLabel || shouldRefreshSnapshotLabel) {
         await transaction
           .update(threads)
           .set({

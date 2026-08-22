@@ -94,7 +94,7 @@ test(
         .select({
           idempotencyKey: workflowSteps.idempotencyKey,
           input: workflowSteps.input,
-          activityTaskQueue: temporalCommands.activityTaskQueue,
+          activityTaskLane: temporalCommands.activityTaskLane,
         })
         .from(workflowSteps)
         .innerJoin(
@@ -108,7 +108,7 @@ test(
       assert.deepEqual(
         batches.map((batch) => ({
           idempotencyKey: batch.idempotencyKey,
-          activityTaskQueue: batch.activityTaskQueue,
+          activityTaskLane: batch.activityTaskLane,
           messageCount: Array.isArray(batch.input.providerMessageIds)
             ? batch.input.providerMessageIds.length
             : 0,
@@ -116,17 +116,17 @@ test(
         [
           {
             idempotencyKey: `gmail-message-batch:${runId}:1:1`,
-            activityTaskQueue: "gmail-message-batches",
+            activityTaskLane: "bulk",
             messageCount: GMAIL_SYNC_MESSAGE_BATCH_SIZE,
           },
           {
             idempotencyKey: `gmail-message-batch:${runId}:1:2`,
-            activityTaskQueue: "gmail-message-batches",
+            activityTaskLane: "bulk",
             messageCount: GMAIL_SYNC_MESSAGE_BATCH_SIZE,
           },
           {
             idempotencyKey: `gmail-message-batch:${runId}:1:3`,
-            activityTaskQueue: "gmail-message-batches",
+            activityTaskLane: "bulk",
             messageCount: 3,
           },
         ],

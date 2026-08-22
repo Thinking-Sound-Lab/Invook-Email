@@ -608,15 +608,15 @@ test(
       const outbox = await database
         .select({
           workflowStepId: temporalCommands.workflowStepId,
-          activityTaskQueue: temporalCommands.activityTaskQueue,
+          activityTaskLane: temporalCommands.activityTaskLane,
         })
         .from(temporalCommands)
         .where(inArray(temporalCommands.workflowStepId, steps.map((step) => step.id)));
       assert.deepEqual(
         outbox
-          .map((entry) => entry.activityTaskQueue)
+          .map((entry) => entry.activityTaskLane)
           .sort(),
-        ["gmail-control", "gmail-pages"],
+        ["bulk", "control"],
       );
 
       const [replica] = await database

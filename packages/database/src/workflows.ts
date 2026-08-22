@@ -6,12 +6,13 @@ import {
   eq,
   gt,
   inArray,
+  isNotNull,
   isNull,
   not,
   or,
   sql,
 } from "drizzle-orm";
-import type { WorkflowActivityTaskQueue } from "@invook/workflows";
+import type { TenantTaskQueueLane } from "@invook/workflows";
 
 import {
   getDatabase,
@@ -46,7 +47,8 @@ import {
 } from "./versions";
 
 export type TemporalCommandJob = WorkflowStepJob & {
-  activityTaskQueue: WorkflowActivityTaskQueue;
+  userId: string;
+  activityTaskLane: TenantTaskQueueLane;
 };
 
 export const TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE = 10;
@@ -280,53 +282,43 @@ export async function markGmailAccountReconnectRequired(
   );
 }
 
-export function activityTaskQueueForStepType(
+export function tenantTaskQueueLaneForStepType(
   stepType: string,
-): WorkflowActivityTaskQueue {
+): TenantTaskQueueLane {
   switch (stepType) {
     case "gmail.sync.page":
-    case "gmail.sync.finalize":
-      return "gmail-pages";
     case "gmail.sync.message":
-      return "gmail-messages";
     case "gmail.sync.message.batch":
-      return "gmail-message-batches";
+    case "gmail.sync.finalize":
+    case "gmail.account.cleanup":
+    case "gmail.objects.delete":
+    case "embedding.backfill":
+    case "memory.extract":
+    case "memory.batch.retry":
+      return "bulk";
     case "gmail.history.catchup":
     case "gmail.message.refresh":
     case "gmail.watch.renew":
-    case "gmail.account.cleanup":
-    case "gmail.objects.delete":
-      return "gmail-control";
-    case "embedding.backfill":
+      return "control";
     case "embedding.batch.event":
-      return "mail-indexing-batch";
     case "embedding.incremental":
-      return "mail-indexing-live";
-    case "memory.extract":
     case "memory.incremental":
-      return "mail-memory-submit";
-    case "memory.batch.retry":
     case "memory.batch.event":
-      return "mail-memory-events";
     case "memory.feedback":
-      return "mail-memory-feedback";
     case "label.thread.assign":
-      return "mail-label-live";
     case "label.thread.scan":
-      return "mail-label-submit";
     case "label.batch.submit":
-      return "mail-label-batch";
     case "label.batch.event":
-      return "mail-label-events";
+      return "live";
     default:
       throw new Error(`Unsupported workflow step type: ${stepType}`);
   }
 }
 
-export function activityTaskQueueForStep(
+export function tenantTaskQueueLaneForStep(
   input: Pick<WorkflowStepInput, "stepType">,
-): WorkflowActivityTaskQueue {
-  return activityTaskQueueForStepType(input.stepType);
+): TenantTaskQueueLane {
+  return tenantTaskQueueLaneForStepType(input.stepType);
 }
 
 export function temporalCommandPriority(
@@ -395,7 +387,10 @@ export async function enqueueWorkflowStepsWithExecutor(
       })),
     )
     .onConflictDoNothing({ target: workflowSteps.idempotencyKey })
-    .returning({ id: workflowSteps.id, idempotencyKey: workflowSteps.idempotencyKey });
+    .returning({
+      id: workflowSteps.id,
+      idempotencyKey: workflowSteps.idempotencyKey,
+    });
 
   if (inserted.length > 0) {
     const byIdempotencyKey = new Map(
@@ -404,7 +399,7 @@ export async function enqueueWorkflowStepsWithExecutor(
     await database.insert(temporalCommands).values(
       inserted.map((step) => ({
         workflowStepId: step.id,
-        activityTaskQueue: activityTaskQueueForStep(
+        activityTaskLane: tenantTaskQueueLaneForStep(
           byIdempotencyKey.get(step.idempotencyKey)!,
         ),
       })),
@@ -431,7 +426,7 @@ export async function enqueueWorkflowStepWithExecutor(
       .insert(temporalCommands)
       .values({
         workflowStepId: existing.id,
-        activityTaskQueue: activityTaskQueueForStep(input),
+        activityTaskLane: tenantTaskQueueLaneForStep(input),
       })
       .onConflictDoNothing({ target: temporalCommands.workflowStepId });
   }
@@ -857,10 +852,32 @@ export async function dispatchTemporalCommandBatch(
   database: Database = getDatabase(),
 ): Promise<{ dispatched: number; failed: boolean }> {
   return database.transaction(async (transaction) => {
+    const priority = sql<number>`case
+      when ${workflowSteps.stepType} in ('gmail.history.catchup', 'label.thread.assign', 'label.batch.event')
+      then ${temporalCommandPriority("gmail.history.catchup")}
+      else ${temporalCommandPriority("default")}
+    end`;
+    const rankedCommands = transaction.$with("ranked_temporal_commands").as(
+      transaction
+        .select({
+          commandId: temporalCommands.id,
+          tenantRank:
+            sql<number>`row_number() over (partition by ${workflowSteps.userId} order by ${priority}, ${temporalCommands.createdAt})`.as(
+              "tenant_rank",
+            ),
+        })
+        .from(temporalCommands)
+        .innerJoin(
+          workflowSteps,
+          eq(workflowSteps.id, temporalCommands.workflowStepId),
+        )
+        .where(isNull(temporalCommands.dispatchedAt)),
+    );
     const rows = await transaction
+      .with(rankedCommands)
       .select({
         commandId: temporalCommands.id,
-        activityTaskQueue: temporalCommands.activityTaskQueue,
+        activityTaskLane: temporalCommands.activityTaskLane,
         id: workflowSteps.id,
         runId: workflowSteps.runId,
         userId: workflowSteps.userId,
@@ -875,20 +892,28 @@ export async function dispatchTemporalCommandBatch(
         workflowSteps,
         eq(workflowSteps.id, temporalCommands.workflowStepId),
       )
+      .innerJoin(
+        rankedCommands,
+        eq(rankedCommands.commandId, temporalCommands.id),
+      )
       .where(isNull(temporalCommands.dispatchedAt))
       .orderBy(
-        sql`case when ${workflowSteps.stepType} in ('gmail.history.catchup', 'label.thread.assign', 'label.batch.event') then ${temporalCommandPriority("gmail.history.catchup")} else ${temporalCommandPriority("default")} end`,
+        asc(rankedCommands.tenantRank),
+        priority,
         asc(temporalCommands.createdAt),
       )
       .limit(TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE)
-      .for("update", { skipLocked: true });
+      .for("update", { of: temporalCommands, skipLocked: true });
 
     if (rows.length === 0) return { dispatched: 0, failed: false };
-    const jobs = rows.map(({ commandId: _commandId, ...job }) => job);
+    const jobs = rows.map(({ commandId: _commandId, ...row }) =>
+      temporalCommandJobFromRow(row),
+    );
     try {
       await dispatch(jobs);
     } catch (error) {
-      const message = error instanceof Error ? error.name : "TemporalDispatchError";
+      const message =
+        error instanceof Error ? error.name : "TemporalDispatchError";
       await transaction
         .update(temporalCommands)
         .set({
@@ -911,6 +936,44 @@ export async function dispatchTemporalCommandBatch(
       .where(inArray(temporalCommands.id, rows.map((row) => row.commandId)));
     return { dispatched: rows.length, failed: false };
   });
+}
+
+export function temporalCommandJobFromRow(
+  input: WorkflowStepJob & {
+    activityTaskLane: TenantTaskQueueLane;
+  },
+): TemporalCommandJob {
+  if (input.userId) return { ...input, userId: input.userId };
+  throw new Error(
+    "The Temporal command has an invalid durable routing contract.",
+  );
+}
+
+export async function listActiveTemporalTenantIds(
+  database: Database = getDatabase(),
+): Promise<string[]> {
+  const accountTenants = await database
+    .selectDistinct({ userId: connectedAccounts.userId })
+    .from(connectedAccounts)
+    .where(
+      inArray(connectedAccounts.status, ["connected", "reconnect_required"]),
+    );
+  const workflowTenants = await database
+    .selectDistinct({ userId: workflowSteps.userId })
+    .from(workflowSteps)
+    .where(
+      and(
+        isNotNull(workflowSteps.userId),
+        inArray(workflowSteps.status, ["queued", "running"]),
+      ),
+    );
+  return [
+    ...new Set(
+      [...accountTenants, ...workflowTenants].flatMap((row) =>
+        row.userId ? [row.userId] : [],
+      ),
+    ),
+  ].sort();
 }
 
 export async function markWorkflowStepRunning(

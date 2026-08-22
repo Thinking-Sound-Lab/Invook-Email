@@ -86,6 +86,7 @@ import {
   getBatchSubmission,
   hasCompletedMailSyncPage,
   listenForTemporalCommandNotifications,
+  listActiveTemporalTenantIds,
   MAIL_INDEX_VERSION,
   listGmailObjectKeysForAccount,
   markGmailAccountCleanupRunning,
@@ -147,7 +148,6 @@ import {
 } from "@invook/gmail";
 import { createObjectStorage } from "@invook/object-storage";
 import type {
-  WorkflowActivityTaskQueue,
   WorkflowStepExecution,
   WorkflowStepResult,
 } from "@invook/workflows";
@@ -920,12 +920,6 @@ async function runGmailMessageBatch(job: WorkflowStepJob) {
       threadIds: changedThreadIds,
     });
   }
-  await enqueueThreadLabelBatchSubmission({
-    userId: account.userId,
-    accountId: account.id,
-    sourceKey: `gmail-message-batch:${job.id}`,
-    flushRemainder: false,
-  });
   return {
     status: "complete",
     runId,
@@ -2599,37 +2593,6 @@ export async function reconcileWorkflowStepFailureActivity(
   );
 }
 
-function enabledActivityTaskQueues(): Set<WorkflowActivityTaskQueue> {
-  const taskQueues = new Set<WorkflowActivityTaskQueue>([
-    "gmail-pages",
-    "gmail-messages",
-    "gmail-message-batches",
-    "gmail-control",
-    "mail-label-live",
-    "mail-label-submit",
-  ]);
-  if (isAiConfigured()) {
-    taskQueues.add("mail-memory-feedback");
-  }
-  if (isEmbeddingBatchConfigured()) {
-    taskQueues.add("mail-indexing-batch");
-  }
-  if (isEmbeddingConfigured()) {
-    taskQueues.add("mail-indexing-live");
-  }
-  if (isMemoryBatchConfigured()) {
-    taskQueues.add("mail-memory-submit");
-  }
-  if (isAnyMemoryBatchProviderConfigured()) {
-    taskQueues.add("mail-memory-events");
-  }
-  if (isThreadLabelBatchConfigured()) {
-    taskQueues.add("mail-label-batch");
-    taskQueues.add("mail-label-events");
-  }
-  return taskQueues;
-}
-
 async function reconcileSubmittedEmbeddingBatches() {
   if (!isEmbeddingBatchConfigured()) return;
   const providerBatchIds = await listSubmittedEmbeddingBatchIds();
@@ -2698,6 +2661,7 @@ async function runTemporalCommandLoop(
   while (!isStopped()) {
     await signal.wait();
     if (isStopped()) break;
+    await runtime.ensureTenantWorkers(await listActiveTemporalTenantIds());
     while (!isStopped()) {
       const result = await dispatchTemporalCommandBatch((jobs) =>
         runtime.dispatch(jobs),
@@ -2716,7 +2680,6 @@ async function run() {
       runWorkflowStepActivity,
       reconcileWorkflowStepFailureActivity,
     },
-    enabledActivityTaskQueues: enabledActivityTaskQueues(),
   });
   const outboxSignal = createJobSignal();
   let stopRequested = false;
@@ -2730,9 +2693,15 @@ async function run() {
       error instanceof Error ? error : new Error("Unknown Temporal worker error.");
     requestStop();
   });
-  const stopOutboxListening = await listenForTemporalCommandNotifications(
-    outboxSignal.notify,
-  );
+  const stopOutboxListening = await listenForTemporalCommandNotifications({
+    onEntryAvailable: outboxSignal.notify,
+    onSubscriptionLost: () => {
+      fatalError ??= new Error(
+        "The Temporal command notification subscription was lost.",
+      );
+      requestStop();
+    },
+  });
 
   process.once("SIGINT", requestStop);
   process.once("SIGTERM", requestStop);

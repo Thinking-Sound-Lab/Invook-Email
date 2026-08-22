@@ -19,6 +19,7 @@ import type {
   InvookSystemLabelKey,
   ThreadLabelAnalysisState,
 } from "@invook/contracts";
+import type { TenantTaskQueueLane } from "@invook/workflows";
 
 import { MAIL_EMBEDDING_DIMENSIONS } from "@invook/contracts";
 
@@ -159,6 +160,9 @@ export const connectedAccounts = pgTable(
       table.providerAccountId,
     ),
     index("connected_accounts_user_created_idx").on(table.userId, table.createdAt),
+    index("connected_accounts_active_user_idx")
+      .on(table.userId)
+      .where(sql`${table.status} <> 'disconnected'`),
     check("connected_accounts_provider_check", sql`${table.provider} = 'gmail'`),
     check(
       "connected_accounts_status_check",
@@ -1026,6 +1030,7 @@ export const workflowSteps = pgTable(
       table.stepType,
       table.createdAt,
     ),
+    index("workflow_steps_user_status_idx").on(table.userId, table.status),
     check(
       "workflow_steps_status_check",
       sql`${table.status} in ('queued', 'running', 'complete', 'failed')`,
@@ -1192,22 +1197,8 @@ export const temporalCommands = pgTable(
     workflowStepId: uuid("workflow_step_id")
       .notNull()
       .references(() => workflowSteps.id, { onDelete: "cascade" }),
-    activityTaskQueue: text("activity_task_queue")
-      .$type<
-        | "gmail-pages"
-        | "gmail-messages"
-        | "gmail-message-batches"
-        | "gmail-control"
-        | "mail-indexing-batch"
-        | "mail-indexing-live"
-        | "mail-memory-submit"
-        | "mail-memory-events"
-        | "mail-memory-feedback"
-        | "mail-label-live"
-        | "mail-label-submit"
-        | "mail-label-batch"
-        | "mail-label-events"
-      >()
+    activityTaskLane: text("activity_task_lane")
+      .$type<TenantTaskQueueLane>()
       .notNull(),
     dispatchAttempts: integer("dispatch_attempts").notNull().default(0),
     lastError: text("last_error"),
@@ -1228,8 +1219,8 @@ export const temporalCommands = pgTable(
       sql`${table.dispatchAttempts} >= 0`,
     ),
     check(
-      "temporal_commands_activity_task_queue_check",
-      sql`${table.activityTaskQueue} in ('gmail-pages', 'gmail-messages', 'gmail-message-batches', 'gmail-control', 'mail-indexing-batch', 'mail-indexing-live', 'mail-memory-submit', 'mail-memory-events', 'mail-memory-feedback', 'mail-label-live', 'mail-label-submit', 'mail-label-batch', 'mail-label-events')`,
+      "temporal_commands_activity_task_lane_check",
+      sql`${table.activityTaskLane} in ('control', 'live', 'bulk')`,
     ),
   ],
 );

@@ -1,20 +1,6 @@
-export const workflowActivityTaskQueues = [
-  "gmail-pages",
-  "gmail-messages",
-  "gmail-message-batches",
-  "gmail-control",
-  "mail-indexing-batch",
-  "mail-indexing-live",
-  "mail-memory-submit",
-  "mail-memory-events",
-  "mail-memory-feedback",
-  "mail-label-live",
-  "mail-label-submit",
-  "mail-label-batch",
-  "mail-label-events",
-] as const;
+export const tenantTaskQueueLanes = ["control", "live", "bulk"] as const;
 
-export type WorkflowActivityTaskQueue = (typeof workflowActivityTaskQueues)[number];
+export type TenantTaskQueueLane = (typeof tenantTaskQueueLanes)[number];
 
 export interface WorkflowStepExecution {
   id: string;
