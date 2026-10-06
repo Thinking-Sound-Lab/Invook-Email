@@ -9,16 +9,14 @@ import type {
 import axios from "axios";
 import { headers } from "next/headers";
 
-function getApiOrigin(): string {
-  return (process.env.API_INTERNAL_URL ?? "http://127.0.0.1:4000").replace(/\/$/, "");
-}
+import { getApiUrl } from "./api-url";
 
 async function apiRequest<T>(path: string) {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
   const requestId = requestHeaders.get("x-request-id");
 
-  return axios.get<T>(`${getApiOrigin()}${path}`, {
+  return axios.get<T>(getApiUrl(path).toString(), {
     headers: {
       ...(cookie ? { cookie } : {}),
       ...(requestId ? { "x-request-id": requestId } : {}),

@@ -1,8 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-function getApiOrigin(): string {
-  return (process.env.API_INTERNAL_URL ?? "http://127.0.0.1:4000").replace(/\/$/, "");
-}
+import { getApiUrl } from "./lib/api-url";
 
 export function proxy(request: NextRequest) {
   if (
@@ -12,12 +10,11 @@ export function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const target = new URL(request.nextUrl.pathname, getApiOrigin());
+  const path = request.nextUrl.pathname === "/connections/gmail/callback"
+    ? "/v1/connections/gmail/callback"
+    : request.nextUrl.pathname;
+  const target = getApiUrl(path);
   target.search = request.nextUrl.search;
-
-  if (request.nextUrl.pathname === "/connections/gmail/callback") {
-    target.pathname = "/v1/connections/gmail/callback";
-  }
 
   return NextResponse.rewrite(target);
 }

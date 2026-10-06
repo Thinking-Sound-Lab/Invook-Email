@@ -63,7 +63,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       target: worker
-    command: ["pnpm", "db:migrate"]
+    working_dir: /workspace/packages/database
+    command: ["node", "node_modules/drizzle-kit/bin.cjs", "migrate"]
     environment:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
     depends_on:
@@ -105,7 +106,7 @@ services:
       minio-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "node", "-e", "import('./apps/api/node_modules/axios/index.js').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "import('axios').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
       interval: 3s
       retries: 20
     restart: unless-stopped

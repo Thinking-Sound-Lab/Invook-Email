@@ -7,3 +7,6 @@ node_modules/
 coverage/
 *.tsbuildinfo
 .DS_Store
+.vercel/
+.context/
+**/cdk.out/

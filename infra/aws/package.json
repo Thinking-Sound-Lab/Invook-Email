@@ -1,0 +1,19 @@
+{
+  "name": "@invook/infra",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cdk": "cdk",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test lib/*.test.ts scripts/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "aws-cdk": "2.1144.0",
+    "aws-cdk-lib": "2.272.0",
+    "constructs": "10.5.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -88,6 +88,10 @@ Open [localhost:3000](http://localhost:3000), sign in with Google, then connect 
 
 `make down` stops the containers and preserves local data.
 
+## Deploy to production
+
+Use the [AWS CDK and Vercel deployment guide](./infra/aws/README.md) to deploy the Next.js UI on Vercel and the API and worker on AWS Fargate, using Supabase PostgreSQL, Better Auth, Temporal Cloud and private AWS S3. Local Docker self-hosting runs the same application with PostgreSQL and MinIO.
+
 ## Your mail and your data
 
 Gmail owns your messages, read state, stars, and drafts. Invook writes provider actions to Gmail first, then brings its stored replica up to date through Gmail history. Invook owns your AI labels.
