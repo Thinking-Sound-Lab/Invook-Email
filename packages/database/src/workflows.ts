@@ -321,8 +321,33 @@ export function temporalCommandPriority(
  * caller must stop rather than compete with it.
  */
 export type MailSyncPageRecord =
-  | { status: "recorded"; pendingThreadIds: string[] }
+  | {
+      status: "recorded";
+      nextPageToken: string | null;
+      pendingThreadIds: string[];
+    }
   | { status: "superseded" };
+
+/**
+ * Threads a page still owes ingestion.
+ *
+ * The listed order is preserved so a first persist and an identical replay
+ * return the same pending set. A shifted Gmail listing also keeps leftover
+ * queued threads from the first persist, or they would never be ingested.
+ */
+export function pendingMailSyncPageThreadIds(input: {
+  listedThreadIds: string[];
+  queuedThreadIds: string[];
+}): string[] {
+  const listed = new Set(input.listedThreadIds);
+  const queued = new Set(input.queuedThreadIds);
+  return [
+    ...input.listedThreadIds.filter((providerThreadId) =>
+      queued.has(providerThreadId),
+    ),
+    ...[...queued].filter((providerThreadId) => !listed.has(providerThreadId)),
+  ];
+}
 
 /**
  * The admission record that hands a synchronization run to Temporal.
@@ -1339,9 +1364,10 @@ export async function isActiveMailSyncRun(
  * ingestion for.
  *
  * The insert is idempotent on `(runId, pageNumber)`, so a replayed Activity
- * attempt re-reports the same pending set rather than duplicating work. Threads
- * an earlier page already claimed are excluded: Gmail can repeat a thread
- * across pages when the mailbox changes mid-walk.
+ * keeps the first listing's cursor and still reports every thread that listing
+ * discovered that has not completed. Gmail's listing can shift after a crash:
+ * a later attempt must not replace the page token or drop threads that fell
+ * off the retried page.
  */
 export async function recordMailSyncPage(
   input: {
@@ -1369,7 +1395,7 @@ export async function recordMailSyncPage(
       throw new Error("A Gmail synchronization page contains an invalid thread ID.");
     }
     const uniqueThreadIds = Array.from(new Set(input.providerThreadIds));
-    await transaction
+    const [insertedPage] = await transaction
       .insert(gmailSyncPages)
       .values({
         runId: input.runId,
@@ -1378,7 +1404,23 @@ export async function recordMailSyncPage(
         nextPageToken: input.nextPageToken,
         discoveredThreadCount: uniqueThreadIds.length,
       })
-      .onConflictDoNothing({ target: [gmailSyncPages.runId, gmailSyncPages.pageNumber] });
+      .onConflictDoNothing({ target: [gmailSyncPages.runId, gmailSyncPages.pageNumber] })
+      .returning({ nextPageToken: gmailSyncPages.nextPageToken });
+    const [storedPage] = insertedPage
+      ? [insertedPage]
+      : await transaction
+          .select({ nextPageToken: gmailSyncPages.nextPageToken })
+          .from(gmailSyncPages)
+          .where(
+            and(
+              eq(gmailSyncPages.runId, input.runId),
+              eq(gmailSyncPages.pageNumber, input.pageNumber),
+            ),
+          )
+          .limit(1);
+    if (!storedPage) {
+      throw new Error("The Gmail synchronization page could not be stored.");
+    }
 
     if (uniqueThreadIds.length) {
       await transaction
@@ -1393,24 +1435,15 @@ export async function recordMailSyncPage(
           target: [gmailSyncItems.runId, gmailSyncItems.providerThreadId],
         });
     }
-    // Read back rather than trusting the insert's returning clause: a replayed
-    // Activity attempt inserts nothing yet still owes ingestion for every thread
-    // on the page that has not completed.
-    const pendingItems = uniqueThreadIds.length
-      ? await transaction
-          .select({ providerThreadId: gmailSyncItems.providerThreadId })
-          .from(gmailSyncItems)
-          .where(
-            and(
-              eq(gmailSyncItems.runId, input.runId),
-              inArray(gmailSyncItems.providerThreadId, uniqueThreadIds),
-              inArray(gmailSyncItems.status, ["queued", "running"]),
-            ),
-          )
-      : [];
-    const pendingThreadIds = new Set(
-      pendingItems.map((item) => item.providerThreadId),
-    );
+    const pendingItems = await transaction
+      .select({ providerThreadId: gmailSyncItems.providerThreadId })
+      .from(gmailSyncItems)
+      .where(
+        and(
+          eq(gmailSyncItems.runId, input.runId),
+          inArray(gmailSyncItems.status, ["queued", "running"]),
+        ),
+      );
 
     const [[pageStats], [itemStats]] = await Promise.all([
       transaction
@@ -1427,12 +1460,13 @@ export async function recordMailSyncPage(
       .set({
         pageCount: pageStats?.pageCount ?? 0,
         discoveredThreadCount: itemStats?.discoveredThreadCount ?? 0,
-        discoveryComplete: input.nextPageToken === null ? true : undefined,
+        discoveryComplete:
+          insertedPage && input.nextPageToken === null ? true : undefined,
         updatedAt: new Date(),
       })
       .where(eq(mailSyncRuns.id, input.runId));
 
-    if (input.nextPageToken === null) {
+    if (insertedPage && input.nextPageToken === null) {
       await transaction.execute(
         sql`select pg_notify('invook_account_sync', ${JSON.stringify({ accountId: input.accountId })})`,
       );
@@ -1440,9 +1474,11 @@ export async function recordMailSyncPage(
 
     return {
       status: "recorded",
-      pendingThreadIds: uniqueThreadIds.filter((providerThreadId) =>
-        pendingThreadIds.has(providerThreadId),
-      ),
+      nextPageToken: storedPage.nextPageToken,
+      pendingThreadIds: pendingMailSyncPageThreadIds({
+        listedThreadIds: uniqueThreadIds,
+        queuedThreadIds: pendingItems.map((item) => item.providerThreadId),
+      }),
     };
   });
 }

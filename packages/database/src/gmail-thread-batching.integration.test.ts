@@ -12,6 +12,7 @@ import {
   connectedAccounts,
   gmailReplicaStates,
   gmailSyncItems,
+  gmailSyncPages,
   mailSyncRuns,
   messages,
   profiles,
@@ -83,6 +84,7 @@ test(
 
       assert.deepEqual(await recordPage(), {
         status: "recorded",
+        nextPageToken: null,
         pendingThreadIds: providerThreadIds,
       });
 
@@ -96,6 +98,7 @@ test(
       // replayed call reports the same pending set rather than an empty one.
       assert.deepEqual(await recordPage(), {
         status: "recorded",
+        nextPageToken: null,
         pendingThreadIds: providerThreadIds,
       });
 
@@ -180,11 +183,107 @@ test(
         ),
         {
           status: "recorded",
+          nextPageToken: null,
           pendingThreadIds: providerThreadIds.filter(
             (providerThreadId) => providerThreadId !== completedProviderThreadId,
           ),
         },
       );
+    } finally {
+      await database.delete(profiles).where(eq(profiles.id, userId));
+      await client.end();
+    }
+  },
+);
+
+test(
+  "a replayed Gmail page keeps the first snapshot when the listing shifts",
+  { skip: !testDatabaseUrl },
+  async () => {
+    if (!testDatabaseUrl) return;
+    const client = postgres(testDatabaseUrl, { max: 1, prepare: false });
+    const database = drizzle(client, { schema });
+    const userId = uuidv4();
+    const accountId = uuidv4();
+    const runId = uuidv4();
+    try {
+      await database.insert(profiles).values({
+        id: userId,
+        displayName: "Database Test User",
+        email: `${userId}@example.test`,
+      });
+      await database.insert(connectedAccounts).values({
+        id: accountId,
+        userId,
+        providerAccountId: `provider-${accountId}`,
+        email: `${accountId}@example.com`,
+      });
+      await database.insert(gmailReplicaStates).values({
+        accountId,
+        initialHistoryId: "100",
+        state: "snapshotting",
+      });
+      await database.insert(mailSyncRuns).values({
+        id: runId,
+        userId,
+        accountId,
+        status: "running",
+        startingHistoryCursor: "100",
+        idempotencyKey: `shifted-page-test:${runId}`,
+      });
+
+      assert.deepEqual(
+        await recordMailSyncPage(
+          {
+            runId,
+            userId,
+            accountId,
+            pageNumber: 1,
+            pageToken: null,
+            nextPageToken: "original-next-page",
+            providerThreadIds: ["thread-a", "thread-b", "thread-c"],
+          },
+          database,
+        ),
+        {
+          status: "recorded",
+          nextPageToken: "original-next-page",
+          pendingThreadIds: ["thread-a", "thread-b", "thread-c"],
+        },
+      );
+
+      assert.deepEqual(
+        await recordMailSyncPage(
+          {
+            runId,
+            userId,
+            accountId,
+            pageNumber: 1,
+            pageToken: null,
+            nextPageToken: null,
+            providerThreadIds: ["thread-b", "thread-c", "thread-d"],
+          },
+          database,
+        ),
+        {
+          status: "recorded",
+          nextPageToken: "original-next-page",
+          pendingThreadIds: ["thread-b", "thread-c", "thread-d", "thread-a"],
+        },
+      );
+
+      const [page] = await database
+        .select({
+          nextPageToken: gmailSyncPages.nextPageToken,
+        })
+        .from(gmailSyncPages)
+        .where(eq(gmailSyncPages.runId, runId));
+      assert.equal(page?.nextPageToken, "original-next-page");
+      const [run] = await database
+        .select({ discoveryComplete: mailSyncRuns.discoveryComplete })
+        .from(mailSyncRuns)
+        .where(eq(mailSyncRuns.id, runId));
+      assert.equal(run?.discoveryComplete, false);
     } finally {
       await database.delete(profiles).where(eq(profiles.id, userId));
       await client.end();
