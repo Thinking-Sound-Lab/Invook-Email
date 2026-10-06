@@ -1,0 +1,38 @@
+FROM golang:1.24-bookworm AS minio-build
+WORKDIR /src
+ENV CGO_ENABLED=0
+RUN git init . \
+  && git remote add origin https://github.com/minio/minio.git \
+  && git fetch --depth 1 origin 9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a \
+  && git checkout --detach FETCH_HEAD
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    GOMAXPROCS=2 go build -p 2 -trimpath \
+      -ldflags "$(GOMAXPROCS=2 go run -p 2 buildscripts/gen-ldflags.go)" -o /out/minio .
+
+FROM golang:1.24-bookworm AS mc-build
+WORKDIR /src
+ENV CGO_ENABLED=0
+RUN git init . \
+  && git remote add origin https://github.com/minio/mc.git \
+  && git fetch --depth 1 origin 7394ce0dd2a80935aded936b09fa12cbb3cb8096 \
+  && git checkout --detach FETCH_HEAD
+RUN go build -trimpath -ldflags "$(go run buildscripts/gen-ldflags.go)" -o /out/mc .
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/*
+
+FROM runtime AS server
+COPY --from=minio-build /out/minio /usr/bin/minio
+COPY --from=minio-build /src/LICENSE /licenses/LICENSE
+COPY --from=minio-build /src/CREDITS /licenses/CREDITS
+ENTRYPOINT ["minio"]
+CMD ["server", "/data", "--console-address", ":9001"]
+
+FROM runtime AS client
+COPY --from=mc-build /out/mc /usr/bin/mc
+COPY --from=mc-build /src/LICENSE /licenses/LICENSE
+COPY --from=mc-build /src/CREDITS /licenses/CREDITS
+ENTRYPOINT ["mc"]

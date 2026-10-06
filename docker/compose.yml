@@ -19,7 +19,10 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.minio
+      target: server
     command: ["server", "/data", "--console-address", ":9001"]
     ports:
       - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
@@ -36,7 +39,10 @@ services:
     restart: unless-stopped
 
   minio-init:
-    image: minio/mc:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.minio
+      target: client
     entrypoint:
       - /bin/sh
       - -c
