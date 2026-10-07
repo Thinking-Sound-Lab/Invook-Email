@@ -1,5 +1,7 @@
 import { defineConfig } from "drizzle-kit";
 
+import { getDatabaseMigrationCredentials } from "./src/database-tls";
+
 const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
@@ -10,9 +12,7 @@ export default defineConfig({
   dialect: "postgresql",
   schema: "./src/schema.ts",
   out: "./drizzle",
-  dbCredentials: {
-    url: databaseUrl,
-  },
+  dbCredentials: getDatabaseMigrationCredentials(databaseUrl),
   strict: true,
   verbose: true,
 });
