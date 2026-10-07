@@ -1,12 +1,17 @@
 import { CfnCondition, Fn, aws_ecs as ecs } from "aws-cdk-lib";
 import { Construct } from "constructs";
 
-import { API_RUNTIME_KEYS, WORKER_RUNTIME_KEYS, type RuntimeEnvironmentKey } from "../runtime-environment";
+import {
+  API_CONFIGURATION_KEYS, API_SECRET_KEYS, WORKER_CONFIGURATION_KEYS, WORKER_SECRET_KEYS,
+  type RuntimeSecretKey,
+} from "../runtime-environment";
 import type { ApiIngress } from "./api-ingress";
+import type { RuntimeConfiguration } from "./runtime-configuration";
 import type { RuntimeResources } from "./runtime-resources";
 
 export interface MailServicesProps {
   runtime: RuntimeResources;
+  configuration: RuntimeConfiguration;
   ingress: ApiIngress;
   subnetIds: string[];
   mailBucketName: string;
@@ -66,7 +71,7 @@ export class MailServices extends Construct {
 
   constructor(scope: Construct, constructId: string, props: MailServicesProps) {
     super(scope, constructId);
-    const { runtime, ingress } = props;
+    const { runtime, configuration, ingress } = props;
     const hasApiImage = new CfnCondition(this, "HasApiImage", {
       expression: Fn.conditionNot(Fn.conditionEquals(props.apiImage, "")),
     });
@@ -81,7 +86,7 @@ export class MailServices extends Construct {
       { name: "S3_REGION", value: Fn.ref("AWS::Region") },
       { name: "S3_BUCKET", value: props.mailBucketName },
     ];
-    const secrets = (keys: readonly RuntimeEnvironmentKey[]): ecs.CfnTaskDefinition.SecretProperty[] =>
+    const secrets = (keys: readonly RuntimeSecretKey[]): ecs.CfnTaskDefinition.SecretProperty[] =>
       keys.map((name) => ({ name, valueFrom: Fn.join("", [runtime.secret.ref, ":" + name + "::"]) }));
     const logConfiguration = (group: string, prefix: string): ecs.CfnTaskDefinition.LogConfigurationProperty => ({
       logDriver: "awslogs",
@@ -96,8 +101,9 @@ export class MailServices extends Construct {
         environment: [
           { name: "NODE_ENV", value: "production" }, { name: "HOST", value: "0.0.0.0" },
           { name: "PORT", value: "4000" }, ...storageEnvironment,
+          ...configuration.getEnvironment(API_CONFIGURATION_KEYS),
         ],
-        secrets: secrets(API_RUNTIME_KEYS),
+        secrets: secrets(API_SECRET_KEYS),
         healthCheck: {
           command: ["CMD", "node", "-e", "import('axios').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"],
           interval: 30, retries: 3, startPeriod: 60, timeout: 5,
@@ -117,8 +123,9 @@ export class MailServices extends Construct {
           { name: "GMAIL_CONTENT_CONCURRENCY", value: "5" },
           { name: "MAIL_LABEL_CONCURRENCY", value: "5" },
           { name: "MAIL_BULK_CONCURRENCY", value: "3" }, ...storageEnvironment,
+          ...configuration.getEnvironment(WORKER_CONFIGURATION_KEYS),
         ],
-        secrets: secrets(WORKER_RUNTIME_KEYS),
+        secrets: secrets(WORKER_SECRET_KEYS),
         logConfiguration: logConfiguration(runtime.workerLogs.ref, "worker"),
       },
     });

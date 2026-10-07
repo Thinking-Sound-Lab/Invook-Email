@@ -4,6 +4,7 @@ import type { Construct } from "constructs";
 import { ApiIngress } from "./constructs/api-ingress";
 import { MailServices } from "./constructs/mail-services";
 import { MailStorage } from "./constructs/mail-storage";
+import { RuntimeConfiguration } from "./constructs/runtime-configuration";
 import { RuntimeResources } from "./constructs/runtime-resources";
 import { TaskOperations } from "./constructs/task-operations";
 
@@ -31,8 +32,9 @@ export class ProductionStack extends Stack {
       vpcId: vpcId.valueAsString, subnetIds: subnetIds.valueAsList,
     });
     const runtime = new RuntimeResources(this, "Runtime", { mailBucketArn: storage.bucket.attrArn });
+    const configuration = new RuntimeConfiguration(this, "Configuration");
     const services = new MailServices(this, "Services", {
-      runtime, ingress, subnetIds: subnetIds.valueAsList, mailBucketName: storage.bucket.ref,
+      runtime, configuration, ingress, subnetIds: subnetIds.valueAsList, mailBucketName: storage.bucket.ref,
       apiImage: apiImage.valueAsString, workerImage: workerImage.valueAsString,
       apiCount: apiCount.valueAsNumber, workerCount: workerCount.valueAsNumber,
     });

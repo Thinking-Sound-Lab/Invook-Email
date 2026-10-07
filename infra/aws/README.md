@@ -11,11 +11,12 @@ infra/aws/
   lib/constructs/
     mail-storage.ts                Private, encrypted, retained S3 bucket
     api-ingress.ts                 Security groups, internal ALB and streaming API Gateway
+    runtime-configuration.ts       Ordinary runtime settings as stack parameters
     runtime-resources.ts           ECR, ECS cluster, IAM roles, secrets and logs
     mail-services.ts               API, worker and migration task definitions and services
     task-operations.ts             Scoped role for one-off migrations and infrastructure checks
   scripts/
-    deploy.sh                      Bootstrap, image publication, secrets and release
+    deploy.sh                      Bootstrap, configuration, image publication and release
     runtime-env.ts                 Runtime validation and stable key generation
   production.env.example           Documented API and worker variables
   cdk.json                         CDK configuration
@@ -73,13 +74,23 @@ cp infra/aws/production.env.example .env.production.local
 chmod 600 .env.production.local
 ```
 
-Fill the documented variables in that ignored file. Do not commit it or share credentials in issues. `secrets` generates and persists independent `BETTER_AUTH_SECRET` and `TOKEN_ENCRYPTION_KEY` values when empty, then uploads the JSON to AWS Secrets Manager. Keep a secure backup of the encryption key: replacing it makes existing Google grants unreadable.
+Fill the documented variables in that ignored file. Do not commit it or share credentials in issues. `configure` generates and persists independent `BETTER_AUTH_SECRET` and `TOKEN_ENCRYPTION_KEY` values when empty. Keep a secure backup of the encryption key: replacing it makes existing Google grants unreadable.
 
 ```bash
-./infra/aws/scripts/deploy.sh secrets
+./infra/aws/scripts/deploy.sh configure
 ```
 
-This command can prepare incomplete configuration. `release` refuses to start until all runtime variables are filled and validated. The secret name is `<AWS_STACK_NAME>/runtime`. Vercel gets only the API origin; database, OAuth, Temporal and OpenAI credentials stay on AWS.
+The single env file is the setup input. Ordinary settings go into CloudFormation parameters and ECS `environment`; credentials go into one Secrets Manager JSON secret named `<AWS_STACK_NAME>/runtime` and ECS `secrets`. Each container receives only the variables it uses. CloudFormation manages the secret resource, without storing or resetting its value in the template. No automatic rotation is configured.
+
+| Ordinary settings | Sensitive values |
+| --- | --- |
+| `APP_URL` | `DATABASE_URL` |
+| `BETTER_AUTH_GOOGLE_CLIENT_ID`, `GMAIL_GOOGLE_CLIENT_ID` | `BETTER_AUTH_GOOGLE_CLIENT_SECRET`, `GMAIL_GOOGLE_CLIENT_SECRET` |
+| `GMAIL_PUBSUB_TOPIC`, `GOOGLE_PUBSUB_SUBSCRIPTION` | `BETTER_AUTH_SECRET`, `TOKEN_ENCRYPTION_KEY` |
+| `GOOGLE_PUBSUB_PUSH_AUDIENCE`, `GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL` | `OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET` |
+| `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` | `TEMPORAL_API_KEY` |
+
+`configure` stops API and worker before applying settings and credentials together. It can prepare incomplete configuration; services stay stopped until `release` validates the deployed CloudFormation parameters and secret. To update a value, edit the same env file, run `configure`, then `release`. Preserve the existing auth and encryption keys when updating provider credentials. Vercel gets only the API origin; database, OAuth, Temporal and OpenAI credentials stay on AWS.
 
 For Supabase, copy the **session pooler** PostgreSQL connection string from the project's Connect dialog, using port **5432** and `sslmode=verify-full`. This deployment uses IPv4 subnets. A direct Supabase connection requires the project's IPv4 support; the default direct IPv6 address will not work here. Transaction pooling on port 6543 breaks the persistent connections required by `LISTEN` and session advisory locks. Invook uses SQL migrations and Better Auth, so no Supabase Auth or Storage setup is required. Create a fresh production database, or back up existing data before applying this repository's migrations.
 
@@ -103,7 +114,7 @@ Google OAuth consent and Gmail scopes, Pub/Sub push authentication, and provider
 ./infra/aws/scripts/deploy.sh status
 ```
 
-Images use immutable ECR tags and Linux amd64. Use a new tag for each build. `release` checks configuration and images, stops API and worker, runs the migration task, checks its exit code, starts both services, and checks API readiness. It intentionally permits downtime while migrations run, including breaking migrations. If migration fails, services stay stopped and the migration log group contains diagnostics. Changes to Secrets Manager apply to containers after another `release`.
+Images use immutable ECR tags and Linux amd64. Use a new tag for each build. `release` checks the deployed settings, secret and images, stops API and worker, runs the migration task, checks its exit code, starts both services, and checks API readiness. It intentionally permits downtime while migrations run, including breaking migrations. If migration fails, services stay stopped and the migration log group contains diagnostics. Changes made directly in Secrets Manager apply to containers after another `release`; keep the ignored setup file synchronized before the next `configure`.
 
 Logs are under `/<AWS_STACK_NAME>/api`, `/worker`, and `/migration`, with 14-day retention. S3 and the runtime secret are retained if the CDK stack is deleted. Delete those explicitly only when intentionally removing all installation data. Tagged container releases remain available for rollback; returning to an older image does not undo database migrations.
 

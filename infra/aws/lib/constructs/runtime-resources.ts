@@ -4,8 +4,6 @@ import {
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
 
-import { RUNTIME_KEYS } from "../runtime-environment";
-
 export interface RuntimeResourcesProps {
   mailBucketArn: string;
 }
@@ -70,8 +68,7 @@ export class RuntimeResources extends Construct {
     this.workerRepository = createRepository(this, "WorkerRepository", "worker");
     this.secret = new secretsmanager.CfnSecret(this, "RuntimeSecret", {
       name: Fn.sub("${AWS::StackName}/runtime"),
-      description: "Production runtime variables. Fill before activating API and worker.",
-      secretString: JSON.stringify(Object.fromEntries(RUNTIME_KEYS.map((key) => [key, ""]))),
+      description: "Production credentials only. Configure before activating API and worker.",
     });
     this.secret.overrideLogicalId("RuntimeSecret");
     this.secret.applyRemovalPolicy(RemovalPolicy.RETAIN);

@@ -3,11 +3,36 @@ import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { parseEnv } from "node:util";
 
-import { RUNTIME_KEYS, type RuntimeEnvironment } from "../lib/runtime-environment";
+import {
+  CONFIGURATION_KEYS, CONFIGURATION_PARAMETER_NAMES, RUNTIME_KEYS, SECRET_KEYS,
+  type RuntimeEnvironment, type RuntimeSecrets,
+} from "../lib/runtime-environment";
+
+interface StackParameter {
+  ParameterKey: string;
+  ParameterValue: string;
+}
 
 function isRuntimeEnvironment(value: unknown): value is RuntimeEnvironment {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     && RUNTIME_KEYS.every((key) => key in value && typeof Reflect.get(value, key) === "string");
+}
+
+function isRuntimeSecrets(value: unknown): value is RuntimeSecrets {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && Object.keys(value).length === SECRET_KEYS.length
+    && SECRET_KEYS.every((key) => key in value && typeof Reflect.get(value, key) === "string");
+}
+
+function isStackParameter(value: unknown): value is StackParameter {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && "ParameterKey" in value && typeof value.ParameterKey === "string"
+    && "ParameterValue" in value && typeof value.ParameterValue === "string";
+}
+
+function parseJson(value: string, description: string): unknown {
+  try { return JSON.parse(value); }
+  catch { throw new Error(description + " must be valid JSON."); }
 }
 
 function parseRuntimeUrl(value: string, name: string): URL {
@@ -19,6 +44,9 @@ export function validateProductionRuntime(value: unknown): asserts value is Runt
   if (!isRuntimeEnvironment(value)) throw new Error("Runtime configuration must contain the documented string variables.");
   const missing = RUNTIME_KEYS.filter((name) => !value[name].trim());
   if (missing.length) throw new Error("Fill production variables: " + missing.join(", ") + ".");
+  for (const name of CONFIGURATION_KEYS) {
+    if (/[\r\n]/.test(value[name])) throw new Error(name + " must be a single-line setting.");
+  }
   const appUrl = parseRuntimeUrl(value.APP_URL, "APP_URL");
   if (appUrl.protocol !== "https:" || appUrl.username || appUrl.password || appUrl.search
       || appUrl.hash || appUrl.pathname !== "/") {
@@ -43,18 +71,30 @@ export function validateProductionRuntime(value: unknown): asserts value is Runt
   }
 }
 
-export function parseProductionRuntime(value: string): RuntimeEnvironment {
-  let runtime: unknown;
-  try { runtime = JSON.parse(value); }
-  catch { throw new Error("Production runtime secret must be valid JSON."); }
+export function parseProductionRuntime(secretValue: string, parameterValue: string): RuntimeEnvironment {
+  const secrets = parseJson(secretValue, "Production runtime secret");
+  if (!isRuntimeSecrets(secrets)) throw new Error("Runtime secret must contain only the documented secret variables.");
+  const parameters = parseJson(parameterValue, "CloudFormation parameters");
+  if (!Array.isArray(parameters) || !parameters.every(isStackParameter)) {
+    throw new Error("CloudFormation parameters must contain string keys and values.");
+  }
+  const configuration = CONFIGURATION_KEYS.map((name) => {
+    const matches = parameters.filter((parameter) => parameter.ParameterKey === CONFIGURATION_PARAMETER_NAMES[name]);
+    if (matches.length !== 1) throw new Error("Missing or duplicated CloudFormation setting: " + name);
+    return [name, matches[0].ParameterValue];
+  });
+  const runtime = { ...Object.fromEntries(configuration), ...secrets };
   validateProductionRuntime(runtime);
   return runtime;
 }
 
-export function writeRuntimeEnvironment(source: string, target: string): void {
+export function writeRuntimeEnvironment(source: string, secretTarget: string, configurationTarget: string): void {
   const content = readFileSync(source, "utf8");
   const environment = parseEnv(content);
   const runtime = Object.fromEntries(RUNTIME_KEYS.map((name) => [name, environment[name]?.trim() ?? ""]));
+  for (const name of CONFIGURATION_KEYS) {
+    if (/[\r\n]/.test(runtime[name])) throw new Error(name + " must be a single-line setting.");
+  }
   let updatedContent = content;
   for (const name of ["BETTER_AUTH_SECRET", "TOKEN_ENCRYPTION_KEY"]) {
     if (runtime[name]) continue;
@@ -66,17 +106,22 @@ export function writeRuntimeEnvironment(source: string, target: string): void {
   // Persist generated keys; changing the encryption key loses access to stored mailbox grants.
   chmodSync(source, 0o600);
   writeFileSync(source, updatedContent);
-  writeFileSync(target, JSON.stringify(runtime), { mode: 0o600 });
-  chmodSync(target, 0o600);
+  const secrets = Object.fromEntries(SECRET_KEYS.map((name) => [name, runtime[name]]));
+  const configuration = CONFIGURATION_KEYS.map((name) => CONFIGURATION_PARAMETER_NAMES[name] + "=" + runtime[name]).join("\n");
+  for (const [target, value] of [[secretTarget, JSON.stringify(secrets)], [configurationTarget, configuration + "\n"]]) {
+    writeFileSync(target, value, { mode: 0o600 });
+    chmodSync(target, 0o600);
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const [action, source, target] = process.argv.slice(2);
+  const [action, source, target, configurationTarget] = process.argv.slice(2);
   if (action === "write") {
-    if (!source || !target) throw new Error("Provide the production env file and output file.");
-    writeRuntimeEnvironment(source, target);
+    if (!source || !target || !configurationTarget) throw new Error("Provide the production env file, secret output and settings output.");
+    writeRuntimeEnvironment(source, target, configurationTarget);
   } else if (action === "check") {
-    parseProductionRuntime(readFileSync(0, "utf8"));
+    if (!source || !target) throw new Error("Provide the runtime secret and CloudFormation parameter files.");
+    parseProductionRuntime(readFileSync(source, "utf8"), readFileSync(target, "utf8"));
     console.log("Production runtime variables are configured.");
   } else {
     throw new Error("Use write or check.");

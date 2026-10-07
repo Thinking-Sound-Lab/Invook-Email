@@ -69,15 +69,21 @@ case "${1:-}" in
     echo "Runtime secret: $(output RuntimeSecretArn)"
     echo "Vercel API_INTERNAL_URL: $(output ApiUrl)"
     ;;
-  secrets)
+  configure)
     env_file="${2:-.env.production.local}"
-    secret_file="$(mktemp)"
-    trap 'rm -f "$secret_file"' EXIT
-    chmod 600 "$secret_file"
-    node --import tsx infra/aws/scripts/runtime-env.ts write "$env_file" "$secret_file"
+    runtime_directory="$(mktemp -d)"
+    trap 'rm -rf "$runtime_directory"' EXIT
+    chmod 700 "$runtime_directory"
+    secret_file="$runtime_directory/secrets.json"
+    configuration_file="$runtime_directory/settings.txt"
+    node --import tsx infra/aws/scripts/runtime-env.ts write "$env_file" "$secret_file" "$configuration_file"
+    parameters=(ApiCount=0 WorkerCount=0)
+    while IFS= read -r parameter; do parameters+=("$parameter"); done < "$configuration_file"
+    # Stop both processes before changing settings and credentials together.
+    apply_stack "${parameters[@]}"
     aws_cli secretsmanager put-secret-value --secret-id "$(output RuntimeSecretArn)" \
       --secret-string "file://$secret_file" --query ARN --output text
-    echo "Secrets uploaded. Re-run release to apply changes to running containers."
+    echo "Settings and secrets configured. Services remain stopped until release."
     ;;
   publish)
     command -v docker >/dev/null
@@ -98,8 +104,13 @@ case "${1:-}" in
       aws_cli ecr describe-images --repository-name "$repository" --image-ids "imageTag=$tag" --query 'imageDetails[0].imageDigest' --output text
     done
     if [[ "$1" == release ]]; then
-      aws_cli secretsmanager get-secret-value --secret-id "$(output RuntimeSecretArn)" --query SecretString --output text |
-        node --import tsx infra/aws/scripts/runtime-env.ts check
+      runtime_directory="$(mktemp -d)"
+      trap 'rm -rf "$runtime_directory"' EXIT
+      chmod 700 "$runtime_directory"
+      aws_cli secretsmanager get-secret-value --secret-id "$(output RuntimeSecretArn)" --query SecretString --output text > "$runtime_directory/secrets.json"
+      chmod 600 "$runtime_directory/secrets.json"
+      aws_cli cloudformation describe-stacks --stack-name "$stack" --query 'Stacks[0].Parameters' --output json > "$runtime_directory/parameters.json"
+      node --import tsx infra/aws/scripts/runtime-env.ts check "$runtime_directory/secrets.json" "$runtime_directory/parameters.json"
     fi
     # Stop application processes before migrations, including breaking migrations.
     apply_stack "ApiImage=$api_image" "WorkerImage=$worker_image" ApiCount=0 WorkerCount=0
@@ -135,5 +146,5 @@ NODE
     aws_cli cloudformation describe-stacks --stack-name "$stack" \
       --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' --output json
     ;;
-  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|diff|secrets [env-file]|publish [tag]|stage tag|release tag|status}" >&2; exit 1 ;;
+  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|diff|configure [env-file]|publish [tag]|stage tag|release tag|status}" >&2; exit 1 ;;
 esac
