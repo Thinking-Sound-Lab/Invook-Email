@@ -16,9 +16,9 @@ export interface MailboxPageState {
   olderCursor: string | null;
   loadState: MailboxPageLoadState;
   /**
-   * Set when a mailbox change event reconciled a different view, so this page's
-   * membership can no longer be trusted. The next server render replaces it
-   * instead of merging into it.
+   * Set when a mailbox change event reconciled a different view, or when the
+   * mailbox has to be re-read without event replay. Membership can no longer
+   * be trusted; the next first-page read replaces it instead of merging.
    */
   isStale: boolean;
 }
@@ -68,6 +68,7 @@ export interface MailboxState {
   appendPage: (input: AppendMailboxPageInput) => void;
   setPageLoadState: (input: SetMailboxPageLoadStateInput) => void;
   applyThreadUpdates: (input: ApplyMailboxThreadUpdatesInput) => void;
+  markPagesStale: () => void;
   patchThread: (input: PatchMailboxThreadInput) => void;
   hydrateThreadDetail: (input: HydrateMailboxThreadDetailInput) => void;
   removeThreadDetail: (threadId: string) => void;

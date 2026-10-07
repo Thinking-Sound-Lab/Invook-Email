@@ -42,6 +42,7 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
   const isRefreshPendingRef = useRef(false);
   const hasQueuedRefreshRef = useRef(false);
   const applyThreadUpdates = useMailboxStore((state) => state.applyThreadUpdates);
+  const markPagesStale = useMailboxStore((state) => state.markPagesStale);
   const setSidebarCounts = useMailboxStore((state) => state.setSidebarCounts);
   const hydrateThreadDetail = useMailboxStore(
     (state) => state.hydrateThreadDetail,
@@ -60,8 +61,12 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
       return;
     }
     isRefreshPendingRef.current = true;
+    // The route refresh only re-reads the first page of the open view. Mark
+    // every cached page stale so paginated rows that changed while the stream
+    // was down are replaced instead of merged back in.
+    markPagesStale();
     startRefreshTransition(() => router.refresh());
-  }, [router]);
+  }, [markPagesStale, router]);
 
   useEffect(() => {
     isRefreshPendingRef.current = isRefreshPending;

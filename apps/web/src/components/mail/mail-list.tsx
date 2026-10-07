@@ -17,7 +17,10 @@ import {
   getMailboxThreadDetail,
   getMailboxThreadPage,
 } from "@/lib/api/mailbox-threads";
-import { createMailboxPageKey } from "@/stores/mailbox/mailbox-cache";
+import {
+  createMailboxPageKey,
+  hasFreshMailboxPage,
+} from "@/stores/mailbox/mailbox-cache";
 import { useMailboxStore } from "@/stores/mailbox/store";
 import { cn } from "@/lib/utils";
 
@@ -311,14 +314,20 @@ export function MailList({
   } | null>(null);
   const [firstPageAttempt, setFirstPageAttempt] = useState(0);
   const hasFirstPageFailed = firstPageFailure?.key === pageKey;
-  const isCached = page !== undefined;
+  const isFresh = hasFreshMailboxPage(page);
+  // The server page is a snapshot from the request that produced this route.
+  // A later visit must not hydrate it over a fresher cache, and a stale cache
+  // must not treat it as a replacement for a live first-page read.
+  const shouldSeedFromInitialPage = page === undefined && initialPage !== null;
+  const needsFirstPage = !isFresh && !shouldSeedFromInitialPage;
 
   useEffect(() => {
-    if (initialPage) hydratePage({ key: pageKey, page: initialPage });
-  }, [hydratePage, initialPage, pageKey]);
+    if (!shouldSeedFromInitialPage || !initialPage) return;
+    hydratePage({ key: pageKey, page: initialPage });
+  }, [hydratePage, initialPage, pageKey, shouldSeedFromInitialPage]);
 
   useEffect(() => {
-    if (isCached || initialPage) return;
+    if (!needsFirstPage) return;
     const requestController = new AbortController();
     void (async () => {
       try {
@@ -340,8 +349,7 @@ export function MailList({
     currentView,
     firstPageAttempt,
     hydratePage,
-    initialPage,
-    isCached,
+    needsFirstPage,
     pageKey,
   ]);
 
@@ -359,8 +367,8 @@ export function MailList({
   // The server page renders until the cache holds this view, so first paint
   // never waits on hydration.
   const loadedThreads = cachedThreads ?? initialPage?.threads ?? [];
-  const isReadingFirstPage = !isCached && !initialPage && !hasFirstPageFailed;
-  const olderCursor = page?.olderCursor ?? null;
+  const isReadingFirstPage = needsFirstPage && !hasFirstPageFailed;
+  const olderCursor = isFresh ? (page?.olderCursor ?? null) : null;
   const loadState = page?.loadState ?? "idle";
   const isLoadingRef = useRef(false);
   const requestControllerRef = useRef<AbortController | null>(null);

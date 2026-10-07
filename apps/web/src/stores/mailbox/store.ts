@@ -6,6 +6,7 @@ import {
   appendMailboxPageState,
   applyMailboxThreadUpdates,
   hydrateMailboxPageState,
+  markMailboxPagesStale,
 } from "./mailbox-cache";
 import type { MailboxState } from "./types";
 
@@ -84,6 +85,11 @@ export const useMailboxStore = create<MailboxState>()(
             threadsById: state.threadsById,
           }),
         ),
+
+      markPagesStale: () =>
+        set((state) => ({
+          pagesByKey: markMailboxPagesStale(state.pagesByKey),
+        })),
 
       patchThread: ({ threadId, patch }) =>
         set((state) => {

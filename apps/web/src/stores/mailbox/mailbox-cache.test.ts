@@ -8,7 +8,9 @@ import {
   applyMailboxThreadUpdates,
   compareMailboxThreads,
   createMailboxPageKey,
+  hasFreshMailboxPage,
   hydrateMailboxPageState,
+  markMailboxPagesStale,
   sortMailboxThreadIds,
 } from "./mailbox-cache";
 import type { MailboxPageState } from "./types";
@@ -249,7 +251,7 @@ test("a new thread enters a partially loaded page only inside its window", () =>
   assert.deepEqual(outside.pagesByKey["all:all"]?.threadIds, ["a"]);
 });
 
-test("reconciling one view marks the other cached views stale", () => {
+test("reconciling one view marks every other cached view stale", () => {
   const shared = createThread("a", "2026-09-05T10:00:00.000Z");
   const updated = createThread("a", "2026-09-06T10:00:00.000Z");
   const result = applyMailboxThreadUpdates({
@@ -280,5 +282,78 @@ test("reconciling one view marks the other cached views stale", () => {
   });
   assert.equal(result.pagesByKey["all:all"]?.isStale, false);
   assert.equal(result.pagesByKey["all:starred"]?.isStale, true);
-  assert.equal(result.pagesByKey["all:sent"]?.isStale, false);
+  assert.equal(result.pagesByKey["all:sent"]?.isStale, true);
+});
+
+test("a thread that was not in another view still invalidates that view", () => {
+  const inbox = createThread("a", "2026-09-05T10:00:00.000Z");
+  const newlyStarred = createThread("b", "2026-09-06T10:00:00.000Z", {
+    isStarred: true,
+  });
+  const result = applyMailboxThreadUpdates({
+    key: "all:all",
+    missingThreadIds: [],
+    pagesByKey: {
+      "all:all": {
+        threadIds: ["a", "b"],
+        olderCursor: null,
+        loadState: "idle",
+        isStale: false,
+      },
+      "all:starred": {
+        threadIds: [],
+        olderCursor: null,
+        loadState: "idle",
+        isStale: false,
+      },
+    },
+    threads: [newlyStarred],
+    threadsById: createIndex([inbox]),
+  });
+  assert.equal(result.pagesByKey["all:starred"]?.isStale, true);
+  assert.deepEqual(result.pagesByKey["all:starred"]?.threadIds, []);
+});
+
+test("a stale cached page is not treated as a fresh first page", () => {
+  assert.equal(hasFreshMailboxPage(undefined), false);
+  assert.equal(
+    hasFreshMailboxPage({
+      threadIds: ["a"],
+      olderCursor: null,
+      loadState: "idle",
+      isStale: false,
+    }),
+    true,
+  );
+  assert.equal(
+    hasFreshMailboxPage({
+      threadIds: ["a"],
+      olderCursor: "cursor-1",
+      loadState: "idle",
+      isStale: true,
+    }),
+    false,
+  );
+});
+
+test("marking pages stale leaves membership in place until the next first-page read", () => {
+  const pagesByKey = {
+    "all:all": {
+      threadIds: ["a", "z"],
+      olderCursor: "cursor-page-3",
+      loadState: "idle" as const,
+      isStale: false,
+    },
+    "all:starred": {
+      threadIds: ["a"],
+      olderCursor: null,
+      loadState: "idle" as const,
+      isStale: true,
+    },
+  };
+  const next = markMailboxPagesStale(pagesByKey);
+  assert.equal(next["all:all"]?.isStale, true);
+  assert.deepEqual(next["all:all"]?.threadIds, ["a", "z"]);
+  assert.equal(next["all:all"]?.olderCursor, "cursor-page-3");
+  assert.equal(next["all:starred"], pagesByKey["all:starred"]);
 });
