@@ -4,7 +4,7 @@ import { pathToFileURL } from "node:url";
 import { parseEnv } from "node:util";
 
 import {
-  CONFIGURATION_KEYS, CONFIGURATION_PARAMETER_NAMES, RUNTIME_KEYS, SECRET_KEYS,
+  CONFIGURATION_DEFAULTS, CONFIGURATION_KEYS, CONFIGURATION_PARAMETER_NAMES, RUNTIME_KEYS, SECRET_KEYS,
   type RuntimeEnvironment, type RuntimeSecrets,
 } from "../lib/runtime-environment";
 
@@ -69,6 +69,11 @@ export function validateProductionRuntime(value: unknown): asserts value is Runt
   if (Buffer.from(value.TOKEN_ENCRYPTION_KEY, "base64").length !== 32) {
     throw new Error("TOKEN_ENCRYPTION_KEY must encode 32 random bytes as base64.");
   }
+  for (const name of ["DATABASE_POOL_SIZE", "DATABASE_CONTROL_POOL_SIZE"] as const) {
+    if (!/^[1-9][0-9]*$/.test(value[name]) || !Number.isSafeInteger(Number(value[name]))) {
+      throw new Error(name + " must be a positive integer.");
+    }
+  }
 }
 
 export function parseProductionRuntime(secretValue: string, parameterValue: string): RuntimeEnvironment {
@@ -91,11 +96,18 @@ export function parseProductionRuntime(secretValue: string, parameterValue: stri
 export function writeRuntimeEnvironment(source: string, secretTarget: string, configurationTarget: string): void {
   const content = readFileSync(source, "utf8");
   const environment = parseEnv(content);
+  let updatedContent = content;
+  for (const name of CONFIGURATION_KEYS) {
+    const defaultValue = CONFIGURATION_DEFAULTS[name];
+    if (environment[name] === undefined && defaultValue !== undefined) {
+      environment[name] = defaultValue;
+      updatedContent += "\n" + name + "=" + defaultValue + "\n";
+    }
+  }
   const runtime = Object.fromEntries(RUNTIME_KEYS.map((name) => [name, environment[name]?.trim() ?? ""]));
   for (const name of CONFIGURATION_KEYS) {
     if (/[\r\n]/.test(runtime[name])) throw new Error(name + " must be a single-line setting.");
   }
-  let updatedContent = content;
   for (const name of ["BETTER_AUTH_SECRET", "TOKEN_ENCRYPTION_KEY"]) {
     if (runtime[name]) continue;
     runtime[name] = randomBytes(32).toString("base64");

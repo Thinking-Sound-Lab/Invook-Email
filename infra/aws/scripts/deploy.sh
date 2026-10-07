@@ -129,8 +129,6 @@ case "${1:-}" in
         echo "Migration failed. Check /$stack/migration; services remain stopped." >&2; exit 1;
       }
     apply_stack ApiCount=1 WorkerCount=1
-    aws_cli ecs update-service --cluster "$cluster" --service "$stack-api" --force-new-deployment --query 'service.serviceName' --output text
-    aws_cli ecs update-service --cluster "$cluster" --service "$stack-worker" --force-new-deployment --query 'service.serviceName' --output text
     aws_cli ecs wait services-stable --cluster "$cluster" --services "$stack-api" "$stack-worker"
     node --input-type=module - "$(output ApiUrl)/health/ready" <<'NODE'
 import axios from './apps/api/node_modules/axios/index.js';

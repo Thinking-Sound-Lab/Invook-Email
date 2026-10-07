@@ -8,7 +8,7 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 
 import { ProductionStack } from "./production-stack";
 import {
-  API_CONFIGURATION_KEYS, API_SECRET_KEYS, CONFIGURATION_KEYS, CONFIGURATION_PARAMETER_NAMES,
+  API_CONFIGURATION_KEYS, API_SECRET_KEYS, CONFIGURATION_DEFAULTS, CONFIGURATION_KEYS, CONFIGURATION_PARAMETER_NAMES,
   RUNTIME_KEYS, SECRET_KEYS, WORKER_CONFIGURATION_KEYS, WORKER_SECRET_KEYS,
 } from "./runtime-environment";
 
@@ -82,10 +82,10 @@ test("ordinary settings and secrets are complete, disjoint and bound to the inte
   const template = createTemplate();
   const environment = parseEnv(readFileSync(new URL("../production.env.example", import.meta.url), "utf8"));
   assert.deepEqual(Object.keys(environment).sort(), [...RUNTIME_KEYS].sort());
-  assert.equal(CONFIGURATION_KEYS.length, 9);
+  assert.equal(CONFIGURATION_KEYS.length, 11);
   assert.equal(SECRET_KEYS.length, 8);
   assert.equal(new Set(RUNTIME_KEYS).size, RUNTIME_KEYS.length);
-  for (const key of CONFIGURATION_KEYS) template.hasParameter(CONFIGURATION_PARAMETER_NAMES[key], { Default: "" });
+  for (const key of CONFIGURATION_KEYS) template.hasParameter(CONFIGURATION_PARAMETER_NAMES[key], { Default: CONFIGURATION_DEFAULTS[key] ?? "" });
   template.hasResourceProperties("AWS::SecretsManager::Secret", {
     SecretString: Match.absent(), GenerateSecretString: Match.absent(),
   });

@@ -1,6 +1,7 @@
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
+import { getDatabasePoolConfiguration } from "./database-pool-configuration";
 import { getDatabaseTlsOptions } from "./database-tls";
 import * as schema from "./schema";
 
@@ -31,7 +32,7 @@ function openDatabase(databaseUrl: string): DatabaseConnection {
 
   const client = postgres(databaseUrl, {
     ...getDatabaseTlsOptions(databaseUrl),
-    max: 10,
+    max: getDatabasePoolConfiguration(process.env).queryPoolSize,
     prepare: false,
   });
 
@@ -76,7 +77,7 @@ function getControlLockClient(): ReturnType<typeof postgres> {
   }
   const client = postgres(databaseUrl, {
     ...getDatabaseTlsOptions(databaseUrl),
-    max: 10,
+    max: getDatabasePoolConfiguration(process.env).controlPoolSize,
     prepare: false,
   });
   databaseState.invookControlLockConnection = { url: databaseUrl, client };
