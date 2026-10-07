@@ -105,6 +105,8 @@ Configure the external callbacks using the deployed origins:
 
 Google OAuth consent and Gmail scopes, Pub/Sub push authentication, and provider webhook registration are configured outside CDK.
 
+Declare the scopes requested by `packages/gmail/src/scopes.ts` in the Google project's OAuth Data Access settings: `openid`, `email`, `profile`, and `https://www.googleapis.com/auth/gmail.modify`. Google classifies `gmail.modify` as a [restricted scope](https://developers.google.com/workspace/gmail/api/auth/scopes), so public deployments must complete [data access verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification), including the applicable security assessment. Verified branding and an “In production” publishing status do not approve Gmail access. Google documents exceptions for some personal and internal uses; assess those against the installation's actual audience.
+
 ## Publish and activate
 
 ```bash
