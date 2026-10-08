@@ -5,4 +5,8 @@ export {
   type InvookAuth,
   type InvookAuthConfiguration,
 } from "./auth";
-export { getInvookSession, type InvookSession } from "./session";
+export {
+  getInvookSession,
+  type InvookSession,
+  type InvookSessionResolution,
+} from "./session";

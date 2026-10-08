@@ -15,6 +15,13 @@ export const GOOGLE_IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
 
 const GOOGLE_IDENTITY_ACCOUNT_SCOPE = GOOGLE_IDENTITY_SCOPES.join(",");
 
+/**
+ * How long a signed cookie vouches for a session before the database is asked
+ * again. A session revoked elsewhere keeps working for at most this long;
+ * signing out in the browser clears the cookie immediately.
+ */
+const SESSION_COOKIE_CACHE_SECONDS = 5 * 60;
+
 export interface InvookAuthConfiguration {
   appUrl: string;
   secret: string;
@@ -106,6 +113,7 @@ export function createInvookAuth(
       modelName: "authSessions",
       expiresIn: 60 * 60 * 24 * 30,
       updateAge: 60 * 60 * 24,
+      cookieCache: { enabled: true, maxAge: SESSION_COOKIE_CACHE_SECONDS },
     },
     account: {
       modelName: "authAccounts",

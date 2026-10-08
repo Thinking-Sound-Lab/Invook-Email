@@ -104,6 +104,8 @@ Automatic labeling considers Inbox threads with an Inbox message from the last 1
 
 Mailbox data lives in your configured PostgreSQL database; attachment bytes live in S3-compatible storage. AI features send the mail context they need to the providers you configure. Self-hosting does not mean every operation stays on your machine.
 
+Sign-in sessions live in PostgreSQL. The browser also holds a signed copy that the API trusts for five minutes, so most requests skip the session lookup. Signing out clears that copy immediately; a session deleted directly in the database can keep working for up to five minutes.
+
 Sender-hosted images currently load directly from their original URLs. Opening an email can reveal your browser's IP address and the request time to the image host.
 
 ## Built for contributors

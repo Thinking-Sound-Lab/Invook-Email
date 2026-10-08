@@ -59,8 +59,29 @@ function getTestSession(headers: Headers): InvookSession | null {
   };
 }
 
+const renewedCookieCache =
+  "invook.session_data=renewed; Max-Age=300; Path=/; HttpOnly; SameSite=Lax";
+const removedSessionCookies = [
+  "invook.session_token=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+  "invook.session_data=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax",
+];
+
+/**
+ * Stands in for the cookies Better Auth issues while resolving a session:
+ * a renewed cookie cache after a database read, or removal of a dead session.
+ */
+function getTestSessionCookies(headers: Headers): string[] {
+  const cookie = headers.get("cookie") ?? "";
+  if (cookie.includes("test_cookie_cache=expired")) return [renewedCookieCache];
+  if (cookie.includes("test_session_state=revoked")) return removedSessionCookies;
+  return [];
+}
+
 const testAuth: AuthService = {
-  getSession: async (headers) => getTestSession(headers),
+  getSession: async (headers) => ({
+    session: getTestSession(headers),
+    setCookies: getTestSessionCookies(headers),
+  }),
   handle: async (request) => {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/v1/auth/sign-out") {
@@ -193,6 +214,58 @@ test("an anonymous session remains an honest disconnected state", async () => {
     authenticated: false,
     gmailConnected: false,
   });
+});
+
+test("a renewed session cookie cache reaches the browser from a protected route", async () => {
+  const response = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${attachmentId}/download`,
+    headers: {
+      cookie: `${await sessionCookie(attachmentOwnerId)}; test_cookie_cache=expired`,
+    },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.rawPayload, attachmentBytes);
+  assert.deepEqual(response.headers["set-cookie"], [renewedCookieCache]);
+});
+
+test("a rejected session forwards its cookie removal with the problem response", async () => {
+  const response = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${attachmentId}/download`,
+    headers: { cookie: "test_session_state=revoked" },
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().title, "Authentication required");
+  assert.deepEqual(response.headers["set-cookie"], removedSessionCookies);
+});
+
+test("the session route forwards cookie removal for a dead session", async () => {
+  const response = await api.inject({
+    method: "GET",
+    url: "/v1/session",
+    headers: { cookie: "test_session_state=revoked" },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), {
+    authenticated: false,
+    gmailConnected: false,
+  });
+  assert.deepEqual(response.headers["set-cookie"], removedSessionCookies);
+});
+
+test("a session resolved without new cookies sets none", async () => {
+  const response = await api.inject({
+    method: "GET",
+    url: `/v1/attachments/${attachmentId}/download`,
+    headers: { cookie: await sessionCookie(attachmentOwnerId) },
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers["set-cookie"], undefined);
 });
 
 test("signing out clears only the browser session cookie", async () => {
