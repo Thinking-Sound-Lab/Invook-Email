@@ -63,7 +63,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       target: worker
-    command: ["pnpm", "db:migrate"]
+    working_dir: /workspace/packages/database
+    command: ["node", "node_modules/drizzle-kit/bin.cjs", "migrate"]
     environment:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
     depends_on:
@@ -81,6 +82,8 @@ services:
     environment:
       APP_URL: ${APP_URL:-http://localhost:3000}
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-3}
+      DATABASE_CONTROL_POOL_SIZE: ${DATABASE_CONTROL_POOL_SIZE:-2}
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
       BETTER_AUTH_GOOGLE_CLIENT_ID: ${BETTER_AUTH_GOOGLE_CLIENT_ID:-}
       BETTER_AUTH_GOOGLE_CLIENT_SECRET: ${BETTER_AUTH_GOOGLE_CLIENT_SECRET:-}
@@ -105,7 +108,7 @@ services:
       minio-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "node", "-e", "import('./apps/api/node_modules/axios/index.js').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "import('axios').then(({default:axios})=>axios.get('http://127.0.0.1:4000/health/ready')).catch(()=>process.exit(1))"]
       interval: 3s
       retries: 20
     restart: unless-stopped
@@ -131,6 +134,8 @@ services:
       target: worker
     environment:
       DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://invook:invook@db:5432/invook}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-3}
+      DATABASE_CONTROL_POOL_SIZE: ${DATABASE_CONTROL_POOL_SIZE:-2}
       TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-}
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-}
       TEMPORAL_API_KEY: ${TEMPORAL_API_KEY:-}

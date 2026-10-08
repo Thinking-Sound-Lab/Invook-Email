@@ -3,14 +3,12 @@ import type { FastifyPluginAsync } from "fastify";
 import type { SessionState } from "@invook/contracts";
 import { hasConnectedGmailAccount } from "@invook/database";
 
-import { createWebHeaders } from "../auth/auth-service";
+import { getRequestSession } from "../access";
 import { sendJson } from "../responses";
 
 export const registerSessionRoutes: FastifyPluginAsync = async (api) => {
   api.get("/v1/session", async (request, reply) => {
-    const session = await request.server.invookAuth.getSession(
-      createWebHeaders(request.headers),
-    );
+    const session = await getRequestSession(request, reply);
     if (!session) {
       const state: SessionState = {
         authenticated: false,

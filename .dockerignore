@@ -2,6 +2,11 @@ node_modules
 **/node_modules
 **/.next
 .git
+.context
+.conductor
+.vercel
+.codex
+**/cdk.out
 .env*
 !.env.example
 pnpm-debug.log*

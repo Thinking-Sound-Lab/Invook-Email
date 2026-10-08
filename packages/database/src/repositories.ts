@@ -44,6 +44,7 @@ import { createHistoricalThreadLabelScan } from "./historical-thread-label-batch
 import { enqueueDailyGmailWatchRenewal } from "./gmail-watch";
 import { GmailConnectionDeletingError, withGmailIdentityLock } from "./gmail-identity";
 import { deriveMailSyncProgress } from "./mail-sync-progress";
+import { getOrCreateGmailLabels } from "./gmail-labels";
 import {
   inboxThreadCondition,
   visibleMessageCondition,
@@ -945,31 +946,34 @@ export async function setAccountSyncState(
   });
 }
 
+async function assertActiveMailSyncRun(
+  input: { runId: string; userId: string; accountId: string; shouldLock: boolean },
+  transaction: DatabaseTransaction,
+): Promise<{ createdAt: Date }> {
+  const query = transaction
+    .select({ createdAt: mailSyncRuns.createdAt })
+    .from(mailSyncRuns)
+    .innerJoin(connectedAccounts, eq(connectedAccounts.id, mailSyncRuns.accountId))
+    .where(and(
+      eq(mailSyncRuns.id, input.runId),
+      eq(mailSyncRuns.userId, input.userId),
+      eq(mailSyncRuns.accountId, input.accountId),
+      inArray(mailSyncRuns.status, ["queued", "running"]),
+      eq(connectedAccounts.status, "connected"),
+    ))
+    .limit(1);
+  // Lock only after thread writes and label admission. NO KEY UPDATE still
+  // excludes disconnect/status changes, while permitting concurrent FK checks.
+  const [activeRun] = await (input.shouldLock ? query.for("no key update") : query);
+  if (!activeRun) throw new InactiveMailSyncRunError(input.runId);
+  return activeRun;
+}
+
 async function upsertMailboxMessageWithTransaction(
   input: IndexedMessage,
   transaction: DatabaseTransaction,
   activeRunId?: string,
 ) {
-    if (activeRunId) {
-      const [activeRun] = await transaction
-        .select({ id: mailSyncRuns.id })
-        .from(mailSyncRuns)
-        .innerJoin(
-          connectedAccounts,
-          eq(connectedAccounts.id, mailSyncRuns.accountId),
-        )
-        .where(
-          and(
-            eq(mailSyncRuns.id, activeRunId),
-            eq(mailSyncRuns.accountId, input.accountId),
-            inArray(mailSyncRuns.status, ["queued", "running"]),
-            eq(connectedAccounts.status, "connected"),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!activeRun) throw new InactiveMailSyncRunError(activeRunId);
-    }
     await transaction.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerThreadId}`}, 0))`,
     );
@@ -1141,59 +1145,7 @@ async function upsertMailboxMessageWithTransaction(
         throw new Error("The Gmail message could not be stored.");
       }
 
-      const requestedGmailLabels = Array.from(
-        new Map(
-          input.gmailLabels.map((label) => [label.providerLabelId, label]),
-        ).values(),
-      );
-      const requestedProviderLabelIds = requestedGmailLabels.map(
-        (label) => label.providerLabelId,
-      );
-      let providerLabels: Array<{ id: string; providerLabelId: string }> = [];
-      if (requestedProviderLabelIds.length > 0) {
-        await transaction
-          .insert(labels)
-          .values(
-            requestedGmailLabels.map((label) => ({
-              userId: input.userId,
-              accountId: input.accountId,
-              kind: "gmail" as const,
-              providerLabelId: label.providerLabelId,
-              name: label.name,
-              normalizedName: label.name.toLowerCase(),
-              description: "",
-              providerType: "system" as const,
-            })),
-          )
-          .onConflictDoUpdate({
-            target: [labels.accountId, labels.providerLabelId],
-            targetWhere: isNotNull(labels.providerLabelId),
-            set: {
-              name: sql`excluded.name`,
-              normalizedName: sql`excluded.normalized_name`,
-              providerType: "system",
-              updatedAt: new Date(),
-            },
-          });
-        const providerLabelRows = await transaction
-          .select({
-            id: labels.id,
-            providerLabelId: labels.providerLabelId,
-          })
-          .from(labels)
-          .where(
-            and(
-              eq(labels.accountId, input.accountId),
-              eq(labels.kind, "gmail"),
-              inArray(labels.providerLabelId, requestedProviderLabelIds),
-            ),
-          );
-        providerLabels = providerLabelRows.flatMap((label) =>
-          label.providerLabelId
-            ? [{ id: label.id, providerLabelId: label.providerLabelId }]
-            : [],
-        );
-      }
+      const providerLabels = await getOrCreateGmailLabels(input, transaction);
       await transaction
         .delete(messageLabels)
         .where(
@@ -1290,9 +1242,15 @@ export async function upsertMailboxMessage(
   database: Database = getDatabase(),
   activeRunId?: string,
 ) {
-  return database.transaction((transaction) =>
-    upsertMailboxMessageWithTransaction(input, transaction, activeRunId),
-  );
+  return database.transaction(async (transaction) => {
+    const runInput = activeRunId
+      ? { runId: activeRunId, userId: input.userId, accountId: input.accountId }
+      : null;
+    if (runInput) await assertActiveMailSyncRun({ ...runInput, shouldLock: false }, transaction);
+    const stored = await upsertMailboxMessageWithTransaction(input, transaction, activeRunId);
+    if (runInput) await assertActiveMailSyncRun({ ...runInput, shouldLock: true }, transaction);
+    return stored;
+  });
 }
 
 export async function upsertMailboxThreadMessages(
@@ -1319,6 +1277,12 @@ export async function upsertMailboxThreadMessages(
   }
 
   return database.transaction(async (transaction) => {
+    const runInput = {
+      runId: input.activeRunId,
+      userId: firstMessage.userId,
+      accountId: firstMessage.accountId,
+    };
+    const run = await assertActiveMailSyncRun({ ...runInput, shouldLock: false }, transaction);
     let threadId: string | null = null;
     let changed = false;
     for (const message of input.messages) {
@@ -1334,19 +1298,6 @@ export async function upsertMailboxThreadMessages(
       changed ||= stored.changed;
     }
     if (!threadId) throw new Error("The Gmail thread stored no messages.");
-    const completed = await completeMailSyncThreadWithExecutor(
-      {
-        runId: input.activeRunId,
-        providerThreadId: firstMessage.providerThreadId,
-      },
-      transaction,
-    );
-    if (!completed) throw new InactiveMailSyncRunError(input.activeRunId);
-    const [run] = await transaction
-      .select({ createdAt: mailSyncRuns.createdAt })
-      .from(mailSyncRuns)
-      .where(eq(mailSyncRuns.id, input.activeRunId)).limit(1);
-    if (!run) throw new InactiveMailSyncRunError(input.activeRunId);
     await enqueueLiveInboxThreadLabelAnalyses(
       {
         userId: firstMessage.userId,
@@ -1356,6 +1307,17 @@ export async function upsertMailboxThreadMessages(
       },
       transaction,
     );
+    // If ownership changed during ingestion, this check rolls back messages,
+    // label commands, and the checkpoint together instead of publishing stale work.
+    await assertActiveMailSyncRun({ ...runInput, shouldLock: true }, transaction);
+    const completed = await completeMailSyncThreadWithExecutor(
+      {
+        runId: input.activeRunId,
+        providerThreadId: firstMessage.providerThreadId,
+      },
+      transaction,
+    );
+    if (!completed) throw new InactiveMailSyncRunError(input.activeRunId);
     return { threadId, changed };
   });
 }
@@ -1514,50 +1476,7 @@ export async function replaceGmailMessageLabels(
     const requestedProviderLabelIds = Array.from(
       new Set(input.gmailLabels.map((label) => label.providerLabelId)),
     );
-    if (input.gmailLabels.length > 0) {
-      await transaction
-        .insert(labels)
-        .values(
-          input.gmailLabels.map((label) => ({
-            userId: input.userId,
-            accountId: input.accountId,
-            kind: "gmail" as const,
-            providerLabelId: label.providerLabelId,
-            name: label.name,
-            normalizedName: label.name.toLowerCase(),
-            description: "",
-            providerType: "system" as const,
-          })),
-        )
-        .onConflictDoUpdate({
-          target: [labels.accountId, labels.providerLabelId],
-          targetWhere: isNotNull(labels.providerLabelId),
-          set: {
-            name: sql`excluded.name`,
-            normalizedName: sql`excluded.normalized_name`,
-            providerType: "system",
-            updatedAt: new Date(),
-          },
-        });
-    }
-    const providerLabelRows =
-      requestedProviderLabelIds.length > 0
-        ? await transaction
-            .select({ id: labels.id, providerLabelId: labels.providerLabelId })
-            .from(labels)
-            .where(
-              and(
-                eq(labels.accountId, input.accountId),
-                eq(labels.kind, "gmail"),
-                inArray(labels.providerLabelId, requestedProviderLabelIds),
-              ),
-            )
-        : [];
-    const providerLabels = providerLabelRows.flatMap((label) =>
-      label.providerLabelId
-        ? [{ id: label.id, providerLabelId: label.providerLabelId }]
-        : [],
-    );
+    const providerLabels = await getOrCreateGmailLabels(input, transaction);
     const existingMemberships = await transaction
       .select({ providerLabelId: labels.providerLabelId })
       .from(messageLabels)
@@ -1976,4 +1895,3 @@ export async function enqueueBatchEvent(
     return { submissionJobId: submission.id };
   });
 }
-

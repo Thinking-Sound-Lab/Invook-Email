@@ -10,24 +10,39 @@ export interface InvookSession {
   expiresAt: Date;
 }
 
+export interface InvookSessionResolution {
+  session: InvookSession | null;
+  /**
+   * Cookies Better Auth issued while resolving the session: a renewed cookie
+   * cache, an extended session, or the removal of a dead one. They take effect
+   * only when the caller sends them to the browser.
+   */
+  setCookies: string[];
+}
+
 export async function getInvookSession(
   auth: InvookAuth,
   headers: Headers,
-): Promise<InvookSession | null> {
-  const result = await auth.api.getSession({ headers });
-  if (!result) return null;
+): Promise<InvookSessionResolution> {
+  const { headers: responseHeaders, response: result } =
+    await auth.api.getSession({ headers, returnHeaders: true });
+  const setCookies = responseHeaders.getSetCookie();
+  if (!result) return { session: null, setCookies };
   const name: unknown = result.user.name;
 
   return {
-    userId: result.user.id,
-    user: {
-      email: result.user.email,
-      image: result.user.image ?? null,
-      name:
-        typeof name === "string" && name.trim().length > 0
-          ? name
-          : result.user.email,
+    session: {
+      userId: result.user.id,
+      user: {
+        email: result.user.email,
+        image: result.user.image ?? null,
+        name:
+          typeof name === "string" && name.trim().length > 0
+            ? name
+            : result.user.email,
+      },
+      expiresAt: result.session.expiresAt,
     },
-    expiresAt: result.session.expiresAt,
+    setCookies,
   };
 }

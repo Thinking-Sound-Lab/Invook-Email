@@ -4,14 +4,14 @@ import {
   createInvookAuth,
   getInvookSession,
   type InvookAuth,
-  type InvookSession,
+  type InvookSessionResolution,
 } from "@invook/auth";
 
 import { getMissingApiConfiguration, getPublicAppOrigin } from "../config";
 
 export interface AuthService {
   handle(request: Request): Promise<Response>;
-  getSession(headers: Headers): Promise<InvookSession | null>;
+  getSession(headers: Headers): Promise<InvookSessionResolution>;
 }
 
 export function createWebHeaders(
@@ -54,7 +54,9 @@ export function createAuthService(): AuthService {
       return getAuth().handler(request);
     },
     getSession: (headers) => {
-      if (getMissingApiConfiguration().length > 0) return Promise.resolve(null);
+      if (getMissingApiConfiguration().length > 0) {
+        return Promise.resolve({ session: null, setCookies: [] });
+      }
       return getInvookSession(getAuth(), headers);
     },
   };

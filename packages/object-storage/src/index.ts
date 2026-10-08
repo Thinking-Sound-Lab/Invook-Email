@@ -3,12 +3,17 @@ import { createHash } from "node:crypto";
 import aws4 from "aws4";
 import axios, { type AxiosRequestConfig } from "axios";
 
+import {
+  createObjectStorageCredentialProvider,
+  getObjectStorageCredentialSource,
+  type ObjectStorageCredentialSource,
+} from "./credentials";
+
 export type ObjectStorageConfiguration = {
   endpoint: string;
   region: string;
   bucket: string;
-  accessKeyId: string;
-  secretAccessKey: string;
+  credentialSource: ObjectStorageCredentialSource;
 };
 
 export type StoredObject = {
@@ -36,11 +41,7 @@ export function getObjectStorageConfiguration(): ObjectStorageConfiguration {
     endpoint: requireValue("S3_ENDPOINT", process.env.S3_ENDPOINT).replace(/\/$/, ""),
     region: requireValue("S3_REGION", process.env.S3_REGION),
     bucket: requireValue("S3_BUCKET", process.env.S3_BUCKET),
-    accessKeyId: requireValue("S3_ACCESS_KEY_ID", process.env.S3_ACCESS_KEY_ID),
-    secretAccessKey: requireValue(
-      "S3_SECRET_ACCESS_KEY",
-      process.env.S3_SECRET_ACCESS_KEY,
-    ),
+    credentialSource: getObjectStorageCredentialSource(),
   };
 }
 
@@ -52,7 +53,11 @@ function encodedKey(key: string): string {
 }
 
 export class S3ObjectStorage {
-  constructor(private readonly configuration: ObjectStorageConfiguration) {}
+  private readonly getCredentials;
+
+  constructor(private readonly configuration: ObjectStorageConfiguration) {
+    this.getCredentials = createObjectStorageCredentialProvider(configuration.credentialSource);
+  }
 
   private async request<T>(input: {
     method: "GET" | "PUT" | "DELETE";
@@ -86,10 +91,7 @@ export class S3ObjectStorage {
         headers,
         body: input.body,
       },
-      {
-        accessKeyId: this.configuration.accessKeyId,
-        secretAccessKey: this.configuration.secretAccessKey,
-      },
+      await this.getCredentials(),
     );
     const signedHeaders = Object.fromEntries(
       Object.entries(signed.headers ?? {}).flatMap(([name, value]) => {

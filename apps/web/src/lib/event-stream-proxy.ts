@@ -3,9 +3,7 @@ import "server-only";
 import axios, { type AxiosResponse } from "axios";
 import { PassThrough, Readable } from "node:stream";
 
-function getApiOrigin(): string {
-  return (process.env.API_INTERNAL_URL ?? "http://127.0.0.1:4000").replace(/\/$/, "");
-}
+import { getApiUrl } from "./api-url";
 
 export async function proxyEventStream(request: Request, path: string): Promise<Response> {
   const headers: Record<string, string> = {
@@ -16,7 +14,7 @@ export async function proxyEventStream(request: Request, path: string): Promise<
 
   let upstream: AxiosResponse<Readable>;
   try {
-    const upstreamUrl = new URL(path, getApiOrigin());
+    const upstreamUrl = getApiUrl(path);
     upstreamUrl.search = new URL(request.url).search;
     upstream = await axios.get<Readable>(upstreamUrl.toString(), {
       headers,
@@ -41,6 +39,7 @@ export async function proxyEventStream(request: Request, path: string): Promise<
   }
 
   const responseBody = new PassThrough();
+  responseBody.once("close", () => upstream.data.destroy());
   upstream.data.once("error", (error: unknown) => {
     if (axios.isCancel(error)) {
       responseBody.end();

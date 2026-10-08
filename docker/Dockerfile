@@ -18,7 +18,8 @@ COPY packages/database/package.json ./packages/database/package.json
 COPY packages/gmail/package.json ./packages/gmail/package.json
 COPY packages/object-storage/package.json ./packages/object-storage/package.json
 COPY packages/workflows/package.json ./packages/workflows/package.json
-RUN pnpm install --frozen-lockfile
+COPY infra/aws/package.json ./infra/aws/package.json
+RUN pnpm install --frozen-lockfile --filter '!@invook/infra'
 
 FROM deps AS builder
 COPY . .
@@ -39,9 +40,13 @@ CMD ["node", "apps/web/server.js"]
 
 FROM deps AS service
 COPY . .
+ENV NODE_ENV=production
+USER node
 
 FROM service AS api
-CMD ["pnpm", "api"]
+WORKDIR /workspace/apps/api
+CMD ["node", "--import", "tsx", "src/index.ts"]
 
 FROM service AS worker
-CMD ["pnpm", "worker"]
+WORKDIR /workspace/apps/worker
+CMD ["node", "--import", "tsx", "src/index.ts"]

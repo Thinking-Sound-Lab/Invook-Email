@@ -88,6 +88,10 @@ Open [localhost:3000](http://localhost:3000), sign in with Google, then connect 
 
 `make down` stops the containers and preserves local data.
 
+## Deploy to production
+
+Use the [AWS CDK and Vercel deployment guide](./infra/aws/README.md) to deploy the Next.js UI on Vercel and the API and worker on AWS Fargate, using Supabase PostgreSQL, Better Auth, Temporal Cloud and private AWS S3. Local Docker self-hosting runs the same application with PostgreSQL and MinIO.
+
 ## Your mail and your data
 
 Gmail owns your messages, read state, stars, and drafts. Invook writes provider actions to Gmail first, then brings its stored replica up to date through Gmail history. Invook owns your AI labels.
@@ -99,6 +103,8 @@ Disconnect removes only that user's connection and local data. Watch operations 
 Automatic labeling considers Inbox threads with an Inbox message from the last 14 days and uses individual model calls, including during initial sync. Older mail still syncs, but does not start automatic labeling. OpenAI Batch is used for labels only when you explicitly choose to apply a label to past mail in Settings (7, 30, or 90 days); that request considers only the selected label and preserves nonmatches. Gmail categories, custom labels, and Gmail Important are not imported as Invook labels. Operational Gmail state such as read, star, Inbox, and draft status remains synchronized.
 
 Mailbox data lives in your configured PostgreSQL database; attachment bytes live in S3-compatible storage. AI features send the mail context they need to the providers you configure. Self-hosting does not mean every operation stays on your machine.
+
+Sign-in sessions live in PostgreSQL. The browser also holds a signed copy that the API trusts for five minutes, so most requests skip the session lookup. Signing out clears that copy immediately; a session deleted directly in the database can keep working for up to five minutes.
 
 Sender-hosted images currently load directly from their original URLs. Opening an email can reveal your browser's IP address and the request time to the image host.
 

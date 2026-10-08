@@ -5,14 +5,30 @@ import type {
 } from "fastify";
 import { validate as validateUuid } from "uuid";
 
+import type { InvookSession } from "@invook/auth";
+
 import { createWebHeaders } from "./auth/auth-service";
 import { getPublicAppOrigin } from "./config";
 import { sendProblem } from "./responses";
 
-export const requireSession: onRequestHookHandler = async (request, reply) => {
-  const session = await request.server.invookAuth.getSession(
+/**
+ * Resolves the request's session and forwards the cookies Better Auth issued
+ * while doing so. Dropping them would leave the browser's cookie cache expired
+ * after its first lifetime and return every request to a database lookup.
+ */
+export async function getRequestSession(
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<InvookSession | null> {
+  const { session, setCookies } = await request.server.invookAuth.getSession(
     createWebHeaders(request.headers),
   );
+  if (setCookies.length > 0) reply.header("set-cookie", setCookies);
+  return session;
+}
+
+export const requireSession: onRequestHookHandler = async (request, reply) => {
+  const session = await getRequestSession(request, reply);
   if (!session) {
     await sendProblem(request, reply, 401, "Authentication required");
     return;
