@@ -56,6 +56,8 @@ Import the repository into Vercel with root directory `apps/web` and files outsi
 | `API_INTERNAL_URL` | `ApiUrl` from the AWS stack outputs, including `/prod` |
 | `ENABLE_EXPERIMENTAL_COREPACK` | `1`, to use the pinned pnpm version |
 
+Set the project's [function region](https://vercel.com/docs/functions/configuring-functions/region) to the Vercel region nearest `AWS_REGION`, for example `bom1` for `ap-south-1`. Vercel defaults to `iad1`, which sends server rendering and both SSE proxies through the United States before they reach the API. A region change applies only to new deployments; redeploying an existing deployment keeps the region it was built with.
+
 Deploy using the Vercel UI or the CLI:
 
 ```bash
