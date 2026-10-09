@@ -123,9 +123,165 @@ test("email HTML preserves sender color rules and legacy color attributes", () =
 
   assert.match(content, /p \{ color: #222222; \}/);
   assert.match(content, /a\.sender-link \{ color: #2867b2; \}/);
-  assert.match(content, /@media \(prefers-color-scheme: dark\)/);
   assert.match(content, /bgcolor="#ffffff"/);
-  assert.match(content, /color="#525151"/);
+  assert.match(content, /<font color="#525151">Hello<\/font>/);
+  assert.doesNotMatch(content, /light-dark\(/);
+});
+
+test("email HTML pins sender color scheme queries to the light scheme", () => {
+  const { sanitizedHtml: content } = buildEmailHtmlPresentation(
+    `
+      <style>
+        @media (prefers-color-scheme: dark) { p { color: #eeeeee; } }
+        @media screen and (prefers-color-scheme:light) { p { color: #111111; } }
+      </style>
+      <table bgcolor="#ffffff"><tr><td><p>Hello</p></td></tr></table>
+    `,
+  );
+
+  assert.match(content, /@media \(max-width: 0\) \{ p \{ color: #eeeeee; \} \}/);
+  assert.match(
+    content,
+    /@media screen and \(min-width: 0\) \{ p \{ color: #111111; \} \}/,
+  );
+  assert.doesNotMatch(content, /prefers-color-scheme/);
+});
+
+test("email HTML gives mail that paints its own background a light canvas", () => {
+  const painted = [
+    '<table bgcolor="#f8f9fa"><tr><td>Receipt</td></tr></table>',
+    '<p><span style="background-color: rgb(255, 255, 255)">Pasted</span></p>',
+    "<style>.card { background: #ffffff; }</style><div class=\"card\">Card</div>",
+    '<html><body bgcolor="#FFFFFF"><p>Hello</p></body></html>',
+  ];
+
+  for (const bodyHtml of painted) {
+    const { sanitizedHtml: content } = buildEmailHtmlPresentation(bodyHtml);
+
+    assert.match(content, /background-color: Canvas;/);
+    assert.match(content, /color: CanvasText;/);
+    assert.match(content, /color-scheme: light;/);
+    assert.match(content, /color: LinkText;/);
+    assert.match(
+      content,
+      /:where\(invook-email-body\) \{\s+display: block;\s+margin: 16px;/,
+    );
+    assert.doesNotMatch(content, /background-color: transparent|var\(--foreground\)/);
+  }
+});
+
+test("email HTML keeps unpainted mail on the application canvas", () => {
+  const unpainted = [
+    "<p>Hello</p>",
+    '<table bgcolor="transparent"><tr><td>Hello</td></tr></table>',
+    '<p style="background: none; background-color: transparent">Hello</p>',
+    '<blockquote style="border-left: 1px solid rgb(204, 204, 204)">Quoted</blockquote>',
+  ];
+
+  for (const bodyHtml of unpainted) {
+    const { sanitizedHtml: content } = buildEmailHtmlPresentation(bodyHtml);
+
+    assert.match(content, /background-color: transparent;/);
+    assert.match(content, /color-scheme: inherit;\s+display: flow-root/);
+    assert.doesNotMatch(content, /Canvas|LinkText|margin: 16px/);
+  }
+});
+
+test("email HTML pairs sender text colors with a dark variant on the application canvas", () => {
+  const { sanitizedHtml: content } = buildEmailHtmlPresentation(
+    `
+      <style>a:link { color: #0563C1; }</style>
+      <p><span style="color:black; border-color: #ccc">Body</span></p>
+      <p><font color="222222">Legacy</font> <font color="333">Short</font></p>
+      <a href="https://example.com" style="color: rgb(17, 85, 204)">Link</a>
+      <span style="color: transparent">Preheader</span>
+    `,
+  );
+
+  assert.match(content, /background-color: transparent;/);
+  assert.match(
+    content,
+    /a:link \{ color: light-dark\(#0563C1, oklch\(from #0563C1 max\(l, 0\.87 - 0\.27 \* l\) c h\)\); \}/,
+  );
+  assert.match(
+    content,
+    /<span style="color:light-dark\(black, oklch\(from black max\(l, 0\.87 - 0\.27 \* l\) c h\)\);border-color:#ccc">Body<\/span>/,
+  );
+  // The attribute is replaced, not kept beside the pair, so a browser that
+  // rejects the pair inherits the canvas foreground. `333` is a legacy color,
+  // which browsers paint as #030303.
+  assert.match(
+    content,
+    /<font style="color:light-dark\(#222222, oklch\(from #222222 max\(l, 0\.87 - 0\.27 \* l\) c h\)\)">Legacy<\/font>/,
+  );
+  assert.match(
+    content,
+    /<font style="color:light-dark\(#030303, oklch\(from #030303 max\(l, 0\.87 - 0\.27 \* l\) c h\)\)">Short<\/font>/,
+  );
+  assert.match(
+    content,
+    /style="color:light-dark\(rgb\(17, 85, 204\), oklch\(from rgb\(17, 85, 204\) max\(l, 0\.87 - 0\.27 \* l\) c h\)\)"[^>]*>Link<\/a>/,
+  );
+  assert.match(content, /<span style="color:transparent">Preheader<\/span>/);
+  assert.equal(content.match(/light-dark\(/g)?.length, 5);
+});
+
+test("email HTML keeps the sender body as the element its rules target", () => {
+  const { sanitizedHtml: content } = buildEmailHtmlPresentation(`
+    <html>
+      <head>
+        <style>
+          :root { color-scheme: light dark; }
+          html, body { margin: 0; }
+          body.newsletter > table { background: #eef1f4; }
+          tbody td.body { padding: 0; }
+        </style>
+      </head>
+      <body class="newsletter" bgcolor="FFFFFF" text="#000000" style="font-family: Georgia; color-scheme: dark">
+        <table><tbody><tr><td class="body">Hello</td></tr></tbody></table>
+        <invook-email-body class="spoof">Nested</invook-email-body>
+        <invook-email-root class="spoof">Root</invook-email-root>
+      </body>
+    </html>
+  `);
+
+  assert.match(
+    content,
+    /<invook-email-body class="newsletter" style="background-color:#ffffff;color:#000000;font-family:Georgia">/,
+  );
+  // Only the sender's body becomes a stand-in; markup naming one does not.
+  assert.equal(content.match(/<invook-email-body[\s>]/g)?.length, 1);
+  assert.equal(content.match(/<invook-email-root[\s>]/g)?.length, 1);
+  assert.match(content, /<div class="spoof">Nested<\/div>/);
+  assert.match(content, /invook-email-root, invook-email-body \{ margin: 0; \}/);
+  assert.match(
+    content,
+    /invook-email-body\.newsletter > table \{ background: #eef1f4; \}/,
+  );
+  assert.match(content, /tbody td\.body \{ padding: 0; \}/);
+  assert.match(content, /\.invook-email-root \{\s*\}/);
+  assert.doesNotMatch(content, /color-scheme: (?:light dark|dark)/);
+  assert.doesNotMatch(content, /<body|<html/);
+});
+
+test("email HTML lets sender document rules override the viewer defaults", () => {
+  const { sanitizedHtml: content } = buildEmailHtmlPresentation(`
+    <html>
+      <head><style>html { background: #000000; color: #ffffff; }</style></head>
+      <body><p>Hello</p></body>
+    </html>
+  `);
+
+  // The defaults use a type selector and no specificity, so the sender's
+  // later `html` rule and a universal reset both win, as they do in a browser.
+  const viewerDefaults = content.indexOf("\n  invook-email-root {\n    all: initial;");
+  const senderRule = content.indexOf(
+    "invook-email-root { background: #000000; color: #ffffff; }",
+  );
+  assert.notEqual(viewerDefaults, -1);
+  assert.ok(senderRule > viewerDefaults);
+  assert.match(content, /\n  :where\(invook-email-body\) \{\n    display: block;/);
+  assert.doesNotMatch(content, /\.invook-email-root \{\s+all: initial/);
 });
 
 test("email HTML includes the isolated viewer root without a document wrapper", () => {
@@ -142,7 +298,10 @@ test("email HTML includes the isolated viewer root without a document wrapper", 
   );
   assert.match(content, /text-underline-offset: 0\.14em/);
   assert.doesNotMatch(content, /background-color: #ffffff|color: #202124/);
-  assert.match(content, /class="invook-email-body" role="document"/);
+  assert.match(
+    content,
+    /<invook-email-root class="invook-email-root" role="document"><invook-email-body><p>Hello<\/p><\/invook-email-body><\/invook-email-root>$/,
+  );
   assert.doesNotMatch(content, /<!doctype|<html|<body|postMessage|ResizeObserver/);
 });
 
