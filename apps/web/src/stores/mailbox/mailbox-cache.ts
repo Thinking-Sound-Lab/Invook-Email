@@ -17,6 +17,28 @@ export function createMailboxPageKey({
   return `${accountSelection}:${view}`;
 }
 
+export function hasFreshMailboxPage(
+  page: MailboxPageState | undefined,
+): boolean {
+  return page !== undefined && !page.isStale;
+}
+
+export function markMailboxPagesStale(
+  pagesByKey: Record<string, MailboxPageState>,
+): Record<string, MailboxPageState> {
+  let changed = false;
+  const next: Record<string, MailboxPageState> = {};
+  for (const [pageKey, page] of Object.entries(pagesByKey)) {
+    if (page.isStale) {
+      next[pageKey] = page;
+      continue;
+    }
+    changed = true;
+    next[pageKey] = { ...page, isStale: true };
+  }
+  return changed ? next : pagesByKey;
+}
+
 function sortTime(thread: MailboxThreadSummary): number {
   if (!thread.latestMessageAt) return 0;
   const timestamp = new Date(thread.latestMessageAt).getTime();
@@ -196,22 +218,18 @@ export function applyMailboxThreadUpdates({
   threadsById,
 }: ApplyMailboxThreadUpdatesStateInput): MailboxThreadUpdatesResult {
   const nextThreadsById = upsertThreads(threadsById, threads);
-  const updatedThreadIds = new Set(threads.map((thread) => thread.id));
   const missing = new Set(missingThreadIds);
   const nextPagesByKey: Record<string, MailboxPageState> = {};
 
   for (const [pageKey, page] of Object.entries(pagesByKey)) {
     if (pageKey !== key) {
-      const touchesPage = page.threadIds.some(
-        (threadId) => updatedThreadIds.has(threadId) || missing.has(threadId),
-      );
-      nextPagesByKey[pageKey] = touchesPage
-        ? {
-            ...page,
-            threadIds: sortMailboxThreadIds(page.threadIds, nextThreadsById),
-            isStale: true,
-          }
-        : page;
+      // Membership is a view filter, not "already listed this id". A newly
+      // starred, sent, or labeled thread is absent from those caches, and a
+      // client navigation never server-renders them, so every other page has
+      // to be replaced on the next visit.
+      nextPagesByKey[pageKey] = page.isStale
+        ? page
+        : { ...page, isStale: true };
       continue;
     }
 

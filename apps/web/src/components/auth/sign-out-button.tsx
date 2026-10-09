@@ -8,6 +8,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { useMailboxStore } from "@/stores/mailbox/store";
 
 interface SignOutButtonProps {
   isIconOnly?: boolean;
@@ -25,6 +26,7 @@ export function SignOutButton({
     setIsPending(true);
     try {
       await axios.post("/v1/auth/sign-out");
+      useMailboxStore.getState().reset();
       router.replace("/");
       router.refresh();
     } catch {
