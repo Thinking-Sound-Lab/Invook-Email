@@ -3,8 +3,8 @@ import sanitizeHtml from "sanitize-html";
 import valueParser from "postcss-value-parser";
 
 import {
-  EMAIL_BODY_ATTRIBUTE,
-  EMAIL_ROOT_CLASS,
+  EMAIL_BODY_ELEMENT,
+  EMAIL_ROOT_ELEMENT,
   prepareSenderInlineStyle,
   prepareSenderStylesheet,
   type SenderCssOptions,
@@ -162,7 +162,6 @@ function prepareEmailElement(
 ): PreparedEmailElement {
   const attributes = { ...sourceAttributes };
   delete attributes["data-invook-quoted"];
-  delete attributes[EMAIL_BODY_ATTRIBUTE];
 
   const isBodyElement = sourceTagName === "body";
   const backgroundColor = parseLegacyColor(attributes.bgcolor ?? "");
@@ -209,10 +208,17 @@ function prepareEmailElement(
     (sourceTagName === "blockquote" &&
       (attributes.type ?? "").toLowerCase() === "cite");
   if (isQuotedContainer) attributes["data-invook-quoted"] = "true";
-  if (isBodyElement) attributes[EMAIL_BODY_ATTRIBUTE] = "true";
+
+  // Only the sender's body may become the body stand-in; markup that names
+  // the stand-in directly is an ordinary block.
+  const tagName = isBodyElement
+    ? EMAIL_BODY_ELEMENT
+    : sourceTagName === EMAIL_BODY_ELEMENT
+      ? "div"
+      : sourceTagName;
 
   return {
-    tagName: isBodyElement ? "div" : sourceTagName,
+    tagName,
     attributes,
     declaresBackground,
     declaresTextColor,
@@ -234,7 +240,7 @@ function sanitizeEmailHtml(
   let hasSenderTextColor = false;
 
   const sanitizedBodyHtml = sanitizeHtml(bodyHtml, {
-    allowedTags: [...EMAIL_HTML_TAGS],
+    allowedTags: [...EMAIL_HTML_TAGS, EMAIL_BODY_ELEMENT],
     allowedAttributes: {
       "*": [
         "align",
@@ -242,7 +248,6 @@ function sanitizeEmailHtml(
         "bgcolor",
         "class",
         "color",
-        EMAIL_BODY_ATTRIBUTE,
         "data-invook-quoted",
         "dir",
         "height",
@@ -302,8 +307,8 @@ function sanitizeEmailHtml(
         };
       },
       // The sanitizer applies this after any tag-specific transform, so every
-      // element is prepared exactly once. The sender's body survives as a
-      // block element; the sanitizer would otherwise drop it along with the
+      // element is prepared exactly once. The sender's body survives as its
+      // stand-in element; the sanitizer would otherwise drop it along with the
       // margin, background, and text color that `body` rules give a message.
       "*": (tagName, attributes) => {
         const element = prepareEmailElement(tagName, attributes, options);
@@ -330,7 +335,7 @@ function sanitizeEmailHtml(
   return {
     html: hasBodyElement
       ? html
-      : `<div ${EMAIL_BODY_ATTRIBUTE}="true">${html}</div>`,
+      : `<${EMAIL_BODY_ELEMENT}>${html}</${EMAIL_BODY_ELEMENT}>`,
     hasSenderBackground,
     hasSenderTextColor,
   };
@@ -343,6 +348,11 @@ type EmailCanvas = "application" | "light";
 // so it gets exactly that: system canvas colors under a light color scheme.
 // As in a browser, the body keeps a margin unless the sender resets it, which
 // is what separates full-bleed layouts from text that needs an inset.
+//
+// These are the viewer's defaults for the sender's document elements, so they
+// weigh no more than the sender rules that restyle them: a type selector for
+// the root, which a later sender `html` rule overrides, and no specificity for
+// the body, which a universal reset also overrides.
 const EMAIL_CANVAS_STYLES: Record<
   EmailCanvas,
   { root: string; link: string; body: string }
@@ -366,9 +376,7 @@ const EMAIL_CANVAS_STYLES: Record<
     link: `
     color: LinkText;`,
     body: `
-  :where([${EMAIL_BODY_ATTRIBUTE}]) {
-    margin: 16px;
-  }`,
+    margin: 16px;`,
   },
 };
 
@@ -383,7 +391,7 @@ function buildEmailContentStyles(canvas: EmailCanvas): string {
     min-width: 0;
     width: 100%;
   }
-  .${EMAIL_ROOT_CLASS} {
+  ${EMAIL_ROOT_ELEMENT} {
     all: initial;${root}
     display: flow-root;
     min-width: 0;
@@ -393,26 +401,29 @@ function buildEmailContentStyles(canvas: EmailCanvas): string {
     line-height: 1.5;
     overflow-wrap: anywhere;
     -webkit-text-size-adjust: 100%;
-  }${body}
-  .${EMAIL_ROOT_CLASS} img {
+  }
+  :where(${EMAIL_BODY_ELEMENT}) {
+    display: block;${body}
+  }
+  .${EMAIL_ROOT_ELEMENT} img {
     border: 0;
     height: auto;
     max-width: 100%;
   }
-  :where(.${EMAIL_ROOT_CLASS}) a {${link}
+  :where(.${EMAIL_ROOT_ELEMENT}) a {${link}
     text-decoration-color: color-mix(in oklch, currentColor, transparent 42%);
     text-underline-offset: 0.14em;
   }
-  .${EMAIL_ROOT_CLASS} table {
+  .${EMAIL_ROOT_ELEMENT} table {
     max-width: 100%;
   }
-  .${EMAIL_ROOT_CLASS} pre {
+  .${EMAIL_ROOT_ELEMENT} pre {
     max-width: 100%;
     overflow-wrap: anywhere;
     white-space: pre-wrap;
   }
   :host(:not([data-show-quoted="true"]))
-    .${EMAIL_ROOT_CLASS} [data-invook-quoted="true"] {
+    .${EMAIL_ROOT_ELEMENT} [data-invook-quoted="true"] {
     display: none !important;
   }
 `;
@@ -438,7 +449,7 @@ export function buildEmailHtmlPresentation(
       ? sanitizeEmailHtml(bodyHtml, { adaptsTextColors: true })
       : authored;
   return {
-    sanitizedHtml: `<style>${EMAIL_CONTENT_STYLES[canvas]}</style><div class="${EMAIL_ROOT_CLASS}" role="document">${sanitized.html}</div>`,
+    sanitizedHtml: `<style>${EMAIL_CONTENT_STYLES[canvas]}</style><${EMAIL_ROOT_ELEMENT} class="${EMAIL_ROOT_ELEMENT}" role="document">${sanitized.html}</${EMAIL_ROOT_ELEMENT}>`,
     hasQuotedContent:
       /<[a-z][^>]*\sdata-invook-quoted="true"(?:\s|>)/i.test(sanitized.html),
   };

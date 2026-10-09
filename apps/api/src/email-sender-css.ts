@@ -2,8 +2,11 @@ import postcss, { AtRule, type Root } from "postcss";
 import selectorParser from "postcss-selector-parser";
 import valueParser from "postcss-value-parser";
 
-export const EMAIL_ROOT_CLASS = "invook-email-root";
-export const EMAIL_BODY_ATTRIBUTE = "data-invook-body";
+// The sender's `html` and `body` do not exist inside the shadow root. Two
+// dedicated element types stand in for them, so sender rules written for
+// ordinary elements such as `div` never reach either one.
+export const EMAIL_ROOT_ELEMENT = "invook-email-root";
+export const EMAIL_BODY_ELEMENT = "invook-email-body";
 
 export interface SenderCssOptions {
   adaptsTextColors: boolean;
@@ -95,28 +98,24 @@ function pinColorSchemeQueriesToLight(mediaQueries: string): string {
 }
 
 const DOCUMENT_ELEMENT_STAND_INS: Record<string, string> = {
-  body: `[${EMAIL_BODY_ATTRIBUTE}]`,
-  html: `.${EMAIL_ROOT_CLASS}`,
+  body: EMAIL_BODY_ELEMENT,
+  html: EMAIL_ROOT_ELEMENT,
 };
 
-// The sender's document elements do not exist inside the shadow root, so
-// selectors that target them are pointed at the elements standing in for them.
-// Both stand-ins are `div` elements and `:where()` carries no specificity, so
-// a mapped selector weighs exactly what the type selector it replaces did and
-// the sender's own rules keep their relative priority.
+// Selectors that target the sender's document elements are pointed at their
+// stand-ins. Each replacement is the same kind of selector as the original (a
+// type selector for a type selector, a class for the `:root` pseudo-class), so
+// its specificity is unchanged and sender rules keep their relative priority.
 const mapDocumentSelectors = selectorParser((selectors) => {
   selectors.walkTags((tag) => {
     const standIn = DOCUMENT_ELEMENT_STAND_INS[tag.value.toLowerCase()];
-    if (!standIn) return;
-    tag.value = "div";
-    tag.parent?.insertAfter(
-      tag,
-      selectorParser.pseudo({ value: `:where(${standIn})` }),
-    );
+    if (standIn) tag.value = standIn;
   });
   selectors.walkPseudos((pseudo) => {
     if (pseudo.value.toLowerCase() === ":root") {
-      pseudo.replaceWith(selectorParser.className({ value: EMAIL_ROOT_CLASS }));
+      pseudo.replaceWith(
+        selectorParser.className({ value: EMAIL_ROOT_ELEMENT }),
+      );
     }
   });
 });

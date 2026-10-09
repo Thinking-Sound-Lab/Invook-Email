@@ -162,7 +162,10 @@ test("email HTML gives mail that paints its own background a light canvas", () =
     assert.match(content, /color: CanvasText;/);
     assert.match(content, /color-scheme: light;/);
     assert.match(content, /color: LinkText;/);
-    assert.match(content, /:where\(\[data-invook-body\]\) \{\s+margin: 16px;/);
+    assert.match(
+      content,
+      /:where\(invook-email-body\) \{\s+display: block;\s+margin: 16px;/,
+    );
     assert.doesNotMatch(content, /background-color: transparent|var\(--foreground\)/);
   }
 });
@@ -223,7 +226,7 @@ test("email HTML pairs sender text colors with a dark variant on the application
   assert.equal(content.match(/light-dark\(/g)?.length, 5);
 });
 
-test("email HTML keeps the sender body as the block its rules target", () => {
+test("email HTML keeps the sender body as the element its rules target", () => {
   const { sanitizedHtml: content } = buildEmailHtmlPresentation(`
     <html>
       <head>
@@ -235,28 +238,50 @@ test("email HTML keeps the sender body as the block its rules target", () => {
         </style>
       </head>
       <body class="newsletter" bgcolor="FFFFFF" text="#000000" style="font-family: Georgia; color-scheme: dark">
-        <table><tbody><tr><td class="body" data-invook-body="true">Hello</td></tr></tbody></table>
+        <table><tbody><tr><td class="body">Hello</td></tr></tbody></table>
+        <invook-email-body class="spoof">Nested</invook-email-body>
+        <invook-email-root class="spoof">Root</invook-email-root>
       </body>
     </html>
   `);
 
   assert.match(
     content,
-    /<div class="newsletter" style="background-color:#ffffff;color:#000000;font-family:Georgia" data-invook-body="true">/,
+    /<invook-email-body class="newsletter" style="background-color:#ffffff;color:#000000;font-family:Georgia">/,
   );
-  assert.equal(content.match(/data-invook-body="true"/g)?.length, 1);
+  // Only the sender's body becomes a stand-in; markup naming one does not.
+  assert.equal(content.match(/<invook-email-body[\s>]/g)?.length, 1);
+  assert.equal(content.match(/<invook-email-root[\s>]/g)?.length, 1);
+  assert.match(content, /<div class="spoof">Nested<\/div>/);
+  assert.match(content, /invook-email-root, invook-email-body \{ margin: 0; \}/);
   assert.match(
     content,
-    /div:where\(\.invook-email-root\), div:where\(\[data-invook-body\]\) \{ margin: 0; \}/,
-  );
-  assert.match(
-    content,
-    /div:where\(\[data-invook-body\]\)\.newsletter > table \{ background: #eef1f4; \}/,
+    /invook-email-body\.newsletter > table \{ background: #eef1f4; \}/,
   );
   assert.match(content, /tbody td\.body \{ padding: 0; \}/);
   assert.match(content, /\.invook-email-root \{\s*\}/);
   assert.doesNotMatch(content, /color-scheme: (?:light dark|dark)/);
   assert.doesNotMatch(content, /<body|<html/);
+});
+
+test("email HTML lets sender document rules override the viewer defaults", () => {
+  const { sanitizedHtml: content } = buildEmailHtmlPresentation(`
+    <html>
+      <head><style>html { background: #000000; color: #ffffff; }</style></head>
+      <body><p>Hello</p></body>
+    </html>
+  `);
+
+  // The defaults use a type selector and no specificity, so the sender's
+  // later `html` rule and a universal reset both win, as they do in a browser.
+  const viewerDefaults = content.indexOf("\n  invook-email-root {\n    all: initial;");
+  const senderRule = content.indexOf(
+    "invook-email-root { background: #000000; color: #ffffff; }",
+  );
+  assert.notEqual(viewerDefaults, -1);
+  assert.ok(senderRule > viewerDefaults);
+  assert.match(content, /\n  :where\(invook-email-body\) \{\n    display: block;/);
+  assert.doesNotMatch(content, /\.invook-email-root \{\s+all: initial/);
 });
 
 test("email HTML includes the isolated viewer root without a document wrapper", () => {
@@ -275,7 +300,7 @@ test("email HTML includes the isolated viewer root without a document wrapper", 
   assert.doesNotMatch(content, /background-color: #ffffff|color: #202124/);
   assert.match(
     content,
-    /<div class="invook-email-root" role="document"><div data-invook-body="true"><p>Hello<\/p><\/div><\/div>$/,
+    /<invook-email-root class="invook-email-root" role="document"><invook-email-body><p>Hello<\/p><\/invook-email-body><\/invook-email-root>$/,
   );
   assert.doesNotMatch(content, /<!doctype|<html|<body|postMessage|ResizeObserver/);
 });

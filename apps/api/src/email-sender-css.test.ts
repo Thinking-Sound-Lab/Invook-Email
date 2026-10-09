@@ -46,11 +46,11 @@ test("sender stylesheets map document selectors without touching lookalikes", ()
 
   assert.match(
     css,
-    /div:where\(\.invook-email-root\) > div:where\(\[data-invook-body\]\), div:where\(\.invook-email-root\) div:where\(\[data-invook-body\]\)\.x \{ margin: 0; \}/,
+    /invook-email-root > invook-email-body, invook-email-root invook-email-body\.x \{ margin: 0; \}/,
   );
   assert.match(
     css,
-    /\.invook-email-root \.y, :not\(div:where\(\[data-invook-body\]\)\) b \{ padding: 0; \}/,
+    /\.invook-email-root \.y, :not\(invook-email-body\) b \{ padding: 0; \}/,
   );
   assert.match(
     css,
@@ -59,17 +59,17 @@ test("sender stylesheets map document selectors without touching lookalikes", ()
   assert.match(css, /@keyframes fade \{ from \{ opacity: 0; \} to \{ opacity: 1; \} \}/);
 });
 
-test("mapped document selectors keep the weight of the type selector they replace", () => {
-  // A class rule outranks a `body` rule whatever their order. The stand-in
-  // must stay a type selector plus a weightless `:where()` to preserve that.
+test("mapped document selectors keep the weight of the selector they replace", () => {
+  // A class rule outranks a `body` rule whatever their order, and `:root`
+  // outranks `html`. Type selectors must stay type selectors to preserve that.
   const { css } = prepareSenderStylesheet(
-    ".newsletter { color: black; } body { color: white; } html { margin: 0; }",
+    ".newsletter { color: black; } body { color: white; } :root { margin: 0; } html { margin: 8px; }",
     authored,
   );
 
   assert.equal(
     css,
-    ".newsletter { color: black; } div:where([data-invook-body]) { color: white; } div:where(.invook-email-root) { margin: 0; }",
+    ".newsletter { color: black; } invook-email-body { color: white; } .invook-email-root { margin: 0; } invook-email-root { margin: 8px; }",
   );
 });
 
