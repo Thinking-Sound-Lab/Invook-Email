@@ -86,30 +86,33 @@ function adaptTextColor(value: string): string {
 // The canvas scheme is chosen per message, not by the operating system, and a
 // shadow root cannot scope media queries. Sender scheme queries are therefore
 // pinned to light: the scheme every sender color is authored against.
-function pinColorSchemeQueriesToLight(css: string): string {
-  return css.replace(
+function pinColorSchemeQueriesToLight(mediaQueries: string): string {
+  return mediaQueries.replace(
     /\(\s*prefers-color-scheme\s*:\s*(light|dark)\s*\)/gi,
     (_query, scheme: string) =>
       scheme.toLowerCase() === "light" ? "(min-width: 0)" : "(max-width: 0)",
   );
 }
 
+const DOCUMENT_ELEMENT_STAND_INS: Record<string, string> = {
+  body: `[${EMAIL_BODY_ATTRIBUTE}]`,
+  html: `.${EMAIL_ROOT_CLASS}`,
+};
+
 // The sender's document elements do not exist inside the shadow root, so
 // selectors that target them are pointed at the elements standing in for them.
+// Both stand-ins are `div` elements and `:where()` carries no specificity, so
+// a mapped selector weighs exactly what the type selector it replaces did and
+// the sender's own rules keep their relative priority.
 const mapDocumentSelectors = selectorParser((selectors) => {
   selectors.walkTags((tag) => {
-    const tagName = tag.value.toLowerCase();
-    if (tagName === "body") {
-      tag.replaceWith(
-        selectorParser.attribute({
-          attribute: EMAIL_BODY_ATTRIBUTE,
-          raws: {},
-          value: undefined,
-        }),
-      );
-    } else if (tagName === "html") {
-      tag.replaceWith(selectorParser.className({ value: EMAIL_ROOT_CLASS }));
-    }
+    const standIn = DOCUMENT_ELEMENT_STAND_INS[tag.value.toLowerCase()];
+    if (!standIn) return;
+    tag.value = "div";
+    tag.parent?.insertAfter(
+      tag,
+      selectorParser.pseudo({ value: `:where(${standIn})` }),
+    );
   });
   selectors.walkPseudos((pseudo) => {
     if (pseudo.value.toLowerCase() === ":root") {
@@ -145,27 +148,37 @@ function prepareSenderDeclarations(
   return { declaresBackground, declaresTextColor };
 }
 
+// Mail composers wrap embedded CSS in HTML comment delimiters, which CSS
+// ignores but the parser rejects. Strings and comments are matched first so a
+// delimiter the sender wrote inside one is left alone.
+function removeHtmlCommentDelimiters(stylesheet: string): string {
+  return stylesheet.replace(
+    /("(?:[^"\\\n]|\\[\s\S])*"|'(?:[^'\\\n]|\\[\s\S])*'|\/\*[\s\S]*?\*\/)|<!--|-->/g,
+    (_match, quotedOrComment: string | undefined) => quotedOrComment ?? "",
+  );
+}
+
 export function prepareSenderStylesheet(
   stylesheet: string,
   options: SenderCssOptions,
 ): PreparedSenderCss {
-  const pinnedStylesheet = pinColorSchemeQueriesToLight(stylesheet);
-
   let root: Root;
   try {
-    // Mail composers wrap embedded CSS in HTML comment delimiters, which CSS
-    // ignores at the top level but the parser rejects.
-    root = postcss.parse(pinnedStylesheet.replace(/<!--|-->/g, ""));
+    root = postcss.parse(removeHtmlCommentDelimiters(stylesheet));
   } catch {
     // Sender CSS that cannot be parsed cannot be adapted either, so the
-    // message keeps the light canvas it was authored for.
+    // message keeps the light canvas it was authored for. Its scheme queries
+    // are still pinned, by their position after `@media`.
     return {
-      css: pinnedStylesheet,
+      css: stylesheet.replace(/@media\b[^{}]*/gi, pinColorSchemeQueriesToLight),
       declaresBackground: true,
       declaresTextColor: false,
     };
   }
 
+  root.walkAtRules(/^media$/i, (mediaRule) => {
+    mediaRule.params = pinColorSchemeQueriesToLight(mediaRule.params);
+  });
   root.walkRules((rule) => {
     const isKeyframeSelector =
       rule.parent instanceof AtRule && /keyframes$/i.test(rule.parent.name);
@@ -202,17 +215,4 @@ export function prepareSenderInlineStyle(
 
   const declarations = prepareSenderDeclarations(root, options);
   return { css: root.toString(), ...declarations };
-}
-
-/**
- * Converts the legacy color attribute forms mail composers emit (`bgcolor`,
- * `text`, `<font color>`) into a CSS color, or `null` when the value is not
- * one of them.
- */
-export function parseLegacyColor(value: string): string | null {
-  const trimmed = value.trim();
-  if (/^#?[0-9a-f]{6}$/i.test(trimmed) || /^#[0-9a-f]{3}$/i.test(trimmed)) {
-    return trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
-  }
-  return /^[a-z]+$/i.test(trimmed) ? trimmed.toLowerCase() : null;
 }

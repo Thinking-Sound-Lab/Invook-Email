@@ -170,6 +170,7 @@ test("email HTML gives mail that paints its own background a light canvas", () =
 test("email HTML keeps unpainted mail on the application canvas", () => {
   const unpainted = [
     "<p>Hello</p>",
+    '<table bgcolor="transparent"><tr><td>Hello</td></tr></table>',
     '<p style="background: none; background-color: transparent">Hello</p>',
     '<blockquote style="border-left: 1px solid rgb(204, 204, 204)">Quoted</blockquote>',
   ];
@@ -188,7 +189,7 @@ test("email HTML pairs sender text colors with a dark variant on the application
     `
       <style>a:link { color: #0563C1; }</style>
       <p><span style="color:black; border-color: #ccc">Body</span></p>
-      <p><font color="222222">Legacy</font></p>
+      <p><font color="222222">Legacy</font> <font color="333">Short</font></p>
       <a href="https://example.com" style="color: rgb(17, 85, 204)">Link</a>
       <span style="color: transparent">Preheader</span>
     `,
@@ -203,16 +204,23 @@ test("email HTML pairs sender text colors with a dark variant on the application
     content,
     /<span style="color:light-dark\(black, oklch\(from black max\(l, 0\.87 - 0\.27 \* l\) c h\)\);border-color:#ccc">Body<\/span>/,
   );
+  // The attribute is replaced, not kept beside the pair, so a browser that
+  // rejects the pair inherits the canvas foreground. `333` is a legacy color,
+  // which browsers paint as #030303.
   assert.match(
     content,
-    /<font color="222222" style="color:light-dark\(#222222, oklch\(from #222222 max\(l, 0\.87 - 0\.27 \* l\) c h\)\)">Legacy<\/font>/,
+    /<font style="color:light-dark\(#222222, oklch\(from #222222 max\(l, 0\.87 - 0\.27 \* l\) c h\)\)">Legacy<\/font>/,
+  );
+  assert.match(
+    content,
+    /<font style="color:light-dark\(#030303, oklch\(from #030303 max\(l, 0\.87 - 0\.27 \* l\) c h\)\)">Short<\/font>/,
   );
   assert.match(
     content,
     /style="color:light-dark\(rgb\(17, 85, 204\), oklch\(from rgb\(17, 85, 204\) max\(l, 0\.87 - 0\.27 \* l\) c h\)\)"[^>]*>Link<\/a>/,
   );
   assert.match(content, /<span style="color:transparent">Preheader<\/span>/);
-  assert.equal(content.match(/light-dark\(/g)?.length, 4);
+  assert.equal(content.match(/light-dark\(/g)?.length, 5);
 });
 
 test("email HTML keeps the sender body as the block its rules target", () => {
@@ -234,13 +242,16 @@ test("email HTML keeps the sender body as the block its rules target", () => {
 
   assert.match(
     content,
-    /<div class="newsletter" style="background-color:#FFFFFF;color:#000000;font-family:Georgia" data-invook-body="true">/,
+    /<div class="newsletter" style="background-color:#ffffff;color:#000000;font-family:Georgia" data-invook-body="true">/,
   );
   assert.equal(content.match(/data-invook-body="true"/g)?.length, 1);
-  assert.match(content, /\.invook-email-root,\[data-invook-body\] \{ margin: 0; \}/);
   assert.match(
     content,
-    /\[data-invook-body\]\.newsletter > table \{ background: #eef1f4; \}/,
+    /div:where\(\.invook-email-root\), div:where\(\[data-invook-body\]\) \{ margin: 0; \}/,
+  );
+  assert.match(
+    content,
+    /div:where\(\[data-invook-body\]\)\.newsletter > table \{ background: #eef1f4; \}/,
   );
   assert.match(content, /tbody td\.body \{ padding: 0; \}/);
   assert.match(content, /\.invook-email-root \{\s*\}/);

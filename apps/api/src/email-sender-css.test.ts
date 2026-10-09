@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  parseLegacyColor,
   prepareSenderInlineStyle,
   prepareSenderStylesheet,
 } from "./email-sender-css";
@@ -47,17 +46,55 @@ test("sender stylesheets map document selectors without touching lookalikes", ()
 
   assert.match(
     css,
-    /\.invook-email-root > \[data-invook-body\],\.invook-email-root \[data-invook-body\]\.x \{ margin: 0; \}/,
+    /div:where\(\.invook-email-root\) > div:where\(\[data-invook-body\]\), div:where\(\.invook-email-root\) div:where\(\[data-invook-body\]\)\.x \{ margin: 0; \}/,
   );
   assert.match(
     css,
-    /\.invook-email-root \.y, :not\(\[data-invook-body\]\) b \{ padding: 0; \}/,
+    /\.invook-email-root \.y, :not\(div:where\(\[data-invook-body\]\)\) b \{ padding: 0; \}/,
   );
   assert.match(
     css,
     /tbody td, \.body, #body, \[class~="body"\] a, a\[href\*="html"\] \{ margin: 0; \}/,
   );
   assert.match(css, /@keyframes fade \{ from \{ opacity: 0; \} to \{ opacity: 1; \} \}/);
+});
+
+test("mapped document selectors keep the weight of the type selector they replace", () => {
+  // A class rule outranks a `body` rule whatever their order. The stand-in
+  // must stay a type selector plus a weightless `:where()` to preserve that.
+  const { css } = prepareSenderStylesheet(
+    ".newsletter { color: black; } body { color: white; } html { margin: 0; }",
+    authored,
+  );
+
+  assert.equal(
+    css,
+    ".newsletter { color: black; } div:where([data-invook-body]) { color: white; } div:where(.invook-email-root) { margin: 0; }",
+  );
+});
+
+test("sender stylesheets keep quoted values and comments as authored", () => {
+  const { css } = prepareSenderStylesheet(
+    [
+      'p::after { content: "-->"; }',
+      "q::before { content: '<!--'; }",
+      'a::after { content: "(prefers-color-scheme: dark)"; }',
+      "/* --> (prefers-color-scheme: dark) */",
+    ].join("\n"),
+    authored,
+  );
+
+  // The serializer writes the `<` of `<!--` as its CSS escape, which is the
+  // same string value and cannot be read as markup.
+  assert.equal(
+    css,
+    [
+      'p::after { content: "-->"; }',
+      "q::before { content: '\\3c !--'; }",
+      'a::after { content: "(prefers-color-scheme: dark)"; }',
+      "/* --> (prefers-color-scheme: dark) */",
+    ].join("\n"),
+  );
 });
 
 test("sender stylesheets cannot choose the canvas color scheme", () => {
@@ -93,13 +130,13 @@ test("sender stylesheets wrapped in HTML comment delimiters are prepared", () =>
 
 test("unparseable sender stylesheets keep the light canvas they were authored for", () => {
   const stylesheet =
-    "p { color: red; } } @media (prefers-color-scheme: dark) { p { color: white; }";
+    'p::after { content: "(prefers-color-scheme: dark)"; } } @media (prefers-color-scheme: dark) { p { color: white; }';
   const prepared = prepareSenderStylesheet(stylesheet, adapted);
 
   assert.equal(prepared.declaresBackground, true);
   assert.equal(
     prepared.css,
-    "p { color: red; } } @media (max-width: 0) { p { color: white; }",
+    'p::after { content: "(prefers-color-scheme: dark)"; } } @media (max-width: 0) { p { color: white; }',
   );
 });
 
@@ -148,18 +185,6 @@ test("sender inline styles report colors and cannot choose the color scheme", ()
       declaresTextColor: false,
     },
   );
-});
-
-test("legacy color attributes become CSS colors only in the forms composers emit", () => {
-  assert.equal(parseLegacyColor("#FFFFFF"), "#FFFFFF");
-  assert.equal(parseLegacyColor(" ffffff "), "#ffffff");
-  assert.equal(parseLegacyColor("#abc"), "#abc");
-  assert.equal(parseLegacyColor("White"), "white");
-  assert.equal(parseLegacyColor("abc"), "abc");
-  assert.equal(parseLegacyColor(""), null);
-  assert.equal(parseLegacyColor("#ffff"), null);
-  assert.equal(parseLegacyColor("red; position: fixed"), null);
-  assert.equal(parseLegacyColor("rgb(0,0,0)"), null);
 });
 
 function escapeRegExp(value: string): string {

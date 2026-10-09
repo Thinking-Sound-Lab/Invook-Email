@@ -5,11 +5,11 @@ import valueParser from "postcss-value-parser";
 import {
   EMAIL_BODY_ATTRIBUTE,
   EMAIL_ROOT_CLASS,
-  parseLegacyColor,
   prepareSenderInlineStyle,
   prepareSenderStylesheet,
   type SenderCssOptions,
 } from "./email-sender-css";
+import { parseLegacyColor } from "./html-legacy-color";
 
 const EMAIL_HTML_TAGS = [
   "a",
@@ -165,26 +165,29 @@ function prepareEmailElement(
   delete attributes[EMAIL_BODY_ATTRIBUTE];
 
   const isBodyElement = sourceTagName === "body";
-  const isFontElement = sourceTagName === "font";
-  let declaresBackground = Boolean(attributes.bgcolor?.trim());
-  let declaresTextColor = isFontElement && Boolean(attributes.color?.trim());
+  const backgroundColor = parseLegacyColor(attributes.bgcolor ?? "");
+  const fontColor =
+    sourceTagName === "font" ? parseLegacyColor(attributes.color ?? "") : null;
+  let declaresBackground = backgroundColor !== null;
+  let declaresTextColor = fontColor !== null;
 
   // Legacy color attributes are presentational hints the browser resolves
   // itself. They become declarations only where the hint would be lost: on
   // the element standing in for the sender's body, and on text colors that
-  // need a dark-scheme pair.
+  // need a dark-scheme pair. A paired color replaces its attribute, so a
+  // browser that rejects the pair falls back to the canvas foreground rather
+  // than the sender's light-canvas color.
   const legacyDeclarations: string[] = [];
   if (isBodyElement) {
-    const backgroundColor = parseLegacyColor(attributes.bgcolor ?? "");
     const textColor = parseLegacyColor(attributes.text ?? "");
     if (backgroundColor) {
       legacyDeclarations.push(`background-color:${backgroundColor}`);
     }
     if (textColor) legacyDeclarations.push(`color:${textColor}`);
     delete attributes.bgcolor;
-  } else if (isFontElement && options.adaptsTextColors) {
-    const textColor = parseLegacyColor(attributes.color ?? "");
-    if (textColor) legacyDeclarations.push(`color:${textColor}`);
+  } else if (fontColor && options.adaptsTextColors) {
+    legacyDeclarations.push(`color:${fontColor}`);
+    delete attributes.color;
   }
 
   const style = [...legacyDeclarations, attributes.style ?? ""]
