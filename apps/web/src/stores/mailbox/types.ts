@@ -8,6 +8,17 @@ import type {
 
 export type MailboxPageLoadState = "idle" | "loading" | "error";
 
+export type MailboxThreadDetailLoadState =
+  | "loading"
+  | "available"
+  | "missing"
+  | "error";
+
+export interface MailboxThreadDetailRecovery {
+  threadId: string;
+  loadState: MailboxThreadDetailLoadState;
+}
+
 export interface MailboxPageState {
   /**
    * Thread identities in server order, sorted on write so selectors return a
@@ -60,6 +71,7 @@ export interface MailboxState {
   /** Fences browser reads started before a canonical cache recovery. */
   recoveryVersion: number;
   recoveringPageKey: string | null;
+  threadDetailRecovery: MailboxThreadDetailRecovery | null;
   threadsById: Record<string, MailboxThreadSummary>;
   /**
    * Opened threads, kept so returning to one renders from the cache instead of
@@ -72,6 +84,11 @@ export interface MailboxState {
   setShell: (shell: MailboxShell) => void;
   invalidateCaches: (input: { pageKey: string; openThreadId: string | null }) => void;
   completeRecovery: (recoveryVersion: number) => void;
+  setThreadDetailRecoveryState: (input: {
+    threadId: string;
+    recoveryVersion: number;
+    loadState: MailboxThreadDetailLoadState;
+  }) => void;
   hydratePage: (input: HydrateMailboxPageInput) => void;
   replacePage: (input: HydrateMailboxPageInput) => void;
   appendPage: (input: AppendMailboxPageInput) => void;

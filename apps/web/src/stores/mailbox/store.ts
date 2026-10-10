@@ -15,6 +15,7 @@ const initialState: Pick<
   | "shell"
   | "recoveryVersion"
   | "recoveringPageKey"
+  | "threadDetailRecovery"
   | "threadsById"
   | "detailsById"
   | "pagesByKey"
@@ -23,6 +24,7 @@ const initialState: Pick<
   shell: null,
   recoveryVersion: 0,
   recoveringPageKey: null,
+  threadDetailRecovery: null,
   threadsById: {},
   detailsById: {},
   pagesByKey: {},
@@ -49,6 +51,9 @@ export const useMailboxStore = create<MailboxState>()(
         set((state) => ({
           recoveryVersion: state.recoveryVersion + 1,
           recoveringPageKey: pageKey,
+          threadDetailRecovery: openThreadId
+            ? { threadId: openThreadId, loadState: "loading" }
+            : null,
           pagesByKey: Object.fromEntries(
             Object.entries(state.pagesByKey).map(([key, page]) => [
               key,
@@ -66,6 +71,12 @@ export const useMailboxStore = create<MailboxState>()(
         set((state) => state.recoveryVersion === recoveryVersion
           ? { recoveringPageKey: null }
           : state),
+
+      setThreadDetailRecoveryState: ({ threadId, recoveryVersion, loadState }) =>
+        set((state) => {
+          if (state.recoveryVersion !== recoveryVersion || state.threadDetailRecovery?.threadId !== threadId) return state;
+          return { threadDetailRecovery: { threadId, loadState } };
+        }),
 
       replacePage: ({ key, page }) =>
         set((state) => {
@@ -147,6 +158,9 @@ export const useMailboxStore = create<MailboxState>()(
       hydrateThreadDetail: ({ threadId, detail }) =>
         set((state) => ({
           detailsById: { ...state.detailsById, [threadId]: detail },
+          threadDetailRecovery: state.threadDetailRecovery?.threadId === threadId
+            ? { threadId, loadState: "available" }
+            : state.threadDetailRecovery,
         })),
 
       removeThreadDetail: (threadId) =>

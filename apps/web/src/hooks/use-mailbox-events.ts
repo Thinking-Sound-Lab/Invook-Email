@@ -68,6 +68,33 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
       return createMailboxPageKey(locationRef.current) === pageKey;
     }
 
+    async function readOpenThreadDetail(
+      location: { accountSelection: string; threadId: string },
+      requestSignal: AbortSignal,
+    ): Promise<void> {
+      const recoveryVersion = useMailboxStore.getState().recoveryVersion;
+      const canApply = () =>
+        !requestSignal.aborted &&
+        useMailboxStore.getState().recoveryVersion === recoveryVersion &&
+        locationRef.current.threadId === location.threadId &&
+        locationRef.current.accountSelection === location.accountSelection;
+      try {
+        const detail = await getMailboxThreadDetail({ ...location, signal: requestSignal });
+        if (canApply()) useMailboxStore.getState().hydrateThreadDetail({ threadId: location.threadId, detail });
+      } catch (cause: unknown) {
+        const isMissing = axios.isAxiosError(cause) && cause.response?.status === 404;
+        if (canApply()) {
+          if (isMissing) useMailboxStore.getState().removeThreadDetail(location.threadId);
+          useMailboxStore.getState().setThreadDetailRecoveryState({
+            threadId: location.threadId,
+            recoveryVersion,
+            loadState: isMissing ? "missing" : "error",
+          });
+        }
+        if (!isMissing) throw cause;
+      }
+    }
+
     async function recoverMailbox(requestSignal: AbortSignal): Promise<void> {
       const location = locationRef.current;
       const pageKey = createMailboxPageKey(location);
@@ -96,6 +123,12 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
         getMailboxShell(requestSignal).then((shell) => {
           if (canApply()) useMailboxStore.getState().setShell(shell);
         }),
+        location.threadId
+          ? readOpenThreadDetail({
+              accountSelection: location.accountSelection,
+              threadId: location.threadId,
+            }, requestSignal)
+          : Promise.resolve(),
       ]);
       if (canApply()) useMailboxStore.getState().completeRecovery(recoveryVersion);
       for (const result of results) {
@@ -130,15 +163,10 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
           if (!requestSignal.aborted) useMailboxStore.getState().setSidebarCounts(counts);
         }),
         location.threadId && threadIds.includes(location.threadId)
-          ? getMailboxThreadDetail({
-              ...location,
+          ? readOpenThreadDetail({
+              accountSelection: location.accountSelection,
               threadId: location.threadId,
-              signal: requestSignal,
-            }).then((detail) => {
-              if (!requestSignal.aborted && locationRef.current.threadId === location.threadId) {
-                useMailboxStore.getState().hydrateThreadDetail({ threadId: detail.thread.id, detail });
-              }
-            })
+            }, requestSignal)
           : Promise.resolve(),
       ]);
       for (const result of results) {
@@ -219,7 +247,7 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
       hasStreamError = true;
       consecutiveFailures += 1;
       const isUnavailable = !hasConnected || consecutiveFailures > 1 || !navigator.onLine;
-      setStatus(isUnavailable ? "degraded" : "connecting");
+      setStatus((current) => current === "degraded" ? current : isUnavailable ? "degraded" : "connecting");
     }
 
     function handleMailboxChange(event: Event): void {
