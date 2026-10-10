@@ -15,12 +15,13 @@ import { normalizeMailboxView } from "@/components/mail/mailbox-location";
 import { getMailboxShell } from "@/lib/api/mailbox-shell";
 import {
   getMailboxSidebarCounts,
-  getMailboxThreadDetail,
   getMailboxThreadPage,
   getMailboxThreadUpdates,
 } from "@/lib/api/mailbox-threads";
 import { createMailboxPageKey } from "@/stores/mailbox/mailbox-cache";
 import { useMailboxStore } from "@/stores/mailbox/store";
+
+import { readMailboxThreadDetail } from "../lib/mailbox-thread-detail-read";
 
 export type MailboxEventStreamStatus = "connecting" | "ready" | "degraded";
 
@@ -68,33 +69,6 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
       return createMailboxPageKey(locationRef.current) === pageKey;
     }
 
-    async function readOpenThreadDetail(
-      location: { accountSelection: string; threadId: string },
-      requestSignal: AbortSignal,
-    ): Promise<void> {
-      const recoveryVersion = useMailboxStore.getState().recoveryVersion;
-      const canApply = () =>
-        !requestSignal.aborted &&
-        useMailboxStore.getState().recoveryVersion === recoveryVersion &&
-        locationRef.current.threadId === location.threadId &&
-        locationRef.current.accountSelection === location.accountSelection;
-      try {
-        const detail = await getMailboxThreadDetail({ ...location, signal: requestSignal });
-        if (canApply()) useMailboxStore.getState().hydrateThreadDetail({ threadId: location.threadId, detail });
-      } catch (cause: unknown) {
-        const isMissing = axios.isAxiosError(cause) && cause.response?.status === 404;
-        if (canApply()) {
-          if (isMissing) useMailboxStore.getState().removeThreadDetail(location.threadId);
-          useMailboxStore.getState().setThreadDetailRecoveryState({
-            threadId: location.threadId,
-            recoveryVersion,
-            loadState: isMissing ? "missing" : "error",
-          });
-        }
-        if (!isMissing) throw cause;
-      }
-    }
-
     async function recoverMailbox(requestSignal: AbortSignal): Promise<void> {
       const location = locationRef.current;
       const pageKey = createMailboxPageKey(location);
@@ -124,10 +98,12 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
           if (canApply()) useMailboxStore.getState().setShell(shell);
         }),
         location.threadId
-          ? readOpenThreadDetail({
+          ? readMailboxThreadDetail({
               accountSelection: location.accountSelection,
               threadId: location.threadId,
-            }, requestSignal)
+              signal: requestSignal,
+              source: "mailbox",
+            })
           : Promise.resolve(),
       ]);
       if (canApply()) useMailboxStore.getState().completeRecovery(recoveryVersion);
@@ -163,10 +139,12 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
           if (!requestSignal.aborted) useMailboxStore.getState().setSidebarCounts(counts);
         }),
         location.threadId && threadIds.includes(location.threadId)
-          ? readOpenThreadDetail({
+          ? readMailboxThreadDetail({
               accountSelection: location.accountSelection,
               threadId: location.threadId,
-            }, requestSignal)
+              signal: requestSignal,
+              source: "mailbox",
+            })
           : Promise.resolve(),
       ]);
       for (const result of results) {

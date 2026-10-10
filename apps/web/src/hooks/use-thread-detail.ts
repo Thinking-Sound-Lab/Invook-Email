@@ -1,12 +1,12 @@
 "use client";
 
 import type { MailboxThreadDetail } from "@invook/contracts";
-import axios from "axios";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getMailboxThreadDetail } from "@/lib/api/mailbox-threads";
 import { useMailboxStore } from "@/stores/mailbox/store";
 import type { MailboxThreadDetailLoadState } from "@/stores/mailbox/types";
+
+import { readMailboxThreadDetail } from "../lib/mailbox-thread-detail-read";
 
 export type ThreadDetailLoadState = MailboxThreadDetailLoadState;
 
@@ -21,12 +21,6 @@ export interface UseThreadDetailResult {
   reload: () => void;
 }
 
-interface ThreadDetailRequestResult {
-  threadId: string;
-  recoveryVersion: number;
-  status: Exclude<ThreadDetailLoadState, "loading">;
-}
-
 /**
  * Reads an opened thread, preferring the cache so a revisited thread renders
  * without waiting on the server. A cached thread still revalidates in the
@@ -38,22 +32,12 @@ export function useThreadDetail({
 }: UseThreadDetailProps): UseThreadDetailResult {
   const detail = useMailboxStore((state) => state.detailsById[threadId] ?? null);
   const recoveryVersion = useMailboxStore((state) => state.recoveryVersion);
-  const recoveryLoadState = useMailboxStore((state) =>
-    state.threadDetailRecovery?.threadId === threadId ? state.threadDetailRecovery.loadState : null,
+  const threadDetailLoadState = useMailboxStore((state) =>
+    state.threadDetailState?.threadId === threadId ? state.threadDetailState.loadState : null,
   );
-  const hydrateThreadDetail = useMailboxStore(
-    (state) => state.hydrateThreadDetail,
-  );
-  const removeThreadDetail = useMailboxStore(
-    (state) => state.removeThreadDetail,
-  );
-  const [result, setResult] = useState<ThreadDetailRequestResult | null>(null);
   const [reloadCount, setReloadCount] = useState(0);
   const recoveryVersionRef = useRef(recoveryVersion);
-  const loadState: ThreadDetailLoadState =
-    result?.threadId === threadId && result.recoveryVersion === recoveryVersion
-      ? result.status
-      : recoveryLoadState ?? (detail ? "available" : "loading");
+  const loadState: ThreadDetailLoadState = threadDetailLoadState ?? (detail ? "available" : "loading");
 
   const reload = useCallback(() => {
     setReloadCount((current) => current + 1);
@@ -66,44 +50,24 @@ export function useThreadDetail({
     // Recovery owns this read in the event queue. A version change only aborts
     // the reader's earlier request; it must not create a second cache writer.
     if (
-      store.threadDetailRecovery?.threadId === threadId &&
+      store.threadDetailState?.threadId === threadId &&
+      store.threadDetailState.source === "mailbox" &&
       (hasRecoveryVersionChanged || store.recoveringPageKey !== null)
     ) return;
     const requestController = new AbortController();
-    void (async () => {
-      try {
-        const nextDetail = await getMailboxThreadDetail({
-          accountSelection,
-          threadId,
-          signal: requestController.signal,
-        });
-        if (
-          requestController.signal.aborted ||
-          useMailboxStore.getState().recoveryVersion !== recoveryVersion
-        ) return;
-        hydrateThreadDetail({ threadId, detail: nextDetail });
-        setResult({ threadId, recoveryVersion, status: "available" });
-      } catch (cause: unknown) {
-        if (
-          axios.isCancel(cause) ||
-          requestController.signal.aborted ||
-          useMailboxStore.getState().recoveryVersion !== recoveryVersion
-        ) return;
-        const status =
-          axios.isAxiosError(cause) && cause.response?.status === 404
-            ? "missing"
-            : "error";
-        if (status === "missing") removeThreadDetail(threadId);
-        setResult({ threadId, recoveryVersion, status });
-      }
-    })();
+    void readMailboxThreadDetail({
+      accountSelection,
+      threadId,
+      signal: requestController.signal,
+      source: "reader",
+    }).catch(() => {
+      // The shared read state already exposes non-cancellation failures.
+    });
     return () => requestController.abort();
   }, [
     accountSelection,
-    hydrateThreadDetail,
     reloadCount,
     recoveryVersion,
-    removeThreadDetail,
     threadId,
   ]);
 

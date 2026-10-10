@@ -165,12 +165,17 @@ function ShellProbe() {
   const { user } = useMailShell();
   return <output data-shell-name="">{user.name}</output>;
 }
-function ThreadProbe() {
-  const { detail: openDetail, loadState } = useThreadDetail({ accountSelection: "all", threadId });
+function ThreadProbe({ openThreadId }: { openThreadId: string }) {
+  const { detail: openDetail, loadState } = useThreadDetail({ accountSelection: "all", threadId: openThreadId });
   return <output data-thread-detail="">{loadState}:{openDetail?.thread.subject}</output>;
 }
 
-async function renderMailbox(input: { view?: "all" | "starred"; isThreadOpen?: boolean; isStrictMode?: boolean } = {}): Promise<void> {
+async function renderMailbox(input: {
+  view?: "all" | "starred";
+  openThreadId?: string;
+  isStrictMode?: boolean;
+  shouldRenderThreadReader?: boolean;
+} = {}): Promise<void> {
   const [
     { createRoot },
     { AppRouterContext },
@@ -178,6 +183,7 @@ async function renderMailbox(input: { view?: "all" | "starred"; isThreadOpen?: b
     { MailShellProvider },
     { MailboxEventSubscriber },
     { MailList },
+    { ThreadReader },
   ] = await Promise.all([
     import("react-dom/client"),
     import("next/dist/shared/lib/app-router-context.shared-runtime"),
@@ -185,6 +191,7 @@ async function renderMailbox(input: { view?: "all" | "starred"; isThreadOpen?: b
     import("./mail-shell-provider"),
     import("./mailbox-event-subscriber"),
     import("./mail-list"),
+    import("./thread-reader"),
   ]);
   axios.defaults.adapter = async (config) => {
     requests.push(config);
@@ -199,15 +206,17 @@ async function renderMailbox(input: { view?: "all" | "starred"; isThreadOpen?: b
   const currentRoot = root;
   const view = input.view ?? "all";
   const query = new URLSearchParams({ view });
-  if (input.isThreadOpen) query.set("thread", threadId);
+  if (input.openThreadId) query.set("thread", input.openThreadId);
   const mailbox = (
     <AppRouterContext.Provider value={router}>
       <SearchParamsContext.Provider value={query}>
         <MailShellProvider shell={shell}>
           <MailboxEventSubscriber />
           <ShellProbe />
-          {input.isThreadOpen
-            ? <ThreadProbe />
+          {input.openThreadId
+            ? input.shouldRenderThreadReader
+              ? <ThreadReader accountSelection="all" currentView={view} threadId={input.openThreadId} />
+              : <ThreadProbe openThreadId={input.openThreadId} />
             : <MailList key={view} accountSelection="all" currentView={view} initialPage={view === "all" ? initialPage : null} />}
         </MailShellProvider>
       </SearchParamsContext.Provider>
@@ -409,7 +418,7 @@ test("recovery replaces untrusted pagination and cached views re-read instead of
 
 test("open-thread recovery re-reads the detail and removes other visited details", async () => {
   useMailboxStore.getState().hydrateThreadDetail({ threadId: oldThreadId, detail: detail(oldThreadId, "Visited before the gap") });
-  await renderMailbox({ isThreadOpen: true });
+  await renderMailbox({ openThreadId: threadId });
   respond = (config) => config.url?.startsWith("/v1/mailbox/threads/")
     ? detail(threadId, "Recovered open thread") : defaultResponse(config);
   await ready();
@@ -418,7 +427,7 @@ test("open-thread recovery re-reads the detail and removes other visited details
 });
 
 test("open-thread recovery waits for its detail before applying a queued reply", async () => {
-  await renderMailbox({ isThreadOpen: true });
+  await renderMailbox({ openThreadId: threadId });
   await ready();
   const pendingDetail = deferred<MailboxThreadDetail>();
   let detailReads = 0;
@@ -445,7 +454,7 @@ test("recovery aborts an earlier reader request without starting a second reader
   const pendingDetail = deferred<MailboxThreadDetail>();
   respond = (config) => config.url?.startsWith("/v1/mailbox/threads/")
     ? pendingDetail.promise : defaultResponse(config);
-  await renderMailbox({ isThreadOpen: true });
+  await renderMailbox({ openThreadId: threadId });
   const earlierRequest = requests.find((request) => request.url?.startsWith("/v1/mailbox/threads/"));
   assert.ok(earlierRequest);
   respond = (config) => config.url?.startsWith("/v1/mailbox/threads/")
@@ -458,7 +467,7 @@ test("recovery aborts an earlier reader request without starting a second reader
 });
 
 test("strict-mode effect replay still loads an open thread before the stream is ready", async () => {
-  await renderMailbox({ isThreadOpen: true, isStrictMode: true });
+  await renderMailbox({ openThreadId: threadId, isStrictMode: true });
   assert.equal(document.querySelector("[data-thread-detail]")?.textContent, "available:Thread detail");
   assert.equal(listReads().length, 0);
   assert.equal(streams.filter((stream) => !stream.isClosed).length, 1);
@@ -469,7 +478,7 @@ test("strict-mode effect replay still loads an open thread before the stream is 
 });
 
 test("failed open-thread recovery retains cached content and keeps the recovery warning visible", async () => {
-  await renderMailbox({ isThreadOpen: true });
+  await renderMailbox({ openThreadId: threadId });
   await ready();
   respond = (config) => {
     if (config.url?.startsWith("/v1/mailbox/threads/")) throw new Error("Thread read unavailable");
@@ -486,7 +495,7 @@ test("failed open-thread recovery retains cached content and keeps the recovery 
 });
 
 test("a missing open thread during recovery clears its detail and reports it as missing", async () => {
-  await renderMailbox({ isThreadOpen: true });
+  await renderMailbox({ openThreadId: threadId });
   await ready();
   respond = (config) => {
     if (config.url?.startsWith("/v1/mailbox/threads/")) {
@@ -500,6 +509,81 @@ test("a missing open thread during recovery clears its detail and reports it as 
   assert.equal(useMailboxStore.getState().detailsById[threadId], undefined);
   assert.equal(document.querySelector("[data-thread-detail]")?.textContent, "missing:");
   assert.equal(document.querySelector('[role="alert"]'), null);
+});
+
+test("live deletion after switching threads returns the reader to its mailbox", async () => {
+  await renderMailbox({ openThreadId: threadId });
+  await ready();
+  const recoveryVersion = useMailboxStore.getState().recoveryVersion;
+  const selectedDetail = detail(newThreadId, "Conversation opened after recovery");
+  selectedDetail.thread.isUnread = false;
+  respond = (config) => config.url === `/v1/mailbox/threads/${newThreadId}`
+    ? selectedDetail : defaultResponse(config);
+  await renderMailbox({ openThreadId: newThreadId, shouldRenderThreadReader: true });
+  assert.match(document.body.textContent ?? "", /Conversation opened after recovery/);
+  assert.deepEqual(replacements, []);
+  respond = (config) => {
+    if (config.url === `/v1/mailbox/threads/${newThreadId}`) {
+      throw new AxiosError("Missing", "ERR_BAD_REQUEST", config, undefined, {
+        data: null, status: 404, statusText: "Not Found", headers: {}, config,
+      });
+    }
+    return defaultResponse(config);
+  };
+  await emit("mailbox", historyEvent([newThreadId]));
+  assert.equal(useMailboxStore.getState().recoveryVersion, recoveryVersion);
+  assert.equal(useMailboxStore.getState().detailsById[newThreadId], undefined);
+  assert.deepEqual(replacements, ["/mail?account=all&view=all"]);
+  assert.equal(refreshCount, 0);
+});
+
+test("a late reader response cannot restore a conversation removed by a newer live read", async () => {
+  await renderMailbox();
+  await ready();
+  const pendingDetail = deferred<MailboxThreadDetail>();
+  respond = (config) => config.url === `/v1/mailbox/threads/${newThreadId}`
+    ? pendingDetail.promise : defaultResponse(config);
+  await renderMailbox({ openThreadId: newThreadId });
+  respond = (config) => {
+    if (config.url === `/v1/mailbox/threads/${newThreadId}`) {
+      throw new AxiosError("Missing", "ERR_BAD_REQUEST", config, undefined, {
+        data: null, status: 404, statusText: "Not Found", headers: {}, config,
+      });
+    }
+    return defaultResponse(config);
+  };
+  await emit("mailbox", historyEvent([newThreadId]));
+  assert.equal(document.querySelector("[data-thread-detail]")?.textContent, "missing:");
+  await act(async () => pendingDetail.resolve(detail(newThreadId, "Response started before deletion")));
+  assert.equal(useMailboxStore.getState().detailsById[newThreadId], undefined);
+  assert.equal(document.querySelector("[data-thread-detail]")?.textContent, "missing:");
+});
+
+test("a new reader revalidates before navigating from an earlier missing state", async () => {
+  await renderMailbox();
+  await ready();
+  respond = (config) => {
+    if (config.url === `/v1/mailbox/threads/${newThreadId}`) {
+      throw new AxiosError("Missing", "ERR_BAD_REQUEST", config, undefined, {
+        data: null, status: 404, statusText: "Not Found", headers: {}, config,
+      });
+    }
+    return defaultResponse(config);
+  };
+  await renderMailbox({ openThreadId: newThreadId, shouldRenderThreadReader: true });
+  assert.deepEqual(replacements, ["/mail?account=all&view=all"]);
+  await renderMailbox();
+  replacements = [];
+  const pendingDetail = deferred<MailboxThreadDetail>();
+  respond = (config) => config.url === `/v1/mailbox/threads/${newThreadId}`
+    ? pendingDetail.promise : defaultResponse(config);
+  await renderMailbox({ openThreadId: newThreadId, shouldRenderThreadReader: true });
+  assert.deepEqual(replacements, []);
+  const availableDetail = detail(newThreadId, "Canonical conversation is available");
+  availableDetail.thread.isUnread = false;
+  await act(async () => pendingDetail.resolve(availableDetail));
+  assert.match(document.body.textContent ?? "", /Canonical conversation is available/);
+  assert.deepEqual(replacements, []);
 });
 
 test("pagination started before recovery cannot append mail from a superseded cursor", async () => {

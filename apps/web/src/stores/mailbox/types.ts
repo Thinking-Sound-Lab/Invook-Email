@@ -14,10 +14,20 @@ export type MailboxThreadDetailLoadState =
   | "missing"
   | "error";
 
-export interface MailboxThreadDetailRecovery {
+export interface MailboxThreadDetailRead {
   threadId: string;
+  source: "reader" | "mailbox";
+  recoveryVersion: number;
+  readVersion: number;
+}
+
+export interface MailboxThreadDetailState extends MailboxThreadDetailRead {
   loadState: MailboxThreadDetailLoadState;
 }
+
+export type MailboxThreadDetailReadResult =
+  | { loadState: "available"; detail: MailboxThreadDetail }
+  | { loadState: "missing" | "error" };
 
 export interface MailboxPageState {
   /**
@@ -71,7 +81,7 @@ export interface MailboxState {
   /** Fences browser reads started before a canonical cache recovery. */
   recoveryVersion: number;
   recoveringPageKey: string | null;
-  threadDetailRecovery: MailboxThreadDetailRecovery | null;
+  threadDetailState: MailboxThreadDetailState | null;
   threadsById: Record<string, MailboxThreadSummary>;
   /**
    * Opened threads, kept so returning to one renders from the cache instead of
@@ -84,10 +94,13 @@ export interface MailboxState {
   setShell: (shell: MailboxShell) => void;
   invalidateCaches: (input: { pageKey: string; openThreadId: string | null }) => void;
   completeRecovery: (recoveryVersion: number) => void;
-  setThreadDetailRecoveryState: (input: {
+  startThreadDetailRead: (input: {
     threadId: string;
-    recoveryVersion: number;
-    loadState: MailboxThreadDetailLoadState;
+    source: MailboxThreadDetailRead["source"];
+  }) => MailboxThreadDetailRead;
+  completeThreadDetailRead: (input: {
+    read: MailboxThreadDetailRead;
+    result: MailboxThreadDetailReadResult;
   }) => void;
   hydratePage: (input: HydrateMailboxPageInput) => void;
   replacePage: (input: HydrateMailboxPageInput) => void;

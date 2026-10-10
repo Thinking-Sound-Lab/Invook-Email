@@ -8,14 +8,14 @@ import {
   hydrateMailboxPageState,
   pruneMailboxThreads,
 } from "./mailbox-cache";
-import type { MailboxState } from "./types";
+import type { MailboxState, MailboxThreadDetailRead } from "./types";
 
 const initialState: Pick<
   MailboxState,
   | "shell"
   | "recoveryVersion"
   | "recoveringPageKey"
-  | "threadDetailRecovery"
+  | "threadDetailState"
   | "threadsById"
   | "detailsById"
   | "pagesByKey"
@@ -24,7 +24,7 @@ const initialState: Pick<
   shell: null,
   recoveryVersion: 0,
   recoveringPageKey: null,
-  threadDetailRecovery: null,
+  threadDetailState: null,
   threadsById: {},
   detailsById: {},
   pagesByKey: {},
@@ -42,7 +42,7 @@ function withThreads(
 
 export const useMailboxStore = create<MailboxState>()(
   devtools(
-    (set) => ({
+    (set, get) => ({
       ...initialState,
 
       setShell: (shell) => set({ shell }),
@@ -51,8 +51,14 @@ export const useMailboxStore = create<MailboxState>()(
         set((state) => ({
           recoveryVersion: state.recoveryVersion + 1,
           recoveringPageKey: pageKey,
-          threadDetailRecovery: openThreadId
-            ? { threadId: openThreadId, loadState: "loading" }
+          threadDetailState: openThreadId
+            ? {
+                threadId: openThreadId,
+                source: "mailbox",
+                recoveryVersion: state.recoveryVersion + 1,
+                readVersion: (state.threadDetailState?.readVersion ?? 0) + 1,
+                loadState: "loading",
+              }
             : null,
           pagesByKey: Object.fromEntries(
             Object.entries(state.pagesByKey).map(([key, page]) => [
@@ -72,10 +78,42 @@ export const useMailboxStore = create<MailboxState>()(
           ? { recoveringPageKey: null }
           : state),
 
-      setThreadDetailRecoveryState: ({ threadId, recoveryVersion, loadState }) =>
+      startThreadDetailRead: ({ threadId, source }) => {
+        const state = get();
+        const read: MailboxThreadDetailRead = {
+          threadId,
+          source,
+          recoveryVersion: state.recoveryVersion,
+          readVersion: (state.threadDetailState?.readVersion ?? 0) + 1,
+        };
+        set({ threadDetailState: { ...read, loadState: "loading" } });
+        return read;
+      },
+
+      completeThreadDetailRead: ({ read, result }) =>
         set((state) => {
-          if (state.recoveryVersion !== recoveryVersion || state.threadDetailRecovery?.threadId !== threadId) return state;
-          return { threadDetailRecovery: { threadId, loadState } };
+          if (
+            state.recoveryVersion !== read.recoveryVersion ||
+            state.threadDetailState?.threadId !== read.threadId ||
+            state.threadDetailState.readVersion !== read.readVersion
+          ) return state;
+          const threadDetailState = { ...read, loadState: result.loadState };
+          switch (result.loadState) {
+            case "available":
+              return {
+                threadDetailState,
+                detailsById: { ...state.detailsById, [read.threadId]: result.detail },
+              };
+            case "missing":
+              return {
+                threadDetailState,
+                detailsById: Object.fromEntries(
+                  Object.entries(state.detailsById).filter(([threadId]) => threadId !== read.threadId),
+                ),
+              };
+            case "error":
+              return { threadDetailState };
+          }
         }),
 
       replacePage: ({ key, page }) =>
@@ -156,12 +194,10 @@ export const useMailboxStore = create<MailboxState>()(
         }),
 
       hydrateThreadDetail: ({ threadId, detail }) =>
-        set((state) => ({
-          detailsById: { ...state.detailsById, [threadId]: detail },
-          threadDetailRecovery: state.threadDetailRecovery?.threadId === threadId
-            ? { threadId, loadState: "available" }
-            : state.threadDetailRecovery,
-        })),
+        set((state) => {
+          if (state.threadDetailState?.threadId === threadId && state.threadDetailState.loadState !== "available") return state;
+          return { detailsById: { ...state.detailsById, [threadId]: detail } };
+        }),
 
       removeThreadDetail: (threadId) =>
         set((state) => {

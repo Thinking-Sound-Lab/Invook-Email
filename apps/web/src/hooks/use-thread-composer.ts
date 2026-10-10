@@ -72,12 +72,16 @@ export function useThreadComposer({
   // is re-read directly instead of re-rendering the whole route.
   const reloadThreadDetail = useCallback(async (): Promise<void> => {
     const recoveryVersion = useMailboxStore.getState().recoveryVersion;
+    const threadDetailReadVersion = useMailboxStore.getState().threadDetailState?.readVersion;
     try {
       const detail = await getMailboxThreadDetail({
         accountSelection: accountId,
         threadId,
       });
-      if (useMailboxStore.getState().recoveryVersion === recoveryVersion) {
+      if (
+        useMailboxStore.getState().recoveryVersion === recoveryVersion &&
+        useMailboxStore.getState().threadDetailState?.readVersion === threadDetailReadVersion
+      ) {
         hydrateThreadDetail({ threadId, detail });
       }
     } catch {

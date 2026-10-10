@@ -86,10 +86,15 @@ function usePrefetchThreadDetail(
       }
       const controller = new AbortController();
       const recoveryVersion = useMailboxStore.getState().recoveryVersion;
+      const threadDetailReadVersion = useMailboxStore.getState().threadDetailState?.readVersion;
       requestControllersRef.current.set(threadId, controller);
       void getMailboxThreadDetail({ accountSelection, threadId, signal: controller.signal })
         .then((detail) => {
-          if (!controller.signal.aborted && useMailboxStore.getState().recoveryVersion === recoveryVersion) {
+          if (
+            !controller.signal.aborted &&
+            useMailboxStore.getState().recoveryVersion === recoveryVersion &&
+            useMailboxStore.getState().threadDetailState?.readVersion === threadDetailReadVersion
+          ) {
             hydrateThreadDetail({ threadId, detail });
           }
         })
