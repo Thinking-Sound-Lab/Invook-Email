@@ -1,6 +1,5 @@
 "use client";
 
-import type { MailboxAccount } from "@invook/contracts";
 import { useSearchParams } from "next/navigation";
 
 import { Progress } from "@/components/ui/progress";
@@ -12,14 +11,10 @@ import {
   selectedMailboxAccount,
 } from "./mail-account-scope";
 import { getAccountPipelinePresentation } from "./account-pipeline-state";
+import { useMailShell } from "./mail-shell-provider";
 
-export interface AccountPipelineStripeProps {
-  accounts: MailboxAccount[];
-}
-
-export function AccountPipelineStripe({
-  accounts,
-}: AccountPipelineStripeProps) {
+export function AccountPipelineStripe() {
+  const { accounts } = useMailShell();
   const searchParams = useSearchParams();
   const selection = resolveMailboxAccountSelection(
     searchParams.get("account"),

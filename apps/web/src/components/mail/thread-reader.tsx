@@ -13,6 +13,7 @@ import {
   useThreadDetail,
   type ThreadDetailLoadState,
 } from "@/hooks/use-thread-detail";
+import { useMailboxStore } from "@/stores/mailbox/store";
 
 import {
   displayName,
@@ -63,8 +64,9 @@ export function ThreadReader({
   // A thread that is gone from stored state has no reader to show, so the
   // mailbox takes over the surface exactly as the server render used to.
   useEffect(() => {
-    if (loadState === "missing") router.replace(mailboxHref);
-  }, [loadState, mailboxHref, router]);
+    const state = useMailboxStore.getState().threadDetailState;
+    if (state?.threadId === threadId && state.loadState === "missing") router.replace(mailboxHref);
+  }, [loadState, mailboxHref, router, threadId]);
 
   if (!detail) {
     return (

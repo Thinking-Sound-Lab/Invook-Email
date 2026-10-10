@@ -26,7 +26,7 @@ export default async function MailLayout({ children }: MailLayoutProps) {
           <MailSidebar sidebarCounts={sidebarCounts} />
           {children}
         </div>
-        <AccountPipelineStripe accounts={shell.accounts} />
+        <AccountPipelineStripe />
       </main>
     </MailShellProvider>
   );

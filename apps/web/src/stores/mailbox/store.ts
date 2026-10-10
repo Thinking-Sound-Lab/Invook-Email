@@ -6,13 +6,25 @@ import {
   appendMailboxPageState,
   applyMailboxThreadUpdates,
   hydrateMailboxPageState,
+  pruneMailboxThreads,
 } from "./mailbox-cache";
-import type { MailboxState } from "./types";
+import type { MailboxState, MailboxThreadDetailRead } from "./types";
 
 const initialState: Pick<
   MailboxState,
-  "threadsById" | "detailsById" | "pagesByKey" | "sidebarCounts"
+  | "shell"
+  | "recoveryVersion"
+  | "recoveringPageKey"
+  | "threadDetailState"
+  | "threadsById"
+  | "detailsById"
+  | "pagesByKey"
+  | "sidebarCounts"
 > = {
+  shell: null,
+  recoveryVersion: 0,
+  recoveringPageKey: null,
+  threadDetailState: null,
   threadsById: {},
   detailsById: {},
   pagesByKey: {},
@@ -30,8 +42,92 @@ function withThreads(
 
 export const useMailboxStore = create<MailboxState>()(
   devtools(
-    (set) => ({
+    (set, get) => ({
       ...initialState,
+
+      setShell: (shell) => set({ shell }),
+
+      invalidateCaches: ({ pageKey, openThreadId }) =>
+        set((state) => ({
+          recoveryVersion: state.recoveryVersion + 1,
+          recoveringPageKey: pageKey,
+          threadDetailState: openThreadId
+            ? {
+                threadId: openThreadId,
+                source: "mailbox",
+                recoveryVersion: state.recoveryVersion + 1,
+                readVersion: (state.threadDetailState?.readVersion ?? 0) + 1,
+                loadState: "loading",
+              }
+            : null,
+          pagesByKey: Object.fromEntries(
+            Object.entries(state.pagesByKey).map(([key, page]) => [
+              key,
+              { ...page, loadState: "idle", isStale: true },
+            ]),
+          ),
+          detailsById: Object.fromEntries(
+            Object.entries(state.detailsById).filter(
+              ([threadId]) => threadId === openThreadId,
+            ),
+          ),
+        })),
+
+      completeRecovery: (recoveryVersion) =>
+        set((state) => state.recoveryVersion === recoveryVersion
+          ? { recoveringPageKey: null }
+          : state),
+
+      startThreadDetailRead: ({ threadId, source }) => {
+        const state = get();
+        const read: MailboxThreadDetailRead = {
+          threadId,
+          source,
+          recoveryVersion: state.recoveryVersion,
+          readVersion: (state.threadDetailState?.readVersion ?? 0) + 1,
+        };
+        set({ threadDetailState: { ...read, loadState: "loading" } });
+        return read;
+      },
+
+      completeThreadDetailRead: ({ read, result }) =>
+        set((state) => {
+          if (
+            state.recoveryVersion !== read.recoveryVersion ||
+            state.threadDetailState?.threadId !== read.threadId ||
+            state.threadDetailState.readVersion !== read.readVersion
+          ) return state;
+          const threadDetailState = { ...read, loadState: result.loadState };
+          switch (result.loadState) {
+            case "available":
+              return {
+                threadDetailState,
+                detailsById: { ...state.detailsById, [read.threadId]: result.detail },
+              };
+            case "missing":
+              return {
+                threadDetailState,
+                detailsById: Object.fromEntries(
+                  Object.entries(state.detailsById).filter(([threadId]) => threadId !== read.threadId),
+                ),
+              };
+            case "error":
+              return { threadDetailState };
+          }
+        }),
+
+      replacePage: ({ key, page }) =>
+        set((state) => {
+          const threadsById = withThreads(state.threadsById, page.threads);
+          const pagesByKey = {
+            ...state.pagesByKey,
+            [key]: hydrateMailboxPageState({ existing: undefined, page, threadsById }),
+          };
+          return {
+            threadsById: pruneMailboxThreads(threadsById, pagesByKey),
+            pagesByKey,
+          };
+        }),
 
       hydratePage: ({ key, page }) =>
         set((state) => {
@@ -98,9 +194,10 @@ export const useMailboxStore = create<MailboxState>()(
         }),
 
       hydrateThreadDetail: ({ threadId, detail }) =>
-        set((state) => ({
-          detailsById: { ...state.detailsById, [threadId]: detail },
-        })),
+        set((state) => {
+          if (state.threadDetailState?.threadId === threadId && state.threadDetailState.loadState !== "available") return state;
+          return { detailsById: { ...state.detailsById, [threadId]: detail } };
+        }),
 
       removeThreadDetail: (threadId) =>
         set((state) => {
@@ -116,7 +213,10 @@ export const useMailboxStore = create<MailboxState>()(
 
       setSidebarCounts: (sidebarCounts) => set({ sidebarCounts }),
 
-      reset: () => set(initialState),
+      reset: () => set((state) => ({
+        ...initialState,
+        recoveryVersion: state.recoveryVersion + 1,
+      })),
     }),
     { name: "mailbox-store" },
   ),

@@ -66,22 +66,45 @@ function usePrefetchThreadDetail(
   const hydrateThreadDetail = useMailboxStore(
     (state) => state.hydrateThreadDetail,
   );
-  const requestedThreadIdsRef = useRef(new Set<string>());
+  const requestControllersRef = useRef(new Map<string, AbortController>());
+
+  useEffect(() => {
+    const controllers = requestControllersRef.current;
+    return () => {
+      for (const controller of controllers.values()) controller.abort();
+      controllers.clear();
+    };
+  }, [accountSelection]);
 
   return useCallback(
     (threadId: string) => {
       if (
-        requestedThreadIdsRef.current.has(threadId) ||
+        requestControllersRef.current.has(threadId) ||
         useMailboxStore.getState().detailsById[threadId]
       ) {
         return;
       }
-      requestedThreadIdsRef.current.add(threadId);
-      void getMailboxThreadDetail({ accountSelection, threadId })
-        .then((detail) => hydrateThreadDetail({ threadId, detail }))
+      const controller = new AbortController();
+      const recoveryVersion = useMailboxStore.getState().recoveryVersion;
+      const threadDetailReadVersion = useMailboxStore.getState().threadDetailState?.readVersion;
+      requestControllersRef.current.set(threadId, controller);
+      void getMailboxThreadDetail({ accountSelection, threadId, signal: controller.signal })
+        .then((detail) => {
+          if (
+            !controller.signal.aborted &&
+            useMailboxStore.getState().recoveryVersion === recoveryVersion &&
+            useMailboxStore.getState().threadDetailState?.readVersion === threadDetailReadVersion
+          ) {
+            hydrateThreadDetail({ threadId, detail });
+          }
+        })
         .catch(() => {
           // A prefetch is an optimization; the reader reports its own failure.
-          requestedThreadIdsRef.current.delete(threadId);
+        })
+        .finally(() => {
+          if (requestControllersRef.current.get(threadId) === controller) {
+            requestControllersRef.current.delete(threadId);
+          }
         });
     },
     [accountSelection, hydrateThreadDetail],
@@ -306,6 +329,9 @@ export function MailList({
   const appendPage = useMailboxStore((state) => state.appendPage);
   const setPageLoadState = useMailboxStore((state) => state.setPageLoadState);
   const page = useMailboxStore((state) => state.pagesByKey[pageKey]);
+  const recoveryVersion = useMailboxStore((state) => state.recoveryVersion);
+  const isRecoveringPage = useMailboxStore((state) => state.recoveringPageKey === pageKey);
+  const initialPageRef = useRef(initialPage);
   const [firstPageFailure, setFirstPageFailure] = useState<{
     key: string;
   } | null>(null);
@@ -314,11 +340,17 @@ export function MailList({
   const isCached = page !== undefined;
 
   useEffect(() => {
-    if (initialPage) hydratePage({ key: pageKey, page: initialPage });
+    const hasNewSeed = initialPageRef.current !== initialPage;
+    initialPageRef.current = initialPage;
+    if (initialPage && (hasNewSeed || !useMailboxStore.getState().pagesByKey[pageKey])) {
+      hydratePage({ key: pageKey, page: initialPage });
+    }
   }, [hydratePage, initialPage, pageKey]);
 
   useEffect(() => {
-    if (isCached || initialPage) return;
+    if (page && !page.isStale) return;
+    if (isRecoveringPage) return;
+    if (!page && initialPage) return;
     const requestController = new AbortController();
     void (async () => {
       try {
@@ -327,8 +359,12 @@ export function MailList({
           view: currentView,
           signal: requestController.signal,
         });
-        if (requestController.signal.aborted) return;
+        if (
+          requestController.signal.aborted ||
+          useMailboxStore.getState().recoveryVersion !== recoveryVersion
+        ) return;
         hydratePage({ key: pageKey, page: firstPage });
+        setFirstPageFailure(null);
       } catch (error: unknown) {
         if (axios.isCancel(error) || requestController.signal.aborted) return;
         setFirstPageFailure({ key: pageKey });
@@ -341,8 +377,10 @@ export function MailList({
     firstPageAttempt,
     hydratePage,
     initialPage,
-    isCached,
+    isRecoveringPage,
+    page,
     pageKey,
+    recoveryVersion,
   ]);
 
   const cachedThreadIds = page?.threadIds;
@@ -381,11 +419,11 @@ export function MailList({
     () => () => {
       requestControllerRef.current?.abort();
     },
-    [],
+    [recoveryVersion],
   );
 
   const loadMoreMail = useCallback(async (): Promise<void> => {
-    if (!olderCursor || isLoadingRef.current) return;
+    if (!olderCursor || isRecoveringPage || page?.isStale || isLoadingRef.current) return;
 
     const requestController = new AbortController();
     requestControllerRef.current?.abort();
@@ -400,7 +438,10 @@ export function MailList({
         view: currentView,
         signal: requestController.signal,
       });
-      if (requestController.signal.aborted) return;
+      if (
+        requestController.signal.aborted ||
+        useMailboxStore.getState().recoveryVersion !== recoveryVersion
+      ) return;
       appendPage({ key: pageKey, page: nextPage });
     } catch (error: unknown) {
       if (axios.isCancel(error) || requestController.signal.aborted) return;
@@ -415,8 +456,11 @@ export function MailList({
     accountSelection,
     appendPage,
     currentView,
+    isRecoveringPage,
     olderCursor,
+    page?.isStale,
     pageKey,
+    recoveryVersion,
     setPageLoadState,
   ]);
 
