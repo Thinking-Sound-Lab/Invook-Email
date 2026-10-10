@@ -1,5 +1,6 @@
 import type {
   MailboxSidebarCounts,
+  MailboxShell,
   MailboxThreadDetail,
   MailboxThreadPage,
   MailboxThreadSummary,
@@ -17,8 +18,8 @@ export interface MailboxPageState {
   loadState: MailboxPageLoadState;
   /**
    * Set when a mailbox change event reconciled a different view, so this page's
-   * membership can no longer be trusted. The next server render replaces it
-   * instead of merging into it.
+   * membership can no longer be trusted. The next API read replaces it instead
+   * of merging into it.
    */
   isStale: boolean;
 }
@@ -55,16 +56,24 @@ export interface HydrateMailboxThreadDetailInput {
 }
 
 export interface MailboxState {
+  shell: MailboxShell | null;
+  /** Fences browser reads started before a canonical cache recovery. */
+  recoveryVersion: number;
+  recoveringPageKey: string | null;
   threadsById: Record<string, MailboxThreadSummary>;
   /**
    * Opened threads, kept so returning to one renders from the cache instead of
    * waiting on the server. A stored message body never changes, so a cached
-   * detail only goes out of date when an event names its thread.
+   * detail is invalidated by a named event or a recovery after missed events.
    */
   detailsById: Record<string, MailboxThreadDetail>;
   pagesByKey: Record<string, MailboxPageState>;
   sidebarCounts: MailboxSidebarCounts | null;
+  setShell: (shell: MailboxShell) => void;
+  invalidateCaches: (input: { pageKey: string; openThreadId: string | null }) => void;
+  completeRecovery: (recoveryVersion: number) => void;
   hydratePage: (input: HydrateMailboxPageInput) => void;
+  replacePage: (input: HydrateMailboxPageInput) => void;
   appendPage: (input: AppendMailboxPageInput) => void;
   setPageLoadState: (input: SetMailboxPageLoadStateInput) => void;
   applyThreadUpdates: (input: ApplyMailboxThreadUpdatesInput) => void;

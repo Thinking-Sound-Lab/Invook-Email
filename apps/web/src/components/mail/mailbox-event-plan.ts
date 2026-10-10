@@ -8,7 +8,7 @@ export interface MailboxEventLocation {
 
 export type MailboxEventPlan =
   | { kind: "ignore" }
-  | { kind: "refresh" }
+  | { kind: "recover" }
   | { kind: "patch"; threadIds: string[] };
 
 function affectedThreadIds(event: MailboxChangeEvent): string[] {
@@ -31,7 +31,8 @@ function affectedThreadIds(event: MailboxChangeEvent): string[] {
  *
  * Threads are cached on the client, so an event that names thread identities is
  * reconciled by reading just those threads. Account and label state stay server
- * rendered, so the events that move them still take a route refresh.
+ * seeded by the server and cached in Zustand, so structural events require a
+ * canonical recovery of the list, counts, and shell together.
  */
 export function planMailboxEvent(
   event: MailboxChangeEvent,
@@ -47,7 +48,7 @@ export function planMailboxEvent(
   switch (event.changeType) {
     case "replica_ready":
     case "safe_invalidation":
-      return { kind: "refresh" };
+      return { kind: "recover" };
     case "history_applied":
     case "labels_changed":
     case "drafts_changed": {

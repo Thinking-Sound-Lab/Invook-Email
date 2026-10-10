@@ -6,13 +6,23 @@ import {
   appendMailboxPageState,
   applyMailboxThreadUpdates,
   hydrateMailboxPageState,
+  pruneMailboxThreads,
 } from "./mailbox-cache";
 import type { MailboxState } from "./types";
 
 const initialState: Pick<
   MailboxState,
-  "threadsById" | "detailsById" | "pagesByKey" | "sidebarCounts"
+  | "shell"
+  | "recoveryVersion"
+  | "recoveringPageKey"
+  | "threadsById"
+  | "detailsById"
+  | "pagesByKey"
+  | "sidebarCounts"
 > = {
+  shell: null,
+  recoveryVersion: 0,
+  recoveringPageKey: null,
   threadsById: {},
   detailsById: {},
   pagesByKey: {},
@@ -32,6 +42,43 @@ export const useMailboxStore = create<MailboxState>()(
   devtools(
     (set) => ({
       ...initialState,
+
+      setShell: (shell) => set({ shell }),
+
+      invalidateCaches: ({ pageKey, openThreadId }) =>
+        set((state) => ({
+          recoveryVersion: state.recoveryVersion + 1,
+          recoveringPageKey: pageKey,
+          pagesByKey: Object.fromEntries(
+            Object.entries(state.pagesByKey).map(([key, page]) => [
+              key,
+              { ...page, loadState: "idle", isStale: true },
+            ]),
+          ),
+          detailsById: Object.fromEntries(
+            Object.entries(state.detailsById).filter(
+              ([threadId]) => threadId === openThreadId,
+            ),
+          ),
+        })),
+
+      completeRecovery: (recoveryVersion) =>
+        set((state) => state.recoveryVersion === recoveryVersion
+          ? { recoveringPageKey: null }
+          : state),
+
+      replacePage: ({ key, page }) =>
+        set((state) => {
+          const threadsById = withThreads(state.threadsById, page.threads);
+          const pagesByKey = {
+            ...state.pagesByKey,
+            [key]: hydrateMailboxPageState({ existing: undefined, page, threadsById }),
+          };
+          return {
+            threadsById: pruneMailboxThreads(threadsById, pagesByKey),
+            pagesByKey,
+          };
+        }),
 
       hydratePage: ({ key, page }) =>
         set((state) => {
@@ -116,7 +163,10 @@ export const useMailboxStore = create<MailboxState>()(
 
       setSidebarCounts: (sidebarCounts) => set({ sidebarCounts }),
 
-      reset: () => set(initialState),
+      reset: () => set((state) => ({
+        ...initialState,
+        recoveryVersion: state.recoveryVersion + 1,
+      })),
     }),
     { name: "mailbox-store" },
   ),

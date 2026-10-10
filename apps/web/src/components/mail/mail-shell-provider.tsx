@@ -1,7 +1,9 @@
 "use client";
 
 import type { MailboxShell } from "@invook/contracts";
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, useContext, useEffect, type ReactNode } from "react";
+
+import { useMailboxStore } from "@/stores/mailbox/store";
 
 const MailShellContext = createContext<MailboxShell | null>(null);
 
@@ -11,6 +13,11 @@ interface MailShellProviderProps {
 }
 
 export function MailShellProvider({ children, shell }: MailShellProviderProps) {
+  const setShell = useMailboxStore((state) => state.setShell);
+  const reset = useMailboxStore((state) => state.reset);
+  useEffect(() => setShell(shell), [setShell, shell]);
+  useEffect(() => () => reset(), [reset]);
+
   return (
     <MailShellContext.Provider value={shell}>
       {children}
@@ -20,6 +27,7 @@ export function MailShellProvider({ children, shell }: MailShellProviderProps) {
 
 export function useMailShell(): MailboxShell {
   const shell = useContext(MailShellContext);
+  const cachedShell = useMailboxStore((state) => state.shell);
   if (!shell) throw new Error("MailShellProvider is required.");
-  return shell;
+  return cachedShell ?? shell;
 }

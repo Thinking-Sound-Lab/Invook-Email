@@ -71,12 +71,15 @@ export function useThreadComposer({
   // Composing writes to the thread the reader is showing, so the cached thread
   // is re-read directly instead of re-rendering the whole route.
   const reloadThreadDetail = useCallback(async (): Promise<void> => {
+    const recoveryVersion = useMailboxStore.getState().recoveryVersion;
     try {
       const detail = await getMailboxThreadDetail({
         accountSelection: accountId,
         threadId,
       });
-      hydrateThreadDetail({ threadId, detail });
+      if (useMailboxStore.getState().recoveryVersion === recoveryVersion) {
+        hydrateThreadDetail({ threadId, detail });
+      }
     } catch {
       // The mailbox change event that follows this write reconciles the thread.
     }

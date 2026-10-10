@@ -61,7 +61,7 @@ function upsertThreads(
   return next;
 }
 
-function pruneThreads(
+export function pruneMailboxThreads(
   threadsById: Record<string, MailboxThreadSummary>,
   pagesByKey: Record<string, MailboxPageState>,
 ): Record<string, MailboxThreadSummary> {
@@ -237,6 +237,6 @@ export function applyMailboxThreadUpdates({
 
   return {
     pagesByKey: nextPagesByKey,
-    threadsById: pruneThreads(nextThreadsById, nextPagesByKey),
+    threadsById: pruneMailboxThreads(nextThreadsById, nextPagesByKey),
   };
 }

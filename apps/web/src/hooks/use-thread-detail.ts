@@ -39,6 +39,7 @@ export function useThreadDetail({
   threadId,
 }: UseThreadDetailProps): UseThreadDetailResult {
   const detail = useMailboxStore((state) => state.detailsById[threadId] ?? null);
+  const recoveryVersion = useMailboxStore((state) => state.recoveryVersion);
   const hydrateThreadDetail = useMailboxStore(
     (state) => state.hydrateThreadDetail,
   );
@@ -67,11 +68,18 @@ export function useThreadDetail({
           threadId,
           signal: requestController.signal,
         });
-        if (requestController.signal.aborted) return;
+        if (
+          requestController.signal.aborted ||
+          useMailboxStore.getState().recoveryVersion !== recoveryVersion
+        ) return;
         hydrateThreadDetail({ threadId, detail: nextDetail });
         setResult({ threadId, status: "available" });
       } catch (cause: unknown) {
-        if (axios.isCancel(cause) || requestController.signal.aborted) return;
+        if (
+          axios.isCancel(cause) ||
+          requestController.signal.aborted ||
+          useMailboxStore.getState().recoveryVersion !== recoveryVersion
+        ) return;
         const status =
           axios.isAxiosError(cause) && cause.response?.status === 404
             ? "missing"
@@ -85,6 +93,7 @@ export function useThreadDetail({
     accountSelection,
     hydrateThreadDetail,
     reloadCount,
+    recoveryVersion,
     removeThreadDetail,
     threadId,
   ]);

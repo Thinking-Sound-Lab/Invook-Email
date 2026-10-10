@@ -81,7 +81,7 @@ test("label and draft changes reconcile by thread identity", () => {
   assert.deepEqual(draftPlan, { kind: "patch", threadIds: ["thread-4"] });
 });
 
-test("structural events still refresh the server rendered shell", () => {
+test("structural events recover canonical mailbox data", () => {
   assert.deepEqual(
     planMailboxEvent(
       {
@@ -91,7 +91,7 @@ test("structural events still refresh the server rendered shell", () => {
       },
       mailboxLocation,
     ),
-    { kind: "refresh" },
+    { kind: "recover" },
   );
   assert.deepEqual(
     planMailboxEvent(
@@ -103,6 +103,6 @@ test("structural events still refresh the server rendered shell", () => {
       },
       mailboxLocation,
     ),
-    { kind: "refresh" },
+    { kind: "recover" },
   );
 });
