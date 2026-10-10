@@ -137,9 +137,11 @@ export async function syncGmailThreadPageActivity(
     providerThreadIds: (page.threads ?? []).map((thread) => thread.id),
   });
   if (recorded.status === "superseded") return { status: "superseded" };
+  // The first persist owns this page's cursor. A retried Gmail listing can
+  // shift, and following that later token would skip recorded threads.
   return {
     status: "recorded",
-    nextPageToken: page.nextPageToken ?? null,
+    nextPageToken: recorded.nextPageToken,
     pendingThreadIds: recorded.pendingThreadIds,
   };
 }
