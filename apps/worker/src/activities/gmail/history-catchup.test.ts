@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   gmailHistoryCatchupDisposition,
+  gmailHistoryReplayStart,
   planGmailHistoryCatchup,
+  planGmailSyncFinalizeReplay,
 } from "./history-catchup";
 
 test("ready replicas continue incrementally from the committed cursor", () => {
@@ -103,6 +105,61 @@ test("replicas without a usable live baseline remain deferred", () => {
       historyCursor: null,
     }),
     { kind: "defer", state: "repairing" },
+  );
+});
+
+test("finalize replay starts from the committed live cursor after catch-up", () => {
+  assert.deepEqual(
+    planGmailSyncFinalizeReplay({
+      historyCursor: "5000",
+      initialHistoryId: "100",
+      startingHistoryCursor: "100",
+    }),
+    { expectedCursor: "5000", startHistoryId: "5000" },
+  );
+  assert.deepEqual(
+    planGmailSyncFinalizeReplay({
+      historyCursor: "240",
+      initialHistoryId: "100",
+      startingHistoryCursor: "200",
+    }),
+    { expectedCursor: "240", startHistoryId: "240" },
+  );
+  assert.deepEqual(
+    planGmailSyncFinalizeReplay({
+      historyCursor: null,
+      initialHistoryId: "100",
+      startingHistoryCursor: "100",
+    }),
+    { expectedCursor: "100", startHistoryId: "100" },
+  );
+});
+
+test("finalize replay keeps the repair baseline when live catch-up has not advanced", () => {
+  assert.deepEqual(
+    planGmailSyncFinalizeReplay({
+      historyCursor: null,
+      initialHistoryId: "100",
+      startingHistoryCursor: "200",
+    }),
+    { expectedCursor: "100", startHistoryId: "200" },
+  );
+});
+
+test("history replay prefers the later of the committed cursor and the baseline", () => {
+  assert.equal(
+    gmailHistoryReplayStart({
+      expectedCursor: "240",
+      baselineHistoryId: "200",
+    }),
+    "240",
+  );
+  assert.equal(
+    gmailHistoryReplayStart({
+      expectedCursor: "100",
+      baselineHistoryId: "200",
+    }),
+    "200",
   );
 });
 

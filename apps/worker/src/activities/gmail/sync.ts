@@ -73,6 +73,7 @@ import {
   applyHistoryRange,
   catchUpGmailHistory,
 } from "./history";
+import { planGmailSyncFinalizeReplay } from "./history-catchup";
 import {
   normalizeFullMessage,
   prepareMessage,
@@ -368,6 +369,10 @@ export async function runGmailMessageRefresh(job: WorkflowStepJob) {
 /**
  * Replays the history accumulated during discovery and publishes the replica.
  *
+ * Replay starts from the later of the run baseline and the replica's committed
+ * cursor. Live catch-up during the walk advances that cursor, and listing from
+ * the original baseline after Gmail expires it would fail the whole finalize.
+ *
  * A repair run additionally reconciles deletions: a message absent from the
  * provider is only discoverable by differencing the run's discovered set
  * against the stored one, which incremental history can never report.
@@ -410,8 +415,13 @@ export async function finalizeGmailSyncActivity(
       }
     }
 
-    let expectedCursor = replica.historyCursor ?? replica.initialHistoryId;
-    let startHistoryId = run.startingHistoryCursor;
+    const replayPlan = planGmailSyncFinalizeReplay({
+      historyCursor: replica.historyCursor,
+      initialHistoryId: replica.initialHistoryId,
+      startingHistoryCursor: run.startingHistoryCursor,
+    });
+    let expectedCursor = replayPlan.expectedCursor;
+    let startHistoryId = replayPlan.startHistoryId;
     let historyCursor = startHistoryId;
     for (;;) {
       const replay = await applyHistoryRange({
