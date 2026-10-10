@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { v4 as uuidv4 } from "uuid";
@@ -1257,54 +1257,78 @@ test(
 );
 
 test(
-  "disconnected accounts cannot admit or complete automatic label work",
+  "unavailable accounts release live label reservations so reconnect can requeue",
   integrationOptions,
   async () => {
     await withContext(async (context) => {
-      const [row] = await insertThreads(context, [
+      const [beginRow, completeRow, failRow] = await insertThreads(context, [
+        { sentAt: context.referenceAt },
+        { sentAt: context.referenceAt },
         { sentAt: context.referenceAt },
       ]);
-      assert.ok(row);
+      assert.ok(beginRow);
+      assert.ok(completeRow);
+      assert.ok(failRow);
       await context.database.transaction((transaction) =>
         enqueueLiveInboxThreadLabelAnalyses(
-          { ...context, threadIds: [row.threadId] },
+          {
+            ...context,
+            threadIds: [
+              beginRow.threadId,
+              completeRow.threadId,
+              failRow.threadId,
+            ],
+          },
           transaction,
         ),
       );
-      const [thread] = await context.database
-        .select()
+      const reserved = await context.database
+        .select({
+          id: threads.id,
+          labelAnalysisVersion: threads.labelAnalysisVersion,
+          labelAnalysisState: threads.labelAnalysisState,
+          labelAnalysisDefinitionHash: threads.labelAnalysisDefinitionHash,
+        })
         .from(threads)
-        .where(eq(threads.id, row.threadId));
-      assert.ok(thread?.labelAnalysisDefinitionHash);
-      const checkpoint = {
-        threadId: row.threadId,
-        analysisVersion: thread.labelAnalysisVersion,
-        definitionHash: thread.labelAnalysisDefinitionHash,
+        .where(
+          inArray(threads.id, [
+            beginRow.threadId,
+            completeRow.threadId,
+            failRow.threadId,
+          ]),
+        );
+      assert.equal(reserved.length, 3);
+      assert.ok(
+        reserved.every(
+          (thread) =>
+            thread.labelAnalysisState === "running" &&
+            thread.labelAnalysisDefinitionHash,
+        ),
+      );
+      const checkpointFor = (threadId: string) => {
+        const thread = reserved.find((row) => row.id === threadId);
+        assert.ok(thread?.labelAnalysisDefinitionHash);
+        return {
+          threadId,
+          analysisVersion: thread.labelAnalysisVersion,
+          definitionHash: thread.labelAnalysisDefinitionHash,
+        };
       };
       await context.database
         .update(connectedAccounts)
-        .set({ status: "disconnected" })
+        .set({ status: "reconnect_required" })
         .where(eq(connectedAccounts.id, context.accountId));
       assert.equal(
         (
           await beginThreadLabelAnalysis(
-            { ...context, checkpoint },
+            { ...context, checkpoint: checkpointFor(beginRow.threadId) },
             context.database,
           )
         ).status,
         "missing",
       );
-      assert.equal(
-        await context.database.transaction((transaction) =>
-          enqueueLiveInboxThreadLabelAnalyses(
-            { ...context, threadIds: [row.threadId] },
-            transaction,
-          ),
-        ),
-        0,
-      );
       const [label] = await context.database
-        .select()
+        .select({ id: labels.id })
         .from(labels)
         .where(
           and(
@@ -1318,7 +1342,7 @@ test(
           await completeThreadLabelAnalysis(
             {
               ...context,
-              checkpoint,
+              checkpoint: checkpointFor(completeRow.threadId),
               labelId: label.id,
               modelId: "test-model",
               confidence: 90,
@@ -1328,6 +1352,81 @@ test(
         ).status,
         "missing",
       );
+      assert.equal(
+        await failThreadLabelAnalysis(
+          {
+            ...context,
+            checkpoint: checkpointFor(failRow.threadId),
+            errorCode: "label_analysis_failed",
+          },
+          context.database,
+        ),
+        false,
+      );
+      const released = await context.database
+        .select({
+          id: threads.id,
+          labelAnalysisVersion: threads.labelAnalysisVersion,
+          labelAnalysisState: threads.labelAnalysisState,
+        })
+        .from(threads)
+        .where(
+          inArray(threads.id, [
+            beginRow.threadId,
+            completeRow.threadId,
+            failRow.threadId,
+          ]),
+        );
+      assert.equal(released.length, 3);
+      assert.ok(
+        released.every(
+          (thread) =>
+            thread.labelAnalysisState === "not_requested" &&
+            thread.labelAnalysisVersion === 2,
+        ),
+      );
+      assert.equal(
+        await context.database.transaction((transaction) =>
+          enqueueLiveInboxThreadLabelAnalyses(
+            { ...context, threadIds: [beginRow.threadId] },
+            transaction,
+          ),
+        ),
+        0,
+      );
+      await context.database
+        .update(connectedAccounts)
+        .set({ status: "connected" })
+        .where(eq(connectedAccounts.id, context.accountId));
+      assert.equal(
+        await context.database.transaction((transaction) =>
+          enqueueLiveInboxThreadLabelAnalyses(
+            {
+              ...context,
+              threadIds: [
+                beginRow.threadId,
+                completeRow.threadId,
+                failRow.threadId,
+              ],
+            },
+            transaction,
+          ),
+        ),
+        3,
+      );
+      const replayed = await context.database
+        .select({
+          analysisVersion: sql<number>`(${workflowSteps.input}->>'analysisVersion')::int`,
+        })
+        .from(workflowSteps)
+        .where(
+          and(
+            eq(workflowSteps.accountId, context.accountId),
+            eq(workflowSteps.stepType, "label.thread.assign"),
+            sql`${workflowSteps.input}->>'analysisVersion' = '2'`,
+          ),
+        );
+      assert.equal(replayed.length, 3);
     });
   },
 );
