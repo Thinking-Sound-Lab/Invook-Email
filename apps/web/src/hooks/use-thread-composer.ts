@@ -15,13 +15,13 @@ import {
   type ThreadComposeMode,
   type ThreadComposeSession,
 } from "@/components/mail/thread-composer-state";
-import { getMailboxThreadDetail } from "@/lib/api/mailbox-threads";
 import { useMailboxStore } from "@/stores/mailbox/store";
 import {
   sendGmailComposeAttempt,
   type GmailComposeSendAttempt,
 } from "@/lib/api/gmail-compose-send";
 import { apiErrorMessage } from "@/lib/http-error";
+import { readMailboxThreadDetail } from "../lib/mailbox-thread-detail-read";
 
 export interface UseThreadComposerProps {
   threadId: string;
@@ -54,9 +54,6 @@ export function useThreadComposer({
   message,
 }: UseThreadComposerProps): UseThreadComposerResult {
   const { accounts } = useMailShell();
-  const hydrateThreadDetail = useMailboxStore(
-    (state) => state.hydrateThreadDetail,
-  );
   const busyRef = useRef(false);
   const [session, setSession] = useState<ThreadComposeSession | null>(null);
   const [attempt, setAttempt] = useState<GmailComposeSendAttempt | null>(null);
@@ -71,23 +68,18 @@ export function useThreadComposer({
   // Composing writes to the thread the reader is showing, so the cached thread
   // is re-read directly instead of re-rendering the whole route.
   const reloadThreadDetail = useCallback(async (): Promise<void> => {
-    const recoveryVersion = useMailboxStore.getState().recoveryVersion;
-    const threadDetailReadVersion = useMailboxStore.getState().threadDetailState?.readVersion;
+    const threadDetailState = useMailboxStore.getState().threadDetailState;
+    if (threadDetailState && threadDetailState.threadId !== threadId) return;
     try {
-      const detail = await getMailboxThreadDetail({
+      await readMailboxThreadDetail({
         accountSelection: accountId,
         threadId,
+        source: "reader",
       });
-      if (
-        useMailboxStore.getState().recoveryVersion === recoveryVersion &&
-        useMailboxStore.getState().threadDetailState?.readVersion === threadDetailReadVersion
-      ) {
-        hydrateThreadDetail({ threadId, detail });
-      }
     } catch {
       // The mailbox change event that follows this write reconciles the thread.
     }
-  }, [accountId, hydrateThreadDetail, threadId]);
+  }, [accountId, threadId]);
 
   useEffect(() => {
     if (!session?.hasEdits && !attempt) return;

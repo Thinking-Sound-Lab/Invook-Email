@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { after, afterEach, test } from "node:test";
 
-import axios from "axios";
+import axios, { type InternalAxiosRequestConfig } from "axios";
 import { Window } from "happy-dom";
 import { act } from "react";
 import type { Root } from "react-dom/client";
-import type { MailboxShell } from "@invook/contracts";
+import type { MailboxShell, MailboxThreadDetail } from "@invook/contracts";
+
+import { useMailboxStore } from "@/stores/mailbox/store";
 
 import type { ThreadComposerProps } from "./thread-composer";
 
@@ -65,6 +67,71 @@ const props: ThreadComposerProps = {
     attachmentCount: 0,
   },
 };
+const cachedThreadDetail: MailboxThreadDetail = {
+  thread: {
+    id: props.threadId,
+    accountId: props.accountId,
+    accountEmail: props.accountEmail,
+    subject: "Question",
+    participants: ["sender@example.com", "owner@example.com"],
+    isUnread: false,
+    isStarred: false,
+    isDraft: false,
+    invookLabel: null,
+    latestMessageAt: "2026-08-28T12:00:00.000Z",
+    messageCount: 1,
+    gmailDrafts: [],
+    messages: [{
+      id: "message-1",
+      providerMessageId: "original-1",
+      providerHistoryId: null,
+      internalDate: "2026-08-28T12:00:00.000Z",
+      sizeEstimate: null,
+      direction: "incoming",
+      sender: { email: "sender@example.com", raw: "Sender <sender@example.com>" },
+      recipients: ["owner@example.com"],
+      headers: [],
+      isUnread: false,
+      isStarred: false,
+      isDraft: false,
+      subject: "Question",
+      bodyText: "Original message",
+      bodyPresentation: null,
+      sentAt: "2026-08-28T12:00:00.000Z",
+      attachments: [],
+    }],
+  },
+  invookLabels: [],
+};
+const sentThreadDetail: MailboxThreadDetail = {
+  ...cachedThreadDetail,
+  thread: {
+    ...cachedThreadDetail.thread,
+    messageCount: 2,
+    messages: [
+      ...cachedThreadDetail.thread.messages,
+      {
+        id: "message-2",
+        providerMessageId: "sent-1",
+        providerHistoryId: null,
+        internalDate: "2026-08-28T12:01:00.000Z",
+        sizeEstimate: null,
+        direction: "outgoing",
+        sender: { email: "owner@example.com", raw: "Owner <owner@example.com>" },
+        recipients: ["sender@example.com"],
+        headers: [],
+        isUnread: false,
+        isStarred: false,
+        isDraft: false,
+        subject: "Re: Question",
+        bodyText: "My sent reply",
+        bodyPresentation: null,
+        sentAt: "2026-08-28T12:01:00.000Z",
+        attachments: [],
+      },
+    ],
+  },
+};
 let root: Root | null = null;
 const originalAdapter = axios.defaults.adapter;
 
@@ -86,6 +153,26 @@ const threadReadNotFound = {
   headers: {},
   data: null,
 };
+
+function composeMutationData(config: InternalAxiosRequestConfig): unknown {
+  if (config.url === "/v1/gmail/compose-drafts/draft-1/send") {
+    return {
+      message: { providerMessageId: "sent-1", providerThreadId: props.threadId },
+      stepId: "send-step",
+    };
+  }
+  assert.equal(config.url, "/v1/gmail/compose-drafts");
+  return {
+    draft: { providerDraftId: "draft-1", providerMessageId: "draft-message", providerThreadId: props.threadId },
+    stepId: "save-step",
+  };
+}
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => { throw new Error("Deferred promise not initialized"); };
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
 
 async function renderComposer(
   input: ThreadComposerProps = props,
@@ -546,4 +633,97 @@ test("a sent reply re-reads the open thread instead of refreshing the route", as
   await enter("textarea", "Reply text");
   await click("Send");
   assert.deepEqual(threadReads, ["/v1/mailbox/threads/thread-1"]);
+});
+
+test("a successful post-send read restores cached thread content after a read error", async () => {
+  await renderComposer();
+  useMailboxStore.getState().hydrateThreadDetail({ threadId: props.threadId, detail: cachedThreadDetail });
+  const failedRead = useMailboxStore.getState().startThreadDetailRead({ threadId: props.threadId, source: "mailbox" });
+  useMailboxStore.getState().completeThreadDetailRead({ read: failedRead, result: { loadState: "error" } });
+  axios.defaults.adapter = async (config) => ({
+    config,
+    status: 200,
+    statusText: "OK",
+    headers: {},
+    data: isThreadRead(config)
+      ? sentThreadDetail
+      : composeMutationData(config),
+  });
+  await click("Reply");
+  await enter("textarea", "My sent reply");
+  await click("Send");
+  assert.match(document.querySelector('[role="status"]')?.textContent ?? "", /Sent with Gmail/);
+  assert.equal(useMailboxStore.getState().threadDetailState?.loadState, "available");
+  assert.deepEqual(useMailboxStore.getState().detailsById[props.threadId]?.thread.messages.map((message) => message.bodyText), ["Original message", "My sent reply"]);
+});
+
+test("a late post-send read cannot restore a thread deleted by a newer mailbox read", async () => {
+  await renderComposer();
+  useMailboxStore.getState().hydrateThreadDetail({ threadId: props.threadId, detail: cachedThreadDetail });
+  const postSendRead = deferred<MailboxThreadDetail>();
+  let threadReads = 0;
+  axios.defaults.adapter = async (config) => {
+    if (isThreadRead(config)) threadReads += 1;
+    return {
+      config, status: 200, statusText: "OK", headers: {},
+      data: isThreadRead(config) ? await postSendRead.promise : composeMutationData(config),
+    };
+  };
+  await click("Reply");
+  await enter("textarea", "My sent reply");
+  await click("Send");
+  assert.equal(threadReads, 1);
+  const mailboxRead = useMailboxStore.getState().startThreadDetailRead({ threadId: props.threadId, source: "mailbox" });
+  useMailboxStore.getState().completeThreadDetailRead({ read: mailboxRead, result: { loadState: "missing" } });
+  await act(async () => postSendRead.resolve(sentThreadDetail));
+  assert.equal(useMailboxStore.getState().threadDetailState?.loadState, "missing");
+  assert.equal(useMailboxStore.getState().detailsById[props.threadId], undefined);
+});
+
+test("a late post-send read cannot overwrite a newer canonical recovery", async () => {
+  await renderComposer();
+  useMailboxStore.getState().hydrateThreadDetail({ threadId: props.threadId, detail: cachedThreadDetail });
+  const postSendRead = deferred<MailboxThreadDetail>();
+  let threadReads = 0;
+  axios.defaults.adapter = async (config) => {
+    if (isThreadRead(config)) threadReads += 1;
+    return {
+      config, status: 200, statusText: "OK", headers: {},
+      data: isThreadRead(config) ? await postSendRead.promise : composeMutationData(config),
+    };
+  };
+  await click("Reply");
+  await enter("textarea", "My sent reply");
+  await click("Send");
+  assert.equal(threadReads, 1);
+  useMailboxStore.getState().invalidateCaches({ pageKey: "all:all", openThreadId: props.threadId });
+  const recoveredDetail: MailboxThreadDetail = { ...sentThreadDetail, thread: { ...sentThreadDetail.thread, subject: "Newer canonical thread" } };
+  const mailboxRead = useMailboxStore.getState().startThreadDetailRead({ threadId: props.threadId, source: "mailbox" });
+  useMailboxStore.getState().completeThreadDetailRead({ read: mailboxRead, result: { loadState: "available", detail: recoveredDetail } });
+  await act(async () => postSendRead.resolve(sentThreadDetail));
+  assert.equal(useMailboxStore.getState().threadDetailState?.source, "mailbox");
+  assert.equal(useMailboxStore.getState().detailsById[props.threadId]?.thread.subject, "Newer canonical thread");
+});
+
+test("a send finishing after switching threads preserves the current thread read", async () => {
+  await renderComposer();
+  const sendResponse = deferred<unknown>();
+  let threadReads = 0;
+  axios.defaults.adapter = async (config) => {
+    if (isThreadRead(config)) threadReads += 1;
+    return {
+      config, status: 200, statusText: "OK", headers: {},
+      data: config.url?.endsWith("/send") ? await sendResponse.promise : composeMutationData(config),
+    };
+  };
+  await click("Reply");
+  await enter("textarea", "My sent reply");
+  await click("Send");
+  const currentRead = useMailboxStore.getState().startThreadDetailRead({ threadId: "thread-2", source: "reader" });
+  await act(async () => sendResponse.resolve({
+    message: { providerMessageId: "sent-1", providerThreadId: props.threadId },
+    stepId: "send-step",
+  }));
+  assert.equal(threadReads, 0);
+  assert.deepEqual(useMailboxStore.getState().threadDetailState, { ...currentRead, loadState: "loading" });
 });
