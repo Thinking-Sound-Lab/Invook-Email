@@ -101,24 +101,43 @@ const DOCUMENT_ELEMENT_STAND_INS: Record<string, string> = {
   body: EMAIL_BODY_ELEMENT,
   html: EMAIL_ROOT_ELEMENT,
 };
+const DOCUMENT_PSEUDO_STAND_INS = new Set([
+  ":host",
+  ":host-context",
+  ":root",
+]);
+const VIEWPORT_POSITION_VALUES = new Set(["fixed", "sticky"]);
+const DOCUMENT_SELECTOR_HINT = /html|body|:root|:host/i;
+const UNPARSED_HOST_SELECTOR =
+  /:host(?:-context)?(?:\((?:[^()]|\([^()]*\))*\))?/gi;
+const UNPARSED_VIEWPORT_POSITION = /position\s*:\s*(?:fixed|sticky)\b/gi;
 
 // Selectors that target the sender's document elements are pointed at their
 // stand-ins. Each replacement is the same kind of selector as the original (a
-// type selector for a type selector, a class for the `:root` pseudo-class), so
-// its specificity is unchanged and sender rules keep their relative priority.
+// type selector for a type selector, a class for the `:root` / `:host`
+// pseudo-class), so its specificity is unchanged and sender rules keep their
+// relative priority. `:host` must not reach the shadow host in the light tree:
+// `position: fixed` there covers Reply/Send and the rest of the app.
 const mapDocumentSelectors = selectorParser((selectors) => {
   selectors.walkTags((tag) => {
     const standIn = DOCUMENT_ELEMENT_STAND_INS[tag.value.toLowerCase()];
     if (standIn) tag.value = standIn;
   });
   selectors.walkPseudos((pseudo) => {
-    if (pseudo.value.toLowerCase() === ":root") {
+    if (DOCUMENT_PSEUDO_STAND_INS.has(pseudo.value.toLowerCase())) {
       pseudo.replaceWith(
         selectorParser.className({ value: EMAIL_ROOT_ELEMENT }),
       );
     }
   });
 });
+
+function neutralizeUnparsedSenderCss(stylesheet: string): string {
+  return stylesheet
+    .replace(/@media\b[^{}]*/gi, pinColorSchemeQueriesToLight)
+    .replace(UNPARSED_HOST_SELECTOR, `.${EMAIL_ROOT_ELEMENT}`)
+    .replace(UNPARSED_VIEWPORT_POSITION, "position: static");
+}
 
 function prepareSenderDeclarations(
   root: Root,
@@ -132,6 +151,14 @@ function prepareSenderDeclarations(
     if (property === "color-scheme") {
       // The viewer owns the canvas scheme; a sender override would flip
       // system colors and the paired text colors underneath it.
+      declaration.remove();
+    } else if (
+      property === "position" &&
+      VIEWPORT_POSITION_VALUES.has(declaration.value.trim().toLowerCase())
+    ) {
+      // Fixed and sticky descendants escape the shadow tree unless the host
+      // is also a containing block. Drop them so a message cannot overlay
+      // thread actions even if host containment is missing.
       declaration.remove();
     } else if (property === "color") {
       declaresTextColor = true;
@@ -167,9 +194,11 @@ export function prepareSenderStylesheet(
   } catch {
     // Sender CSS that cannot be parsed cannot be adapted either, so the
     // message keeps the light canvas it was authored for. Its scheme queries
-    // are still pinned, by their position after `@media`.
+    // are still pinned, by their position after `@media`. Host and viewport
+    // position rules are neutralized even in this fallback: a browser may
+    // still honor CSS that PostCSS rejected.
     return {
-      css: stylesheet.replace(/@media\b[^{}]*/gi, pinColorSchemeQueriesToLight),
+      css: neutralizeUnparsedSenderCss(stylesheet),
       declaresBackground: true,
       declaresTextColor: false,
     };
@@ -181,7 +210,9 @@ export function prepareSenderStylesheet(
   root.walkRules((rule) => {
     const isKeyframeSelector =
       rule.parent instanceof AtRule && /keyframes$/i.test(rule.parent.name);
-    if (isKeyframeSelector || !/html|body|:root/i.test(rule.selector)) return;
+    if (isKeyframeSelector || !DOCUMENT_SELECTOR_HINT.test(rule.selector)) {
+      return;
+    }
     try {
       rule.selector = mapDocumentSelectors.processSync(rule.selector);
     } catch {
@@ -202,14 +233,18 @@ export function prepareSenderInlineStyle(
     declaresBackground: false,
     declaresTextColor: false,
   };
-  if (!/color|background/i.test(style)) return unchanged;
+  if (!/color|background|position/i.test(style)) return unchanged;
 
   let root: Root;
   try {
     root = postcss.parse(style);
   } catch {
-    // The sanitizer discards a style attribute it cannot parse.
-    return unchanged;
+    // The sanitizer discards a style attribute it cannot parse. Still
+    // neutralize viewport positioning in case a browser accepts the value.
+    return {
+      ...unchanged,
+      css: style.replace(UNPARSED_VIEWPORT_POSITION, "position: static"),
+    };
   }
 
   const declarations = prepareSenderDeclarations(root, options);

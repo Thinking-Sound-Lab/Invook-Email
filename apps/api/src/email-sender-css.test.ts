@@ -38,6 +38,7 @@ test("sender stylesheets map document selectors without touching lookalikes", ()
     `
       html > body, HTML BODY.x { margin: 0; }
       :root .y, :not(body) b { padding: 0; }
+      :host, :host(.card), :host-context(body) { padding: 0; }
       tbody td, .body, #body, [class~="body"] a, a[href*="html"] { margin: 0; }
       @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
     `,
@@ -54,9 +55,30 @@ test("sender stylesheets map document selectors without touching lookalikes", ()
   );
   assert.match(
     css,
+    /\.invook-email-root,\.invook-email-root,\.invook-email-root \{ padding: 0; \}/,
+  );
+  assert.match(
+    css,
     /tbody td, \.body, #body, \[class~="body"\] a, a\[href\*="html"\] \{ margin: 0; \}/,
   );
   assert.match(css, /@keyframes fade \{ from \{ opacity: 0; \} to \{ opacity: 1; \} \}/);
+  assert.doesNotMatch(css, /:host/);
+});
+
+test("sender stylesheets cannot pin the shadow host or overlay the viewer", () => {
+  const { css } = prepareSenderStylesheet(
+    `
+      :host { position: fixed; inset: 0; z-index: 2147483647; }
+      .banner { position: sticky; top: 0; }
+      p { position: relative; }
+    `,
+    authored,
+  );
+
+  assert.match(css, /\.invook-email-root \{ inset: 0; z-index: 2147483647; \}/);
+  assert.match(css, /\.banner \{ top: 0; \}/);
+  assert.match(css, /p \{ position: relative; \}/);
+  assert.doesNotMatch(css, /:host|position:\s*(?:fixed|sticky)/);
 });
 
 test("mapped document selectors keep the weight of the selector they replace", () => {
@@ -140,6 +162,19 @@ test("unparseable sender stylesheets keep the light canvas they were authored fo
   );
 });
 
+test("unparseable sender stylesheets cannot pin the shadow host or overlay the viewer", () => {
+  const stylesheet =
+    ":host { position: fixed !important; inset: 0; } } @media (prefers-color-scheme: dark) { :host-context(body) { position: sticky; }";
+  const prepared = prepareSenderStylesheet(stylesheet, adapted);
+
+  assert.equal(prepared.declaresBackground, true);
+  assert.equal(
+    prepared.css,
+    ".invook-email-root { position: static !important; inset: 0; } } @media (max-width: 0) { .invook-email-root { position: static; }",
+  );
+  assert.doesNotMatch(prepared.css, /:host|position:\s*(?:fixed|sticky)/);
+});
+
 test("sender text colors are paired only when they are a single plain color", () => {
   const cases: Array<[string, string]> = [
     ["color: #333", `color: ${pairOf("#333")}`],
@@ -181,6 +216,22 @@ test("sender inline styles report colors and cannot choose the color scheme", ()
     prepareSenderInlineStyle("color: red } p { background: blue", adapted),
     {
       css: "color: red } p { background: blue",
+      declaresBackground: false,
+      declaresTextColor: false,
+    },
+  );
+  assert.deepEqual(
+    prepareSenderInlineStyle("position: fixed; inset: 0; z-index: 9", authored),
+    {
+      css: "inset: 0; z-index: 9",
+      declaresBackground: false,
+      declaresTextColor: false,
+    },
+  );
+  assert.deepEqual(
+    prepareSenderInlineStyle("position:fixed } p { color: red", authored),
+    {
+      css: "position: static } p { color: red",
       declaresBackground: false,
       declaresTextColor: false,
     },
