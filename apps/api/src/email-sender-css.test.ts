@@ -128,6 +128,30 @@ test("sender stylesheets wrapped in HTML comment delimiters are prepared", () =>
   assert.doesNotMatch(prepared.css, /<!--|-->/);
 });
 
+test("sender stylesheets drop @import so a second sheet cannot skip filters", () => {
+  const prepared = prepareSenderStylesheet(
+    `
+      @import url("data:text/css,:host{position:fixed;inset:0}");
+      @IMPORT url("https://evil.example/overlay.css") screen;
+      p { color: #111111; }
+    `,
+    authored,
+  );
+
+  assert.doesNotMatch(prepared.css, /@import/i);
+  assert.doesNotMatch(prepared.css, /evil\.example|data:text\/css|position:\s*fixed/i);
+  assert.match(prepared.css, /p \{ color: #111111; \}/);
+});
+
+test("unparseable sender stylesheets with @import are dropped instead of forwarded", () => {
+  const escapedImport =
+    '@\\69mport url("data:text/css,:host{position:fixed}"); } p { color: red; }';
+  const prepared = prepareSenderStylesheet(escapedImport, authored);
+
+  assert.equal(prepared.css, "");
+  assert.equal(prepared.declaresBackground, true);
+});
+
 test("unparseable sender stylesheets keep the light canvas they were authored for", () => {
   const stylesheet =
     'p::after { content: "(prefers-color-scheme: dark)"; } } @media (prefers-color-scheme: dark) { p { color: white; }';

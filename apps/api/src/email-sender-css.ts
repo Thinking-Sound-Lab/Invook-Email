@@ -97,6 +97,30 @@ function pinColorSchemeQueriesToLight(mediaQueries: string): string {
   );
 }
 
+/**
+ * `@import` is applied by the browser after this sanitizer returns, so a
+ * `data:` or remote stylesheet would skip every declaration filter here.
+ * CSS escapes (`@\69mport`) are decoded before the check so unparsed fallback
+ * CSS cannot hide the same load.
+ */
+function decodeCssIdentEscapes(value: string): string {
+  return value.replace(
+    /\\([0-9a-f]{1,6})(?:\r\n|[ \t\r\n\f])?|\\(.)/gi,
+    (_match, hex: string | undefined, character: string | undefined) =>
+      hex ? String.fromCodePoint(Number.parseInt(hex, 16)) : (character ?? ""),
+  );
+}
+
+function senderCssLoadsImportedStylesheet(stylesheet: string): boolean {
+  return /@import\b/i.test(decodeCssIdentEscapes(stylesheet));
+}
+
+function dropImportedStylesheets(root: Root): void {
+  root.walkAtRules(/^import$/i, (importRule) => {
+    importRule.remove();
+  });
+}
+
 const DOCUMENT_ELEMENT_STAND_INS: Record<string, string> = {
   body: EMAIL_BODY_ELEMENT,
   html: EMAIL_ROOT_ELEMENT,
@@ -167,7 +191,16 @@ export function prepareSenderStylesheet(
   } catch {
     // Sender CSS that cannot be parsed cannot be adapted either, so the
     // message keeps the light canvas it was authored for. Its scheme queries
-    // are still pinned, by their position after `@media`.
+    // are still pinned, by their position after `@media`. An `@import` in
+    // fallback CSS would still be honored by the browser, so that stylesheet
+    // is dropped instead of forwarded unfiltered.
+    if (senderCssLoadsImportedStylesheet(stylesheet)) {
+      return {
+        css: "",
+        declaresBackground: true,
+        declaresTextColor: false,
+      };
+    }
     return {
       css: stylesheet.replace(/@media\b[^{}]*/gi, pinColorSchemeQueriesToLight),
       declaresBackground: true,
@@ -175,6 +208,7 @@ export function prepareSenderStylesheet(
     };
   }
 
+  dropImportedStylesheets(root);
   root.walkAtRules(/^media$/i, (mediaRule) => {
     mediaRule.params = pinColorSchemeQueriesToLight(mediaRule.params);
   });

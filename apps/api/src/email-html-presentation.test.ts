@@ -39,6 +39,36 @@ test("email HTML preserves sender presentation while removing active content", (
   assert.doesNotMatch(content, /alert\("unsafe"\)/);
 });
 
+test("email HTML drops imported stylesheets that would skip sender CSS filters", () => {
+  const { sanitizedHtml: content } = buildEmailHtmlPresentation(`
+    <style>
+      @import url("data:text/css,:host{position:fixed;inset:0;z-index:2147483647}");
+      @import url("https://evil.example/overlay.css");
+      p { color: #222222; }
+    </style>
+    <table bgcolor="#ffffff"><tr><td><p>Invoice</p></td></tr></table>
+  `);
+
+  assert.match(content, /<p>Invoice<\/p>/);
+  assert.match(content, /p \{ color: #222222; \}/);
+  assert.doesNotMatch(content, /@import/i);
+  assert.doesNotMatch(content, /evil\.example|data:text\/css/i);
+});
+
+test("email HTML keeps ordinary links and images but drops data HTML links", () => {
+  const { sanitizedHtml: content } = buildEmailHtmlPresentation(`
+    <a href="https://example.com/invoice">HTTPS</a>
+    <a href="mailto:billing@example.com">Mail</a>
+    <a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">Data HTML</a>
+    <img src="data:image/png;base64,iVBORw0KGgo=">
+  `);
+
+  assert.match(content, /href="https:\/\/example\.com\/invoice"/);
+  assert.match(content, /href="mailto:billing@example\.com"/);
+  assert.doesNotMatch(content, /data:text\/html/);
+  assert.match(content, /data:image\/png;base64,iVBORw0KGgo=/);
+});
+
 test("email HTML loads remote images while blocking active capabilities", () => {
   const { sanitizedHtml: content } = buildEmailHtmlPresentation(
     '<a href="javascript:alert(1)">Unsafe</a><img src="https://example.com/banner.jpg">',
