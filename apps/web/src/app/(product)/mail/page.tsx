@@ -7,6 +7,7 @@ import {
   normalizeMailboxView,
 } from "@/components/mail/mailbox-location";
 import { getMailboxThreadPage } from "@/lib/api";
+import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 interface MailPageProps {
   searchParams: Promise<{
@@ -46,7 +47,7 @@ export default async function MailPage({ searchParams }: MailPageProps) {
         view: currentView,
       })
     : null;
-  if (isMailboxList && !threadPage) redirect("/");
+  if (isMailboxList && !threadPage) redirect(SIGN_IN_PATH);
 
   return (
     <MailWorkspace

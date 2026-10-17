@@ -3,6 +3,7 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
+import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 type AuthenticationErrorPageProps = {
   searchParams: Promise<{ reason?: string }>;
@@ -41,7 +42,7 @@ export default async function AuthenticationErrorPage({
           </p>
         </div>
         <Button asChild className="w-full">
-          <Link href="/">Try again</Link>
+          <Link href={SIGN_IN_PATH}>Try again</Link>
         </Button>
       </div>
     </main>

@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { SIGN_IN_PATH } from "@/lib/app-routes";
 import { cn } from "@/lib/utils";
 
 interface SignOutButtonProps {
@@ -25,7 +26,7 @@ export function SignOutButton({
     setIsPending(true);
     try {
       await axios.post("/v1/auth/sign-out");
-      router.replace("/");
+      router.replace(SIGN_IN_PATH);
       router.refresh();
     } catch {
       setIsPending(false);

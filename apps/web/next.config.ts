@@ -6,6 +6,11 @@ const nextConfig: NextConfig = {
   output: process.env.VERCEL ? undefined : "standalone",
   outputFileTracingRoot: path.join(import.meta.dirname, "../.."),
   poweredByHeader: false,
+  experimental: {
+    // The marketing site and the product use separate root layouts, so unmatched
+    // URLs need a 404 page that does not depend on either layout.
+    globalNotFound: true,
+  },
 };
 
 export default nextConfig;

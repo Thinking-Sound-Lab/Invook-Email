@@ -6,6 +6,7 @@ import { MailboxEventSubscriber } from "@/components/mail/mailbox-event-subscrib
 import { MailShellProvider } from "@/components/mail/mail-shell-provider";
 import { MailSidebar } from "@/components/mail/mail-sidebar";
 import { getMailboxShell, getMailboxSidebarCounts } from "@/lib/api";
+import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 interface MailLayoutProps {
   children: ReactNode;
@@ -16,7 +17,7 @@ export default async function MailLayout({ children }: MailLayoutProps) {
     getMailboxShell(),
     getMailboxSidebarCounts().catch(() => null),
   ]);
-  if (!shell) redirect("/");
+  if (!shell) redirect(SIGN_IN_PATH);
 
   return (
     <MailShellProvider shell={shell}>

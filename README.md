@@ -84,7 +84,7 @@ make dev
 
 The first start builds MinIO and its client from pinned official source revisions in `docker/Dockerfile.minio`, since the community container images are no longer available. Later starts reuse Docker's build cache.
 
-Open [localhost:3000](http://localhost:3000), sign in with Google, then connect a Gmail account. Signing in does not grant mailbox access; connecting Gmail is a separate step.
+Open [localhost:3000](http://localhost:3000) for the marketing page, or go straight to [localhost:3000/sign-in](http://localhost:3000/sign-in). Sign in with Google, then connect a Gmail account. Signing in does not grant mailbox access; connecting Gmail is a separate step.
 
 `make down` stops the containers and preserves local data.
 

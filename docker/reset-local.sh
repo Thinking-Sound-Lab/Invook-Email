@@ -172,4 +172,4 @@ echo "temporal_cloud_histories=preserved"
 echo "mailbox_objects=0"
 echo "Data stores cleared and verified; restarting the normal local stack."
 compose up -d --build --wait
-echo "Local reset complete. Open http://localhost:3000 to start a new Google signup."
+echo "Local reset complete. Open http://localhost:3000/sign-in to start a new Google signup."
