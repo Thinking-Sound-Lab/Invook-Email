@@ -5,7 +5,7 @@ import { GoogleSignInButton } from "@/components/auth/google-sign-in-button";
 import { Button } from "@/components/ui/button";
 import { getSessionState } from "@/lib/api";
 
-export default async function ConnectPage() {
+export default async function SignInPage() {
   await connection();
   const session = await getSessionState();
   if (session.authenticated && session.gmailConnected) redirect("/mail");

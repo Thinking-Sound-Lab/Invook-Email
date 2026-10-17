@@ -13,6 +13,7 @@ import { useMailShell } from "@/components/mail/mail-shell-provider";
 import { planMailboxEvent } from "@/components/mail/mailbox-event-plan";
 import { normalizeMailboxView } from "@/components/mail/mailbox-location";
 import { getMailboxShell } from "@/lib/api/mailbox-shell";
+import { SIGN_IN_PATH } from "@/lib/app-routes";
 import {
   getMailboxSidebarCounts,
   getMailboxThreadPage,
@@ -181,7 +182,7 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
               controller.abort();
               closeStream();
               useMailboxStore.getState().reset();
-              router.replace("/");
+              router.replace(SIGN_IN_PATH);
               return;
             }
             setStatus("degraded");

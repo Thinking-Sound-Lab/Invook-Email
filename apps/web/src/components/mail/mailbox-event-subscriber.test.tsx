@@ -703,7 +703,7 @@ test("expired sessions clear the mailbox cache and return to sign-in", async () 
     });
   };
   await ready();
-  assert.deepEqual(replacements, ["/"]);
+  assert.deepEqual(replacements, ["/sign-in"]);
   assert.deepEqual(useMailboxStore.getState().threadsById, {});
   assert.equal(useMailboxStore.getState().shell, null);
   assert.equal(currentStream().isClosed, true);
@@ -718,7 +718,7 @@ test("loss of the mailbox shell takes precedence over an unrelated failed list r
     });
   };
   await ready();
-  assert.deepEqual(replacements, ["/"]);
+  assert.deepEqual(replacements, ["/sign-in"]);
   assert.deepEqual(useMailboxStore.getState().threadsById, {});
   assert.equal(currentStream().isClosed, true);
 });

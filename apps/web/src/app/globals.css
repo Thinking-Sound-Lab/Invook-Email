@@ -253,6 +253,26 @@
   }
 }
 
+@keyframes marketing-reveal {
+  from {
+    opacity: 0;
+    translate: 0 1.5rem;
+  }
+}
+
+/* Marketing sections fade in as they enter the viewport. Browsers without
+   scroll-driven animations, and readers who prefer reduced motion, see them
+   immediately. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .marketing-reveal {
+      animation: marketing-reveal linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 30%;
+    }
+  }
+}
+
 .dark {
   color-scheme: dark;
   --bg-primary: #191919;

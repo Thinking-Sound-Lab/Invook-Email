@@ -7,7 +7,7 @@ const mailWorkspaceSource = readFileSync(
   "utf8",
 );
 const mailLayoutSource = readFileSync(
-  new URL("../../app/mail/layout.tsx", import.meta.url),
+  new URL("../../app/(product)/mail/layout.tsx", import.meta.url),
   "utf8",
 );
 

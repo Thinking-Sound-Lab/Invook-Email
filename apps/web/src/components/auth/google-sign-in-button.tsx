@@ -6,6 +6,7 @@ import axios from "axios";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 type GoogleSignInResponse = {
   redirect: boolean;
@@ -24,7 +25,7 @@ export function GoogleSignInButton() {
         "/v1/auth/sign-in/social",
         {
           provider: "google",
-          callbackURL: "/",
+          callbackURL: SIGN_IN_PATH,
           errorCallbackURL: "/auth/error?reason=identity",
         },
       );
