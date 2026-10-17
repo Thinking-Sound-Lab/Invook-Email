@@ -34,9 +34,9 @@ function LabelPreviewFrame({ label, tone, children }: LabelPreviewFrameProps) {
     <PreviewStage
       tone={tone}
       label={label}
-      className="grid min-h-[26rem] place-items-center p-6 sm:min-h-[30rem] sm:p-10"
+      className="grid min-h-[26rem] place-items-center p-4 sm:min-h-[30rem] sm:p-10"
     >
-      <PreviewSurface className="w-full max-w-md p-6">{children}</PreviewSurface>
+      <PreviewSurface className="w-full max-w-md p-5 sm:p-6">{children}</PreviewSurface>
     </PreviewStage>
   );
 }
@@ -176,7 +176,7 @@ export function LabelControlPreview() {
           </span>
         </div>
       </div>
-      <div className="ml-auto mt-3 w-60 rounded-xl bg-popover p-2.5 shadow-xl ring-1 ring-border/55">
+      <div className="ml-auto mt-3 w-full max-w-60 rounded-xl bg-popover p-2.5 shadow-xl ring-1 ring-border/55">
         <p className="px-2 pb-1.5 text-xs font-semibold">Manage labels</p>
         <ul className="space-y-0.5">
           {manageableLabels.map((label) => (

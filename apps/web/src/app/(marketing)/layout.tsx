@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 
 export default function MarketingLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${jakarta.className} scroll-smooth scroll-pt-20 bg-lp-bg`}>
+    <html lang="en" className={`${jakarta.className} motion-safe:scroll-smooth scroll-pt-20 bg-lp-bg`}>
       <body className="bg-lp-bg text-lp-ink">{children}</body>
     </html>
   );
