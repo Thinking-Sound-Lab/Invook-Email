@@ -555,16 +555,6 @@ test("label re-enablement accepts only supported historical windows", async () =
   );
 });
 
-test("mailbox refresh requires an authenticated session", async () => {
-  const response = await api.inject({
-    method: "POST",
-    url: "/v1/mailbox/sync",
-  });
-
-  assert.equal(response.statusCode, 401);
-  assert.equal(response.json().title, "Authentication required");
-});
-
 test("focused mailbox reads require authentication and the workspace route is absent", async () => {
   for (const url of [
     "/v1/mailbox/shell",
@@ -873,8 +863,6 @@ test("Gmail provider writes require an authenticated session", async () => {
   const requests = [
     { method: "POST", url: "/v1/gmail/messages/not-a-uuid/actions" },
     { method: "PUT", url: "/v1/gmail/threads/not-a-uuid/read-state" },
-    { method: "PUT", url: "/v1/gmail/drafts/not-a-uuid" },
-    { method: "DELETE", url: "/v1/gmail/drafts/not-a-uuid" },
     { method: "POST", url: "/v1/gmail/compose-drafts" },
     { method: "PUT", url: "/v1/gmail/compose-drafts/provider-draft" },
     {
@@ -887,6 +875,19 @@ test("Gmail provider writes require an authenticated session", async () => {
     const response = await api.inject(request);
     assert.equal(response.statusCode, 401, `${request.method} ${request.url}`);
     assert.equal(response.json().title, "Authentication required");
+  }
+});
+
+test("the uncalled mailbox refresh and raw Gmail draft routes are absent", async () => {
+  const requests = [
+    { method: "POST", url: "/v1/mailbox/sync" },
+    { method: "PUT", url: "/v1/gmail/drafts/00000000-0000-4000-8000-000000000000" },
+    { method: "DELETE", url: "/v1/gmail/drafts/00000000-0000-4000-8000-000000000000" },
+  ] as const;
+
+  for (const request of requests) {
+    const response = await api.inject(request);
+    assert.equal(response.statusCode, 404, `${request.method} ${request.url}`);
   }
 });
 

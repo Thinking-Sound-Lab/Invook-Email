@@ -23,7 +23,6 @@ import type { TaskQueueLane } from "@invook/workflows";
 import type { AccountSyncState } from "./types";
 
 type JsonObject = Record<string, unknown>;
-type JsonValue = JsonObject | unknown[];
 
 export type LabelPreviewReceiptResult = {
   threadId: string;

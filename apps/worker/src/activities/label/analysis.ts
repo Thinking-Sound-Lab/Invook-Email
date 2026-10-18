@@ -1,5 +1,3 @@
-import { validate as validateUuid } from "uuid";
-
 import {
   AiConfigurationError,
   classifyStoredThreadLabel,
@@ -28,12 +26,6 @@ export type ThreadLabelAnalysisJob = {
   checkpoint: ThreadLabelAnalysisCheckpoint;
 };
 
-function requiredUuid(value: unknown, name: string): string {
-  const identifier = requiredString(value, name);
-  if (!validateUuid(identifier)) throw new Error(`${name} must be a UUID.`);
-  return identifier;
-}
-
 function requiredSha256(value: unknown, name: string): string {
   const hash = requiredString(value, name);
   if (!/^[a-f0-9]{64}$/.test(hash)) {
@@ -47,15 +39,6 @@ function requiredPositiveInteger(value: unknown, name: string): number {
     throw new Error(`${name} must be a positive integer.`);
   }
   return value;
-}
-
-function requiredDate(value: unknown, name: string): Date {
-  const serialized = requiredString(value, name);
-  const parsed = new Date(serialized);
-  if (!Number.isFinite(parsed.getTime())) {
-    throw new Error(`${name} must be an ISO timestamp.`);
-  }
-  return parsed;
 }
 
 export function parseThreadLabelAnalysisJob(
@@ -103,7 +86,7 @@ function classifierThread(thread: {
   };
 }
 
-export async function runThreadLabelAnalysis(
+async function runThreadLabelAnalysis(
   job: WorkflowStepJob,
 ): Promise<Record<string, unknown>> {
   const parsed = parseThreadLabelAnalysisJob(job);

@@ -13,7 +13,7 @@ export interface ApiIngressProps {
   cloudFrontOriginFacingPrefixListId: string;
 }
 
-export const AGENT_SOCKET_PATH = "/v1/agent/socket";
+const AGENT_SOCKET_PATH = "/v1/agent/socket";
 // AWS managed CloudFront policies: CachingDisabled and AllViewer. WebSocket
 // upgrades need the viewer's Sec-WebSocket headers and its Origin forwarded.
 const CACHING_DISABLED_POLICY_ID = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";

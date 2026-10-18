@@ -14,7 +14,7 @@ import type {
 } from "@invook/contracts";
 
 /** Bounds one turn: search, read, draft, and answer fit well within it. */
-export const MAIL_AGENT_MAX_STEPS = 10;
+const MAIL_AGENT_MAX_STEPS = 10;
 
 export interface MailAgentToolCall {
   /** Stable for one model tool call, so writes keyed by it are retry-safe. */

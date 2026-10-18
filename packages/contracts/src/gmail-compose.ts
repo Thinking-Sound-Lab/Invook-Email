@@ -1,4 +1,4 @@
-export const GMAIL_COMPOSE_MAX_RECIPIENTS = 50;
+const GMAIL_COMPOSE_MAX_RECIPIENTS = 50;
 export const GMAIL_COMPOSE_MAX_SUBJECT_LENGTH = 998;
 export const GMAIL_COMPOSE_MAX_BODY_LENGTH = 10_000;
 
@@ -28,8 +28,6 @@ export type CreateGmailComposeDraftRequest = GmailComposeDraftFields &
     accountId: string;
     idempotencyKey: string;
   };
-
-export type UpdateGmailComposeDraftRequest = CreateGmailComposeDraftRequest;
 
 export type SendGmailComposeDraftRequest = {
   accountId: string;

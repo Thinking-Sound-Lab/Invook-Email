@@ -17,7 +17,6 @@ import {
   isNull,
   lt,
   lte,
-  ne,
   not,
   or,
   sql,
@@ -48,12 +47,10 @@ import { getOrCreateGmailLabels } from "./gmail-labels";
 import {
   inboxThreadCondition,
   visibleMessageCondition,
-  visibleThreadCondition,
 } from "./mailbox-visibility";
 import {
   accountSecrets,
   connectedAccounts,
-  drafts,
   gmailConnectionRequests,
   gmailReplicaStates,
   gmailWatchStates,
@@ -77,7 +74,6 @@ import {
   completeMailSyncThreadWithExecutor,
   enqueueWorkflowStep,
   enqueueWorkflowStepWithExecutor,
-  enqueueWorkflowStepsWithExecutor,
 } from "./workflows";
 
 const initialSyncState: AccountSyncState = {
@@ -103,11 +99,6 @@ function equalSender(
   right: { raw: string; email: string },
 ): boolean {
   return left.raw === right.raw && left.email === right.email;
-}
-
-function normalizeContactEmail(value: string | null | undefined): string | null {
-  const normalized = value?.trim().toLowerCase() ?? "";
-  return normalized || null;
 }
 
 export async function checkDatabaseConnection(
@@ -608,12 +599,6 @@ type SearchRow = {
   bodyText: string;
   sender: { raw: string; email: string };
   sentAt: Date;
-};
-
-type RankedSearchRow = SearchRow & {
-  fullTextMatch?: boolean;
-  metadataMatch?: boolean;
-  lexicalRank?: number;
 };
 
 export async function searchMailbox(

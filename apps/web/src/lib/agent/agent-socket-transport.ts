@@ -30,7 +30,7 @@ const rejectionMessages: Record<AgentTurnRejection, string> = {
 
 const turnRejections = new Set<string>(Object.keys(rejectionMessages));
 
-export class AgentTurnError extends Error {
+class AgentTurnError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AgentTurnError";

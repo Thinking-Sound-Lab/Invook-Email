@@ -162,7 +162,7 @@ const defaultRouteDependencies: AgentRouteDependencies = {
  * Serves one browser's agent socket. A socket runs one turn at a time, and
  * closing it aborts that turn; what the turn already did is stored by the turn.
  */
-export function serveAgentSocket(
+function serveAgentSocket(
   socket: WebSocket,
   identity: { userId: string; sessionId: string },
   dependencies: AgentSocketDependencies = { runTurn: runAgentTurn },

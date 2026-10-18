@@ -11,7 +11,6 @@ import {
 
 const GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-export const GMAIL_MESSAGE_LIST_MAX_RESULTS = 500;
 export const GMAIL_THREAD_LIST_MAX_RESULTS = 500;
 export const GOOGLE_REAUTHENTICATION_REQUIRED_ERROR_CODE =
   "provider_authentication_failed";
@@ -74,12 +73,6 @@ export type GmailThreadPage = {
 
 export type GmailFullThread = GmailThreadReference & {
   messages: GmailFullMessage[];
-};
-
-export type GmailMessagePage = {
-  messages?: GmailMessageReference[];
-  nextPageToken?: string;
-  resultSizeEstimate?: number;
 };
 
 export type GmailHistoryChange = {
@@ -377,26 +370,6 @@ export async function getGmailMessageState(
   return filterGmailMessageState(message);
 }
 
-export function listGmailMessages(
-  accessToken: string,
-  options: {
-    labelId?: string;
-    pageToken?: string;
-  },
-): Promise<GmailMessagePage> {
-  const search = new URLSearchParams({
-    includeSpamTrash: "true",
-    maxResults: String(GMAIL_MESSAGE_LIST_MAX_RESULTS),
-  });
-  if (options.labelId) search.set("labelIds", options.labelId);
-  if (options.pageToken) search.set("pageToken", options.pageToken);
-
-  return gmailRequest<GmailMessagePage>(
-    accessToken,
-    `/users/me/messages?${search.toString()}`,
-  );
-}
-
 export function listGmailThreads(
   accessToken: string,
   options: { pageToken?: string },
@@ -470,17 +443,6 @@ export function trashGmailMessage(
   ).then(filterGmailMessageState);
 }
 
-export function untrashGmailMessage(
-  accessToken: string,
-  messageId: string,
-): Promise<GmailMessageState> {
-  return gmailRequest<GmailMessageState>(
-    accessToken,
-    `/users/me/messages/${encodeURIComponent(messageId)}/untrash`,
-    { method: "POST" },
-  ).then(filterGmailMessageState);
-}
-
 export function listGmailDrafts(
   accessToken: string,
   options: { maxResults: number; pageToken?: string; query?: string },
@@ -549,17 +511,6 @@ export function sendGmailDraft(
     method: "POST",
     data: { id: draftId },
   });
-}
-
-export async function deleteGmailDraft(
-  accessToken: string,
-  draftId: string,
-): Promise<void> {
-  await gmailRequest<unknown>(
-    accessToken,
-    `/users/me/drafts/${encodeURIComponent(draftId)}`,
-    { method: "DELETE" },
-  );
 }
 
 export function startGmailWatch(

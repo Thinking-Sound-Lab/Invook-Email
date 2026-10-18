@@ -3,11 +3,9 @@ import type { FastifyPluginAsync } from "fastify";
 import {
   MAILBOX_THREAD_UPDATE_LIMIT,
   mailboxViews,
-  type AcceptedMailboxSyncResponse,
   type MailboxView,
 } from "@invook/contracts";
 import {
-  enqueueGmailHistoryCatchupForAccount,
   getMailboxSettings,
   getMailboxShellData,
   getMailboxSidebarCounts,
@@ -222,43 +220,6 @@ export const registerMailboxRoutes: FastifyPluginAsync = async (api) => {
         return;
       }
       await sendJson(reply, 200, settings);
-    },
-  );
-
-  api.post<{ Body: unknown }>(
-    "/v1/mailbox/sync",
-    { onRequest: mutationAccessHooks },
-    async (request, reply) => {
-      const session = request.invookSession;
-      if (!session) return;
-      const accountId =
-        request.body && typeof request.body === "object" && "accountId" in request.body
-          ? parseRequiredMailboxAccountId(request.body.accountId)
-          : null;
-      if (!accountId) {
-        await sendProblem(request, reply, 400, "A valid mailbox account is required");
-        return;
-      }
-      const result = await enqueueGmailHistoryCatchupForAccount({
-        userId: session.userId,
-        accountId,
-      });
-      if (!result.stepId) {
-        await sendProblem(
-          request,
-          reply,
-          result.reason === "not_found" ? 404 : 409,
-          result.reason === "not_found"
-            ? "Connected Gmail account not found"
-            : "Gmail mailbox replica is not ready",
-        );
-        return;
-      }
-      const response: AcceptedMailboxSyncResponse = {
-        accepted: true,
-        stepId: result.stepId,
-      };
-      await sendJson(reply, 202, response);
     },
   );
 

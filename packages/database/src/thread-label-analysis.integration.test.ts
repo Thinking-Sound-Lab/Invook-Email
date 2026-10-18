@@ -42,7 +42,7 @@ import {
   setUserThreadLabel,
 } from "./thread-label-analysis";
 import { automaticThreadLabelCutoff } from "./thread-label-eligibility";
-import { failWorkflowStep, markWorkflowStepRunning } from "./workflows";
+import { markWorkflowStepRunning } from "./workflows";
 import * as schema from "./schema";
 import {
   connectedAccounts,

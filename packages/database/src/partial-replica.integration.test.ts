@@ -19,7 +19,6 @@ import {
   getGmailMessageMutationContext,
   getGmailForwardContext,
   getGmailReplyContext,
-  getGmailProviderWriteContext,
   getGmailProviderWriteContextForAccount,
   getGmailThreadMutationContext,
 } from "./replica";
@@ -247,10 +246,8 @@ test(
         accountId,
         threadId,
         messageId,
-        gmailLabelId,
         invookLabelId,
       } = fixture;
-      const missingThreadId = uuidv4();
 
       const [shell, threadPage, threadDetail, sidebarCounts] = await Promise.all([
         getMailboxShellData(userId, database),
@@ -569,9 +566,6 @@ test(
         threadId,
         messageId,
       } = fixture;
-
-      const defaultAccess = await getGmailProviderWriteContext(userId, database);
-      assert.equal(defaultAccess?.accountId, accountId);
 
       const access = await getGmailProviderWriteContextForAccount(
         { userId, accountId },

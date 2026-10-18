@@ -122,7 +122,7 @@ function headerAddresses(
     .flatMap((header) => splitAddressList(header.value));
 }
 
-export function toAgentThreadContent(thread: StoredThread): AgentThreadContent {
+function toAgentThreadContent(thread: StoredThread): AgentThreadContent {
   const messages = thread.messages.slice(-THREAD_MESSAGE_LIMIT);
   return {
     threadId: thread.id,

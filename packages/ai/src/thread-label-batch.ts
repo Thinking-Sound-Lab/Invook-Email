@@ -137,15 +137,6 @@ export function getBatchWebhookSecret(): string | null {
   return process.env.OPENAI_WEBHOOK_SECRET?.trim() || null;
 }
 
-export function isThreadLabelBatchConfigured(): boolean {
-  try {
-    configuration();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function getThreadLabelBatchModelId(): string {
   return configuration().modelId;
 }
@@ -504,13 +495,6 @@ export async function readThreadLabelBatch(input: {
         message: error.message?.trim() || null,
       })) ?? [],
   };
-}
-
-export async function getThreadLabelBatchState(
-  providerBatchId: string,
-): Promise<string> {
-  configuration();
-  return (await providerCall(() => client().batches.retrieve(providerBatchId))).status;
 }
 
 export async function deleteThreadLabelBatchFiles(input: {

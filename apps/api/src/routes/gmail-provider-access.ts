@@ -4,7 +4,6 @@ import { GmailApiError } from "@invook/gmail";
 
 import { sendProblem } from "../responses";
 import {
-  getGmailProviderAccess,
   getGmailProviderAccessForAccount,
   GmailProviderConfigurationError,
   GmailProviderReconnectRequiredError,
@@ -39,17 +38,6 @@ async function resolveGmailProviderAccessForRequest(
     }
     throw error;
   }
-}
-
-export async function getGmailProviderAccessForRequest(
-  request: FastifyRequest,
-  reply: FastifyReply,
-): Promise<GmailProviderAccess | null> {
-  const session = request.invookSession;
-  if (!session) return null;
-  return resolveGmailProviderAccessForRequest(request, reply, () =>
-    getGmailProviderAccess(session.userId),
-  );
 }
 
 export async function getGmailProviderAccessForAccountRequest(

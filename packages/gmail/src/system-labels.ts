@@ -27,7 +27,7 @@ const GMAIL_SYSTEM_LABEL_NAMES = {
 
 const gmailSystemLabelIds = new Set<string>(GMAIL_SYSTEM_LABEL_IDS);
 
-export function isGmailSystemLabelId(
+function isGmailSystemLabelId(
   labelId: string,
 ): labelId is GmailSystemLabelId {
   return gmailSystemLabelIds.has(labelId);
