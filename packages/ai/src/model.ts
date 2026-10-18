@@ -1,8 +1,9 @@
 import { createOpenAI } from "@ai-sdk/openai";
+import { defaultSettingsMiddleware, wrapLanguageModel } from "ai";
 
 export class AiConfigurationError extends Error {
   constructor() {
-    super("OPENAI_API_KEY is required for mailbox analysis.");
+    super("OPENAI_API_KEY is required for Invook AI features.");
     this.name = "AiConfigurationError";
   }
 }
@@ -36,6 +37,31 @@ export function getAiModel() {
 
   const modelId = process.env.OPENAI_MODEL?.trim() || DEFAULT_LABEL_MODEL;
   return { model: createOpenAI(credentials).chat(modelId), modelId };
+}
+
+/**
+ * The mail agent keeps its own override because drafting and tool use may
+ * warrant a larger model than labeling. Without one it uses the model this
+ * installation already runs, rather than assuming another model is available.
+ *
+ * OpenAI accepts function tools on its reasoning models only through the
+ * Responses API. Responses are not stored at OpenAI: Invook keeps the agent's
+ * history itself, so mailbox content is not retained there as conversation
+ * state, and every request carries its full history.
+ */
+export function getAgentModel() {
+  const credentials = readOpenAiCredentials();
+  if (!credentials) throw new AiConfigurationError();
+  const modelId = process.env.OPENAI_AGENT_MODEL?.trim() || DEFAULT_LABEL_MODEL;
+  return {
+    model: wrapLanguageModel({
+      model: createOpenAI(credentials).responses(modelId),
+      middleware: defaultSettingsMiddleware({
+        settings: { providerOptions: { openai: { store: false } } },
+      }),
+    }),
+    modelId,
+  };
 }
 
 export function isAiConfigured(): boolean {

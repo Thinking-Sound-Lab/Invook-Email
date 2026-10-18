@@ -50,6 +50,7 @@ function getTestSession(headers: Headers): InvookSession | null {
 
   return {
     userId,
+    sessionId: "99999999-9999-4999-8999-999999999999",
     user: {
       email: `${userId}@example.com`,
       image: null,

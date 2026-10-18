@@ -101,6 +101,7 @@ export class MailServices extends Construct {
         environment: [
           { name: "NODE_ENV", value: "production" }, { name: "HOST", value: "0.0.0.0" },
           { name: "PORT", value: "4000" }, ...storageEnvironment,
+          { name: "AGENT_SOCKET_URL", value: ingress.agentSocketUrl },
           ...configuration.getEnvironment(API_CONFIGURATION_KEYS),
         ],
         secrets: secrets(API_SECRET_KEYS),

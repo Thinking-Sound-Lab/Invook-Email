@@ -9,6 +9,8 @@ declare module "fastify" {
 
   interface FastifyRequest {
     invookSession: InvookSession | null;
+    /** The identity a redeemed ticket granted to an agent socket upgrade. */
+    invookAgentSocket: { userId: string; sessionId: string } | null;
     invookStartedAt: number;
   }
 }

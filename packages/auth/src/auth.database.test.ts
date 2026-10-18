@@ -171,6 +171,7 @@ test(
         new Headers({ cookie: sessionTokenCookie }),
       );
       assert.equal(fromDatabase.session?.userId, userId);
+      assert.equal(fromDatabase.session?.sessionId, session.id);
       const cacheSetCookie = findSetCookie(
         fromDatabase.setCookies,
         sessionCacheCookieName,
@@ -190,6 +191,9 @@ test(
         new Headers({ cookie: browserCookies }),
       );
       assert.equal(fromCache.session?.userId, userId);
+      // The cached copy names the same stored session, which the agent socket
+      // re-checks against the table at every turn.
+      assert.equal(fromCache.session?.sessionId, session.id);
       assert.deepEqual(fromCache.setCookies, []);
 
       const forgedCache = await getInvookSession(

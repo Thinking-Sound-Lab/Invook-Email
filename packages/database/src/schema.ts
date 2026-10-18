@@ -1165,3 +1165,85 @@ export const mailboxChangeEvents = pgTable(
     ),
   ],
 );
+
+export const agentConversations = pgTable(
+  "agent_conversations",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    // One agent turn runs per conversation. The lease expires so a crashed API
+    // process cannot hold the conversation forever.
+    activeRunId: uuid("active_run_id"),
+    activeRunExpiresAt: timestampWithTimezone("active_run_expires_at"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    index("agent_conversations_user_updated_idx").on(
+      table.userId,
+      table.updatedAt,
+    ),
+    check(
+      "agent_conversations_run_lease_check",
+      sql`(${table.activeRunId} is null) = (${table.activeRunExpiresAt} is null)`,
+    ),
+  ],
+);
+
+export const agentMessages = pgTable(
+  "agent_messages",
+  {
+    id: uuid("id").primaryKey(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => agentConversations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    role: text("role").$type<"user" | "assistant">().notNull(),
+    parts: jsonb("parts").$type<unknown[]>().notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("agent_messages_conversation_position_idx").on(
+      table.conversationId,
+      table.position,
+    ),
+    index("agent_messages_user_idx").on(table.userId),
+    check("agent_messages_role_check", sql`${table.role} in ('user', 'assistant')`),
+    check("agent_messages_position_check", sql`${table.position} >= 0`),
+  ],
+);
+
+export const agentSocketTickets = pgTable(
+  "agent_socket_tickets",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => authSessions.id, { onDelete: "cascade" }),
+    expiresAt: timestampWithTimezone("expires_at").notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    index("agent_socket_tickets_user_expiration_idx").on(
+      table.userId,
+      table.expiresAt,
+    ),
+    index("agent_socket_tickets_session_idx").on(table.sessionId),
+  ],
+);

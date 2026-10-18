@@ -136,3 +136,55 @@ test("one-off task operations trust only the configured deployer and scoped ECS 
     }],
   });
 });
+
+test("the agent socket reaches the private ALB only through CloudFront on its own path", () => {
+  const template = createTemplate();
+  template.hasParameter("CloudFrontOriginFacingPrefixListId", { AllowedPattern: "^pl-[0-9a-f]+$" });
+  template.hasResourceProperties("AWS::EC2::SecurityGroup", {
+    GroupDescription: "Internal load balancer reachable only from the API Gateway VPC link.",
+    SecurityGroupIngress: [
+      Match.objectLike({ FromPort: 80, SourceSecurityGroupId: { Ref: "VpcLinkSecurityGroup" } }),
+      Match.objectLike({
+        IpProtocol: "tcp", FromPort: 80, ToPort: 80,
+        SourcePrefixListId: { Ref: "CloudFrontOriginFacingPrefixListId" },
+      }),
+    ],
+  });
+  template.hasResourceProperties("AWS::CloudFront::VpcOrigin", {
+    VpcOriginEndpointConfig: Match.objectLike({
+      Arn: { Ref: "LoadBalancer" }, HTTPPort: 80, OriginProtocolPolicy: "http-only",
+    }),
+  });
+  template.hasResourceProperties("AWS::CloudFront::Distribution", {
+    DistributionConfig: Match.objectLike({
+      HttpVersion: "http1.1",
+      Origins: [Match.objectLike({
+        DomainName: { "Fn::GetAtt": ["LoadBalancer", "DNSName"] },
+        VpcOriginConfig: { VpcOriginId: { "Fn::GetAtt": ["AgentSocketVpcOrigin", "Id"] } },
+      })],
+      // Everything but the socket path is refused at the edge.
+      DefaultCacheBehavior: Match.objectLike({
+        ViewerProtocolPolicy: "https-only",
+        FunctionAssociations: [{
+          EventType: "viewer-request",
+          FunctionARN: { "Fn::GetAtt": ["AgentSocketNotFound", "FunctionARN"] },
+        }],
+      }),
+      CacheBehaviors: [Match.objectLike({
+        PathPattern: "/v1/agent/socket", ViewerProtocolPolicy: "https-only",
+        AllowedMethods: ["GET", "HEAD"],
+        CachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+        OriginRequestPolicyId: "216adef6-5c7f-47e4-b989-5492eafa07d3",
+      })],
+    }),
+  });
+  const socketUrl = {
+    "Fn::Join": ["", ["wss://", { "Fn::GetAtt": ["AgentSocketDistribution", "DomainName"] }, "/v1/agent/socket"]],
+  };
+  template.hasResourceProperties("AWS::ECS::TaskDefinition", {
+    ContainerDefinitions: [Match.objectLike({
+      Name: "api", Environment: Match.arrayWith([{ Name: "AGENT_SOCKET_URL", Value: socketUrl }]),
+    })],
+  });
+  template.hasOutput("AgentSocketUrl", { Value: socketUrl });
+});

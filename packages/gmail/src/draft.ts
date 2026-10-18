@@ -17,7 +17,8 @@ function headerValue(headers: HeaderLine[], name: string): string | null {
   return safeHeaderValue(value) || null;
 }
 
-function replySubject(subject: string): string {
+/** The subject Gmail threading uses for a reply to a message with `subject`. */
+export function formatGmailReplySubject(subject: string): string {
   const value = safeHeaderValue(subject);
   return /^re\s*:/i.test(value) ? value : `Re: ${value}`;
 }
@@ -75,7 +76,7 @@ export function composePlainTextGmailMessage(input: {
           ]
         : [];
     }),
-    `Subject: ${subjectHeaderValue(input.replyTarget ? replySubject(input.subject) : input.subject)}`,
+    `Subject: ${subjectHeaderValue(input.replyTarget ? formatGmailReplySubject(input.subject) : input.subject)}`,
     `Message-ID: <${rawMessageId}>`,
     ...(input.replyTarget ? replyHeaders(input.replyTarget.headerLines) : []),
     "MIME-Version: 1.0",
@@ -108,7 +109,7 @@ export function composePlainTextGmailReply(input: {
   const headers = [
     `From: ${sender}`,
     `To: ${recipient}`,
-    `Subject: ${subjectHeaderValue(replySubject(input.subject))}`,
+    `Subject: ${subjectHeaderValue(formatGmailReplySubject(input.subject))}`,
     ...(input.messageId
       ? [
           `Message-ID: <${safeHeaderValue(input.messageId).replace(/^<|>$/g, "")}>`,

@@ -13,6 +13,7 @@ export {
   encryptGoogleCredential,
   type GoogleCredential,
 } from "./credentials";
+export * from "./agent-conversations";
 export * from "./gmail-draft-writes";
 export * from "./label-preview-receipts";
 export * from "./thread-label-analysis";

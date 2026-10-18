@@ -1,3 +1,4 @@
+export * from "./agent";
 export * from "./gmail-compose";
 export * from "./mailbox-events";
 

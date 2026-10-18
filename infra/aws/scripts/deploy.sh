@@ -33,9 +33,20 @@ task_cli() (
   export AWS_SESSION_TOKEN="${task_session_token:?Assume the task operations role first.}"
   aws --region "$region" --no-cli-pager "$@"
 )
+# The agent socket's CloudFront VPC origin reaches the internal load balancer
+# through this region-specific managed prefix list, so every update resolves it.
+cloudfront_origin_prefix_list() {
+  local prefix_list
+  prefix_list="$(aws_cli ec2 describe-managed-prefix-lists \
+    --filters Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing \
+    --query 'PrefixLists[0].PrefixListId' --output text)"
+  [[ "$prefix_list" == pl-* ]] || { echo "The CloudFront origin-facing prefix list is unavailable in $region." >&2; exit 1; }
+  printf '%s' "$prefix_list"
+}
 apply_stack() {
   local arguments=(deploy "$stack" --require-approval never)
   if [[ -n "${AWS_CLOUDFORMATION_ROLE_ARN:-}" ]]; then arguments+=(--role-arn "$AWS_CLOUDFORMATION_ROLE_ARN"); fi
+  arguments+=(--parameters "$stack:CloudFrontOriginFacingPrefixListId=$(cloudfront_origin_prefix_list)")
   for parameter in "$@"; do arguments+=(--parameters "$stack:$parameter"); done
   cdk_cli "${arguments[@]}"
 }
@@ -68,6 +79,7 @@ case "${1:-}" in
     apply_stack "DefaultVpcId=$vpc_id" "PublicSubnetIds=$subnets" "DeploymentPrincipalArn=$principal_arn"
     echo "Runtime secret: $(output RuntimeSecretArn)"
     echo "Vercel API_INTERNAL_URL: $(output ApiUrl)"
+    echo "Agent socket (set on the API automatically): $(output AgentSocketUrl)"
     ;;
   configure)
     env_file="${2:-.env.production.local}"

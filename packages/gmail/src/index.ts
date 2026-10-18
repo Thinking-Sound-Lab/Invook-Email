@@ -55,6 +55,7 @@ export {
 export {
   composePlainTextGmailMessage,
   composePlainTextGmailReply,
+  formatGmailReplySubject,
 } from "./draft";
 export {
   extractEmailAddress,

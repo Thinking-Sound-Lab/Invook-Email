@@ -23,13 +23,20 @@ export class ProductionStack extends Stack {
       description: "IAM role or user allowed to assume the scoped ECS task operations role.",
       allowedPattern: "^$|^arn:[a-z0-9-]+:iam::[0-9]{12}:(role/.+|user/.+|root)$",
     });
-    for (const parameter of [vpcId, subnetIds, apiImage, workerImage, apiCount, workerCount, deploymentPrincipalArn]) {
+    const originFacingPrefixListId = new CfnParameter(this, "CloudFrontOriginFacingPrefixListId", {
+      type: "String", allowedPattern: "^pl-[0-9a-f]+$",
+      description: "Regional ID of the com.amazonaws.global.cloudfront.origin-facing managed prefix list.",
+    });
+    for (const parameter of [
+      vpcId, subnetIds, apiImage, workerImage, apiCount, workerCount, deploymentPrincipalArn, originFacingPrefixListId,
+    ]) {
       parameter.overrideLogicalId(parameter.node.id);
     }
 
     const storage = new MailStorage(this, "Storage");
     const ingress = new ApiIngress(this, "Ingress", {
       vpcId: vpcId.valueAsString, subnetIds: subnetIds.valueAsList,
+      cloudFrontOriginFacingPrefixListId: originFacingPrefixListId.valueAsString,
     });
     const runtime = new RuntimeResources(this, "Runtime", { mailBucketArn: storage.bucket.attrArn });
     const configuration = new RuntimeConfiguration(this, "Configuration");
@@ -44,6 +51,7 @@ export class ProductionStack extends Stack {
 
     const outputs = {
       ApiUrl: ingress.apiUrl,
+      AgentSocketUrl: ingress.agentSocketUrl,
       ApiRepository: runtime.apiRepository.attrRepositoryUri,
       WorkerRepository: runtime.workerRepository.attrRepositoryUri,
       MailBucket: storage.bucket.ref,

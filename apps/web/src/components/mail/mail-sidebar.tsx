@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AiChat02Icon,
   Delete02Icon,
   FileEditIcon,
   InboxIcon,
@@ -26,6 +27,7 @@ import {
   AvatarFallback,
   AvatarImage,
 } from "@/components/ui/avatar";
+import { useAgentPaneStore } from "@/stores/agent/store";
 import { useMailboxStore } from "@/stores/mailbox/store";
 import { cn } from "@/lib/utils";
 
@@ -121,6 +123,8 @@ export function MailSidebar({
   const { accounts, aiConfigured, user } = shell;
   const searchParams = useSearchParams();
   const setSidebarCounts = useMailboxStore((state) => state.setSidebarCounts);
+  const isAgentPaneOpen = useAgentPaneStore((state) => state.isPaneOpen);
+  const toggleAgentPane = useAgentPaneStore((state) => state.togglePane);
   const cachedSidebarCounts = useMailboxStore((state) => state.sidebarCounts);
   const accountSelection = resolveMailboxAccountSelection(
     searchParams.get("account"),
@@ -207,6 +211,23 @@ export function MailSidebar({
             href={hrefFor({ surface: item.surface, thread: null })}
           />
         ))}
+        <button
+          type="button"
+          aria-pressed={isAgentPaneOpen}
+          aria-label="Agent"
+          onClick={toggleAgentPane}
+          className={navItemClassName(isAgentPaneOpen)}
+        >
+          <HugeiconsIcon
+            icon={AiChat02Icon}
+            size={15}
+            strokeWidth={1.65}
+            className="shrink-0"
+          />
+          <span className="hidden min-w-0 flex-1 truncate text-left lg:block">
+            Agent
+          </span>
+        </button>
         <SettingsDialog
           key={accountSelection}
           accounts={accounts}

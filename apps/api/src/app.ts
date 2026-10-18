@@ -1,13 +1,20 @@
 import { performance } from "node:perf_hooks";
 
 import fastifyCookie from "@fastify/cookie";
+import fastifyWebsocket from "@fastify/websocket";
 import Fastify, { type FastifyRequest } from "fastify";
 import { v4 as uuidv4 } from "uuid";
+
+import { AGENT_SOCKET_PROTOCOL } from "@invook/contracts";
 
 import {
   createAuthService,
   type AuthService,
 } from "./auth/auth-service";
+import {
+  registerAgentRoutes,
+  type AgentRouteDependencies,
+} from "./routes/agent";
 import { registerAuthRoutes } from "./routes/auth";
 import {
   registerAttachmentRoutes,
@@ -32,6 +39,7 @@ import { registerThreadLabelRoutes } from "./routes/thread-labels";
 import { InvalidJsonBodyError, sendProblem } from "./responses";
 
 const MAXIMUM_REQUEST_BODY_BYTES = 65_536;
+const MAXIMUM_SOCKET_FRAME_BYTES = 65_536;
 
 function isInvalidBodyError(error: unknown): boolean {
   return (
@@ -43,6 +51,7 @@ function isInvalidBodyError(error: unknown): boolean {
 }
 
 export async function buildApi(options: {
+  agentRoutes?: Partial<AgentRouteDependencies>;
   attachmentRoutes?: AttachmentRouteDependencies;
   auth?: AuthService;
   labelRoutes?: LabelRouteDependencies;
@@ -60,9 +69,19 @@ export async function buildApi(options: {
   });
 
   api.decorateRequest("invookSession", null);
+  api.decorateRequest("invookAgentSocket", null);
   api.decorateRequest("invookStartedAt", 0);
   api.decorate("invookAuth", options.auth ?? createAuthService());
   await api.register(fastifyCookie);
+  await api.register(fastifyWebsocket, {
+    options: {
+      maxPayload: MAXIMUM_SOCKET_FRAME_BYTES,
+      // Browsers fail a handshake that offered subprotocols unless the server
+      // selects one; the ticket protocol is never echoed back.
+      handleProtocols: (protocols) =>
+        protocols.has(AGENT_SOCKET_PROTOCOL) ? AGENT_SOCKET_PROTOCOL : false,
+    },
+  });
 
   api.addHook("onRequest", async (request, reply) => {
     request.invookStartedAt = performance.now();
@@ -108,6 +127,7 @@ export async function buildApi(options: {
   await api.register(registerThreadLabelRoutes, { prefix: "/v1/threads" });
   await api.register(registerComposeDraftRoutes);
   await api.register(registerGmailProviderRoutes);
+  await api.register(registerAgentRoutes(options.agentRoutes));
 
   api.setNotFoundHandler(async (request, reply) => {
     await sendProblem(request, reply, 404, "Route not found");
