@@ -14,7 +14,10 @@ import { v4 as uuidv4 } from "uuid";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import type { AgentSocketTransport } from "@/lib/agent/agent-socket-transport";
+import {
+  getAgentRetryRequest,
+  type AgentSocketTransport,
+} from "@/lib/agent/agent-socket-transport";
 
 import { AgentMessage } from "./agent-message";
 
@@ -50,6 +53,8 @@ export function AgentConversation({
   const [draft, setDraft] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const isWorking = status === "submitted" || status === "streaming";
+  const retryRequest = isWorking ? null : getAgentRetryRequest(messages);
+  const lastMessageId = messages.at(-1)?.id;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
@@ -76,12 +81,12 @@ export function AgentConversation({
     submitDraft();
   }
 
-  // Resubmits the last request. The server holds the history, so this resumes
-  // an interrupted approval or reruns a failed turn without duplicating it.
   function handleRetry(): void {
-    if (isWorking) return;
+    if (!retryRequest) return;
     clearError();
-    void sendMessage();
+    void (retryRequest.type === "resubmit"
+      ? sendMessage()
+      : sendMessage({ text: retryRequest.text }));
   }
 
   function handleDecide(decision: AgentApprovalDecision): void {
@@ -113,6 +118,7 @@ export function AgentConversation({
                 accountSelection={accountSelection}
                 canDecide={!isWorking}
                 onDecide={handleDecide}
+                canRetry={retryRequest !== null && message.id === lastMessageId}
                 onRetry={handleRetry}
               />
             ))}
@@ -126,7 +132,7 @@ export function AgentConversation({
         {error ? (
           <div role="alert" className="mt-4 flex items-center justify-between gap-3">
             <p className="text-xs leading-5 text-destructive">{error.message}</p>
-            {messages.length > 0 && !isWorking ? (
+            {retryRequest ? (
               <Button
                 type="button"
                 variant="ghost"

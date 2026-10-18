@@ -4,6 +4,7 @@ import {
   AGENT_SOCKET_PROTOCOL,
   AGENT_SOCKET_SESSION_ENDED_CLOSE_CODE,
   AGENT_SOCKET_TICKET_PROTOCOL_PREFIX,
+  type AgentApprovalDecision,
   type AgentClientFrame,
   type AgentFocus,
   type AgentServerFrame,
@@ -76,6 +77,23 @@ export async function readAgentServerFrame(
     : null;
 }
 
+function getMessageText(message: InvookAgentUIMessage): string {
+  return message.parts
+    .flatMap((part) => (part.type === "text" ? [part.text] : []))
+    .join("\n")
+    .trim();
+}
+
+function listApprovalDecisions(
+  message: InvookAgentUIMessage,
+): AgentApprovalDecision[] {
+  return message.parts.flatMap((part) =>
+    isToolUIPart(part) && part.state === "approval-responded"
+      ? [{ approvalId: part.approval.id, approved: part.approval.approved }]
+      : [],
+  );
+}
+
 /**
  * Turns the chat's next request into a frame. Only the newest user text or
  * the user's approval decisions are sent; the server holds the history.
@@ -87,10 +105,7 @@ export function createAgentTurnFrame(input: {
 }): AgentTurnFrame | null {
   const lastMessage = input.messages.at(-1);
   if (lastMessage?.role === "user") {
-    const text = lastMessage.parts
-      .flatMap((part) => (part.type === "text" ? [part.text] : []))
-      .join("\n")
-      .trim();
+    const text = getMessageText(lastMessage);
     return text
       ? {
           type: "message",
@@ -102,11 +117,7 @@ export function createAgentTurnFrame(input: {
       : null;
   }
   if (lastMessage?.role === "assistant") {
-    const decisions = lastMessage.parts.flatMap((part) =>
-      isToolUIPart(part) && part.state === "approval-responded"
-        ? [{ approvalId: part.approval.id, approved: part.approval.approved }]
-        : [],
-    );
+    const decisions = listApprovalDecisions(lastMessage);
     return decisions.length > 0
       ? {
           type: "approval",
@@ -117,6 +128,35 @@ export function createAgentTurnFrame(input: {
       : null;
   }
   return null;
+}
+
+export type AgentRetryRequest =
+  | { type: "resubmit" }
+  | { type: "ask-again"; text: string };
+
+/**
+ * How to retry a turn that failed. A request the agent never answered, or
+ * approval decisions it never finished, are resubmitted unchanged. A reply
+ * that failed partway is already in the server's history, so its request is
+ * asked again as a new message. A pending approval is decided on its card,
+ * not retried.
+ */
+export function getAgentRetryRequest(
+  messages: InvookAgentUIMessage[],
+): AgentRetryRequest | null {
+  const lastMessage = messages.at(-1);
+  if (lastMessage?.role === "user") {
+    return getMessageText(lastMessage) ? { type: "resubmit" } : null;
+  }
+  if (lastMessage?.role !== "assistant") return null;
+  if (listApprovalDecisions(lastMessage).length > 0) return { type: "resubmit" };
+  const hasPendingApproval = lastMessage.parts.some(
+    (part) => isToolUIPart(part) && part.state === "approval-requested",
+  );
+  if (hasPendingApproval) return null;
+  const request = [...messages].reverse().find((message) => message.role === "user");
+  const text = request ? getMessageText(request) : "";
+  return text ? { type: "ask-again", text } : null;
 }
 
 /** The parts of the browser WebSocket the connection uses, so tests can supply one. */

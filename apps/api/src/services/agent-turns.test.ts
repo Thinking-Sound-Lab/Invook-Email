@@ -255,14 +255,16 @@ test("a send stops at the approval card, then runs once the user approves", asyn
     focus: { accountSelection: "all", threadId: null },
   });
 
-  // The decision is stored only with the turn's response, never on its own.
-  assert.deepEqual(second.events, ["start", "save-and-finish"]);
+  // The decision is stored before the send runs, then the result with the
+  // turn's response.
+  assert.deepEqual(second.events, ["start", "save", "save-and-finish"]);
+  assert.equal(partState(second.savedMessages[0]?.messages[0]), "approval-responded");
   assert.deepEqual(second.toolCalls, [
     { name: "sendEmail", input: email, toolCallId: "call-sendEmail" },
   ]);
   // The continuation extends the same assistant message.
-  assert.equal(second.savedMessages[0]?.messages[0]?.id, stored.id);
-  assert.equal(partState(second.savedMessages[0]?.messages[0]), "output-available");
+  assert.equal(second.savedMessages[1]?.messages[0]?.id, stored.id);
+  assert.equal(partState(second.savedMessages[1]?.messages[0]), "output-available");
 });
 
 function partState(message: StoredAgentMessage | undefined): unknown {
@@ -301,7 +303,7 @@ const approveFrame: AgentTurnFrame = {
   focus: { accountSelection: "all", threadId: null },
 };
 
-test("a turn that fails after an approval leaves it open to approve again", async () => {
+test("a turn that fails after an approval keeps the decision to resume", async () => {
   const failed = harness({
     model: scriptedModel([]),
     history: pendingSendHistory("approval-requested"),
@@ -317,9 +319,29 @@ test("a turn that fails after an approval leaves it open to approve again", asyn
   assert.deepEqual(failed.frames, [
     { type: "rejected", conversationId, reason: "unavailable" },
   ]);
-  // Nothing was stored, so the request is still pending and approvable.
-  assert.deepEqual(failed.events, ["start", "release"]);
+  // The decision is on record, so a later message cannot settle an email
+  // that may have been sent as declined; resending the decision resumes it.
+  assert.deepEqual(failed.events, ["start", "save", "release"]);
+  assert.equal(partState(failed.savedMessages[0]?.messages[0]), "approval-responded");
   assert.deepEqual(failed.toolCalls, []);
+});
+
+test("an approval whose conversation was taken over never runs the tool", async () => {
+  const superseded = harness({
+    model: scriptedModel([]),
+    history: pendingSendHistory("approval-requested"),
+    overrides: {
+      saveRunMessages: async () => ({ saved: false }),
+    },
+  });
+
+  await superseded.run(approveFrame);
+
+  assert.deepEqual(superseded.frames, [
+    { type: "rejected", conversationId, reason: "busy" },
+  ]);
+  assert.deepEqual(superseded.events, ["start", "release"]);
+  assert.deepEqual(superseded.toolCalls, []);
 });
 
 test("an interrupted approved send resumes under its original tool call", async () => {

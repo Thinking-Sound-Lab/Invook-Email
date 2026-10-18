@@ -199,13 +199,30 @@ export async function runAgentTurn(
       return { isSessionEnded: false };
     }
     let messages = validation.data;
+    const saveBeforeRun = async (message: InvookAgentUIMessage) => {
+      const stored = toStoredMessage(message);
+      if (!stored) return true;
+      const { saved } = await dependencies.saveRunMessages({
+        userId: input.userId,
+        conversationId,
+        runId,
+        messages: [stored],
+        finishRun: false,
+      });
+      return saved;
+    };
     if (frame.type === "approval") {
-      // Decisions stay in memory until the turn's response is stored. A turn
-      // that fails first leaves the approval open, so the user can decide
-      // again; the tool call's ID keeps a repeated Gmail write idempotent.
+      // The decision is stored before the tool runs, so an email Gmail sent
+      // is never later recorded as unapproved. A turn interrupted after this
+      // keeps the decision, and resending it resumes the call under its tool
+      // call ID, which keeps the repeated Gmail write idempotent.
       const decided = applyAgentApprovalDecisions(messages, frame.decisions);
       if (!decided) {
         reject("invalid");
+        return { isSessionEnded: false };
+      }
+      if (!(await saveBeforeRun(decided))) {
+        reject("busy");
         return { isSessionEnded: false };
       }
       messages = [...messages.slice(0, -1), decided];
@@ -213,16 +230,8 @@ export async function runAgentTurn(
       // A new message leaves any open approval behind it unanswered.
       const previous = messages.at(-2);
       const closed = previous ? closeOpenApprovals(previous) : null;
-      const stored = closed ? toStoredMessage(closed) : null;
-      if (closed && stored) {
-        const { saved } = await dependencies.saveRunMessages({
-          userId: input.userId,
-          conversationId,
-          runId,
-          messages: [stored],
-          finishRun: false,
-        });
-        if (!saved) {
+      if (closed) {
+        if (!(await saveBeforeRun(closed))) {
           reject("busy");
           return { isSessionEnded: false };
         }

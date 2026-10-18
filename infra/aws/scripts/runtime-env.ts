@@ -85,6 +85,10 @@ export function parseProductionRuntime(secretValue: string, parameterValue: stri
   }
   const configuration = CONFIGURATION_KEYS.map((name) => {
     const matches = parameters.filter((parameter) => parameter.ParameterKey === CONFIGURATION_PARAMETER_NAMES[name]);
+    // A setting added after the stack was deployed is absent until the
+    // release's first stack update creates it with the template default.
+    const defaultValue = CONFIGURATION_DEFAULTS[name];
+    if (matches.length === 0 && defaultValue !== undefined) return [name, defaultValue];
     if (matches.length !== 1) throw new Error("Missing or duplicated CloudFormation setting: " + name);
     return [name, matches[0].ParameterValue];
   });

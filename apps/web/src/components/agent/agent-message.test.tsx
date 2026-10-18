@@ -76,6 +76,7 @@ async function renderMessage(
   input: {
     canDecide?: boolean;
     onDecide?: (decision: AgentApprovalDecision) => void;
+    canRetry?: boolean;
     onRetry?: () => void;
   } = {},
 ): Promise<void> {
@@ -96,6 +97,7 @@ async function renderMessage(
           accountSelection="all"
           canDecide={input.canDecide ?? true}
           onDecide={input.onDecide ?? (() => {})}
+          canRetry={input.canRetry ?? true}
           onRetry={input.onRetry ?? (() => {})}
         />
       </MailShellProvider>,
@@ -291,15 +293,30 @@ test("a forward cannot be approved until the forwarded message is shown", async 
   assert.equal(findButton("Send")?.disabled, false);
 });
 
-test("a forward whose original cannot be loaded cannot be approved", async () => {
+test("a forward whose original cannot be loaded cannot be approved until it loads", async () => {
+  let attempts = 0;
   axios.defaults.adapter = async (config) => {
-    throw new axios.AxiosError("Not found", "ERR_BAD_REQUEST", config);
+    attempts += 1;
+    if (attempts === 1) {
+      throw new axios.AxiosError("Unavailable", "ERR_BAD_RESPONSE", config);
+    }
+    return { data: { text: "Signed copy attached." }, status: 200, statusText: "OK", headers: {}, config };
   };
   await renderMessage(pendingForward());
   await act(async () => {});
 
   assert.ok(document.body.textContent?.includes("could not be loaded"));
   assert.equal(findButton("Send")?.disabled, true);
+
+  await act(async () => findButton("Try again")?.click());
+
+  assert.equal(attempts, 2);
+  assert.ok(
+    document.querySelector('[aria-label="Forwarded message"]')?.textContent?.includes(
+      "Signed copy attached.",
+    ),
+  );
+  assert.equal(findButton("Send")?.disabled, false);
 });
 
 test("an interrupted approval offers a retry, and a send left behind says it was not sent", async () => {
@@ -337,4 +354,24 @@ test("an interrupted approval offers a retry, and a send left behind says it was
   assert.ok(text.includes("Not sent. Not approved before the next message."));
   await act(async () => findButton("Retry")?.click());
   assert.equal(retries, 1);
+});
+
+test("an interrupted approval in an earlier message offers no retry", async () => {
+  await renderMessage(
+    {
+      id: "assistant",
+      role: "assistant",
+      parts: [{
+        type: "tool-sendEmail",
+        toolCallId: "call-1",
+        state: "approval-responded",
+        input: email,
+        approval: { id: "approval-1", approved: true },
+      }],
+    },
+    { canRetry: false },
+  );
+
+  assert.ok(document.body.textContent?.includes("Sending did not finish."));
+  assert.equal(findButton("Retry"), undefined);
 });

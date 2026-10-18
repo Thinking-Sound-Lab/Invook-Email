@@ -36,7 +36,8 @@ export interface AgentMessageProps {
   accountSelection: string;
   canDecide: boolean;
   onDecide: (decision: AgentApprovalDecision) => void;
-  /** Resubmits the conversation's last request after an interrupted turn. */
+  /** Whether this message ends an interrupted turn that can be retried. */
+  canRetry: boolean;
   onRetry: () => void;
 }
 
@@ -45,6 +46,7 @@ export function AgentMessage({
   accountSelection,
   canDecide,
   onDecide,
+  canRetry,
   onRetry,
 }: AgentMessageProps) {
   if (message.role === "user") {
@@ -68,6 +70,7 @@ export function AgentMessage({
           accountSelection={accountSelection}
           canDecide={canDecide}
           onDecide={onDecide}
+          canRetry={canRetry}
           onRetry={onRetry}
         />
       ))}
@@ -80,6 +83,7 @@ interface AgentMessagePartViewProps {
   accountSelection: string;
   canDecide: boolean;
   onDecide: (decision: AgentApprovalDecision) => void;
+  canRetry: boolean;
   onRetry: () => void;
 }
 
@@ -88,6 +92,7 @@ function AgentMessagePartView({
   accountSelection,
   canDecide,
   onDecide,
+  canRetry,
   onRetry,
 }: AgentMessagePartViewProps) {
   switch (part.type) {
@@ -109,6 +114,7 @@ function AgentMessagePartView({
           part={part}
           canDecide={canDecide}
           onDecide={onDecide}
+          canRetry={canRetry}
           onRetry={onRetry}
         />
       );
@@ -240,7 +246,13 @@ function ReadThreadPart({
   );
 }
 
-function ForwardedMessagePreview({ forwarded }: { forwarded: ForwardedMessageText }) {
+function ForwardedMessagePreview({
+  forwarded,
+  onReload,
+}: {
+  forwarded: ForwardedMessageText;
+  onReload: () => void;
+}) {
   if (forwarded.loadState === "none") return null;
   if (forwarded.loadState === "loading") {
     return (
@@ -251,9 +263,20 @@ function ForwardedMessagePreview({ forwarded }: { forwarded: ForwardedMessageTex
   }
   if (forwarded.loadState === "error") {
     return (
-      <p className="text-xs text-destructive" role="alert">
-        The forwarded message could not be loaded, so it cannot be reviewed here.
-      </p>
+      <div role="alert" className="flex items-center justify-between gap-3">
+        <p className="text-xs leading-5 text-destructive">
+          The forwarded message could not be loaded, so it cannot be reviewed here.
+        </p>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="shrink-0 rounded-md"
+          onClick={onReload}
+        >
+          Try again
+        </Button>
+      </div>
     );
   }
   return (
@@ -274,9 +297,11 @@ function ForwardedMessagePreview({ forwarded }: { forwarded: ForwardedMessageTex
 function EmailSummary({
   email,
   forwarded,
+  onReloadForwarded,
 }: {
   email: AgentEmailInput;
   forwarded: ForwardedMessageText;
+  onReloadForwarded: () => void;
 }) {
   const { accounts } = useMailShell();
   const sender = accounts.find((account) => account.id === email.accountId)?.email;
@@ -302,7 +327,7 @@ function EmailSummary({
           {email.body}
         </p>
       ) : null}
-      <ForwardedMessagePreview forwarded={forwarded} />
+      <ForwardedMessagePreview forwarded={forwarded} onReload={onReloadForwarded} />
     </div>
   );
 }
@@ -319,13 +344,13 @@ function EmailDetails({
   email: AgentEmailInput;
   children?: (isComplete: boolean) => ReactNode;
 }) {
-  const forwarded = useForwardedMessageText({
+  const { forwarded, reload } = useForwardedMessageText({
     accountId: email.accountId,
     messageId: email.forwardOfMessageId,
   });
   return (
     <>
-      <EmailSummary email={email} forwarded={forwarded} />
+      <EmailSummary email={email} forwarded={forwarded} onReloadForwarded={reload} />
       {children?.(
         forwarded.loadState === "none" || forwarded.loadState === "available",
       )}
@@ -380,11 +405,13 @@ function SendEmailPart({
   part,
   canDecide,
   onDecide,
+  canRetry,
   onRetry,
 }: {
   part: ToolPart<"sendEmail">;
   canDecide: boolean;
   onDecide: (decision: AgentApprovalDecision) => void;
+  canRetry: boolean;
   onRetry: () => void;
 }) {
   if (part.state === "input-streaming") {
@@ -426,8 +453,8 @@ function SendEmailPart({
     );
   }
   if (part.state === "approval-responded") {
-    // A decision whose turn ended before the tool ran can be resumed: the
-    // server repeats the same call, and Gmail writes under its ID are
+    // A decision whose turn ended before the tool finished can be resumed:
+    // the server repeats the same call, and Gmail writes under its ID are
     // idempotent, so retrying never sends twice.
     const isInterrupted = canDecide;
     return (
@@ -437,10 +464,10 @@ function SendEmailPart({
             ? part.approval.approved ? "Sending…" : "Not sending."
             : part.approval.approved
               ? "Sending did not finish."
-              : "Your decision was not recorded yet."}
+              : "You declined this email, but the agent did not finish."}
         </StatusLine>
         <EmailDetails email={part.input} />
-        {isInterrupted ? (
+        {isInterrupted && canRetry ? (
           <Button
             type="button"
             variant="secondary"

@@ -13,6 +13,7 @@ import {
 import {
   AgentSocketConnection,
   createAgentTurnFrame,
+  getAgentRetryRequest,
   readAgentServerFrame,
   type AgentSocketLike,
 } from "./agent-socket-transport";
@@ -158,6 +159,40 @@ test("only the newest user text or the user's approval decisions are sent", () =
     createAgentTurnFrame({ conversationId, messages: userTurn.slice(0, 1), focus }),
     null,
   );
+});
+
+test("a failed turn retries the request it was answering", () => {
+  const request: InvookAgentUIMessage = {
+    id: "b",
+    role: "user",
+    parts: [{ type: "text", text: "Find the lease" }],
+  };
+  const pendingSend = (state: "approval-requested" | "approval-responded"): InvookAgentUIMessage => ({
+    id: "c",
+    role: "assistant",
+    parts: [
+      state === "approval-requested"
+        ? { type: "tool-sendEmail", toolCallId: "call-1", state, input: email, approval: { id: "approval-1" } }
+        : { type: "tool-sendEmail", toolCallId: "call-1", state, input: email, approval: { id: "approval-1", approved: true } },
+    ],
+  });
+
+  // An unanswered request and an unfinished decision are resubmitted as is.
+  assert.deepEqual(getAgentRetryRequest([request]), { type: "resubmit" });
+  assert.deepEqual(getAgentRetryRequest([request, pendingSend("approval-responded")]), {
+    type: "resubmit",
+  });
+  // A reply that failed partway asks the same request again.
+  assert.deepEqual(
+    getAgentRetryRequest([
+      request,
+      { id: "d", role: "assistant", parts: [{ type: "text", text: "I found two le" }] },
+    ]),
+    { type: "ask-again", text: "Find the lease" },
+  );
+  // A pending approval is decided on its card instead.
+  assert.equal(getAgentRetryRequest([request, pendingSend("approval-requested")]), null);
+  assert.equal(getAgentRetryRequest([]), null);
 });
 
 test("server frames are read only when they match the protocol", async () => {

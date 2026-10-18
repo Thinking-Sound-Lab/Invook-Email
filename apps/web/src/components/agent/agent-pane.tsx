@@ -8,36 +8,26 @@ import {
   PlusSignIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import type { InvookAgentUIMessage } from "@invook/contracts";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
-import { v4 as uuidv4, validate as validateUuid } from "uuid";
+import { useEffect, useState } from "react";
+import { validate as validateUuid } from "uuid";
 
 import { resolveMailboxAccountSelection } from "@/components/mail/mail-account-scope";
 import { formatMailText } from "@/components/mail/mail-format";
 import { useMailShell } from "@/components/mail/mail-shell-provider";
 import { Button } from "@/components/ui/button";
+import { useAgentConversationSelection } from "@/hooks/use-agent-conversation-selection";
 import {
   AgentSocketConnection,
   AgentSocketTransport,
 } from "@/lib/agent/agent-socket-transport";
-import { createAgentSocketTicket, getAgentConversation } from "@/lib/api/agent";
-import { apiErrorMessage } from "@/lib/http-error";
+import { createAgentSocketTicket } from "@/lib/api/agent";
 import { cn } from "@/lib/utils";
 import { useAgentPaneStore } from "@/stores/agent/store";
 import { useMailboxStore } from "@/stores/mailbox/store";
 
 import { AgentConversation } from "./agent-conversation";
 import { AgentHistory } from "./agent-history";
-
-interface OpenConversation {
-  conversationId: string;
-  initialMessages: InvookAgentUIMessage[];
-}
-
-function createNewConversation(): OpenConversation {
-  return { conversationId: uuidv4(), initialMessages: [] };
-}
 
 export function AgentPane() {
   const isPaneOpen = useAgentPaneStore((state) => state.isPaneOpen);
@@ -84,47 +74,28 @@ function AgentPaneContent() {
 
   // The open conversation stays mounted under the history list, so browsing
   // history never interrupts a running turn.
-  const [conversation, setConversation] = useState<OpenConversation>(createNewConversation);
+  const {
+    conversation,
+    loadingConversationId,
+    openError,
+    openConversation,
+    startNewConversation,
+    markConversationDeleted,
+    clearOpenError,
+  } = useAgentConversationSelection();
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [loadingConversationId, setLoadingConversationId] = useState<string | null>(null);
-  const [historyError, setHistoryError] = useState<string | null>(null);
-  const loadingConversationIdRef = useRef<string | null>(null);
 
   async function handleOpenConversation(conversationId: string): Promise<void> {
-    loadingConversationIdRef.current = conversationId;
-    setLoadingConversationId(conversationId);
-    setHistoryError(null);
-    try {
-      const { messages } = await getAgentConversation(conversationId);
-      if (loadingConversationIdRef.current !== conversationId) return;
-      setConversation({ conversationId, initialMessages: messages });
-      setIsHistoryOpen(false);
-    } catch (error: unknown) {
-      if (loadingConversationIdRef.current !== conversationId) return;
-      setHistoryError(apiErrorMessage(error, "That conversation could not be opened."));
-    } finally {
-      if (loadingConversationIdRef.current === conversationId) {
-        loadingConversationIdRef.current = null;
-        setLoadingConversationId(null);
-      }
-    }
+    if (await openConversation(conversationId)) setIsHistoryOpen(false);
   }
 
   function handleNewConversation(): void {
-    loadingConversationIdRef.current = null;
-    setLoadingConversationId(null);
-    setConversation(createNewConversation());
+    startNewConversation();
     setIsHistoryOpen(false);
   }
 
-  function handleConversationDeleted(conversationId: string): void {
-    if (conversation.conversationId === conversationId) {
-      setConversation(createNewConversation());
-    }
-  }
-
   function handleToggleHistory(): void {
-    setHistoryError(null);
+    clearOpenError();
     setIsHistoryOpen((isOpen) => !isOpen);
   }
 
@@ -196,14 +167,14 @@ function AgentPaneContent() {
               Opening conversation…
             </p>
           ) : null}
-          {historyError ? (
+          {openError ? (
             <p role="alert" className="px-4 pt-3 text-xs text-destructive">
-              {historyError}
+              {openError}
             </p>
           ) : null}
           <AgentHistory
             onSelect={(conversationId) => void handleOpenConversation(conversationId)}
-            onDeleted={handleConversationDeleted}
+            onDeleted={markConversationDeleted}
           />
         </>
       ) : null}
