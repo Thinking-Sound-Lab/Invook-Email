@@ -56,6 +56,29 @@ export function getPublicAppOrigin(): string {
   return url.origin;
 }
 
+/**
+ * Public address of the agent socket. Browsers connect to it directly because
+ * neither the web proxy nor API Gateway carries WebSocket upgrades.
+ */
+export function getAgentSocketUrl(): string | null {
+  const configuredValue = process.env.AGENT_SOCKET_URL?.trim();
+  if (!configuredValue) return null;
+
+  const url = new URL(configuredValue);
+  if (
+    !["ws:", "wss:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      "AGENT_SOCKET_URL must be a ws or wss URL without credentials, query, or fragment.",
+    );
+  }
+  return url.toString();
+}
+
 export function getApiHost(): string {
   return "0.0.0.0";
 }

@@ -2,7 +2,7 @@ import { gte, lte, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 
 import { labels, messageLabels, messages, threads } from "./schema";
 
-export const AUTOMATIC_THREAD_LABEL_WINDOW_DAYS = 14;
+const AUTOMATIC_THREAD_LABEL_WINDOW_DAYS = 14;
 
 export function automaticThreadLabelCutoff(referenceAt: Date): Date {
   return new Date(

@@ -1,4 +1,4 @@
-import { and, desc, DrizzleQueryError, eq, inArray, isNotNull, not, sql } from "drizzle-orm";
+import { and, DrizzleQueryError, eq, inArray, isNotNull, not, sql } from "drizzle-orm";
 import postgres from "postgres";
 import { v4 as uuidv4 } from "uuid";
 
@@ -27,7 +27,7 @@ import {
   messages,
   threads,
 } from "./schema";
-import type { IndexedMessage, WorkflowStepInput } from "./types";
+import type { IndexedMessage } from "./types";
 import {
   enqueueWorkflowStep,
   enqueueWorkflowStepWithExecutor,
@@ -56,8 +56,8 @@ export type GmailProviderWriteContext = {
   tokenCiphertext: string;
 };
 
-async function queryGmailProviderWriteContext(
-  input: { userId: string; accountId?: string },
+export async function getGmailProviderWriteContextForAccount(
+  input: { userId: string; accountId: string },
   database: Database = getDatabase(),
 ): Promise<GmailProviderWriteContext | null> {
   const [context] = await database
@@ -75,29 +75,13 @@ async function queryGmailProviderWriteContext(
     )
     .where(
       and(
-        input.accountId === undefined
-          ? undefined
-          : eq(connectedAccounts.id, input.accountId),
+        eq(connectedAccounts.id, input.accountId),
         eq(connectedAccounts.userId, input.userId),
         eq(connectedAccounts.status, "connected"),
       ),
     )
     .limit(1);
   return context ?? null;
-}
-
-export async function getGmailProviderWriteContext(
-  userId: string,
-  database: Database = getDatabase(),
-): Promise<GmailProviderWriteContext | null> {
-  return queryGmailProviderWriteContext({ userId }, database);
-}
-
-export async function getGmailProviderWriteContextForAccount(
-  input: { userId: string; accountId: string },
-  database: Database = getDatabase(),
-): Promise<GmailProviderWriteContext | null> {
-  return queryGmailProviderWriteContext(input, database);
 }
 
 export async function getGmailMessageMutationContext(
@@ -228,38 +212,6 @@ export async function getGmailForwardContext(
         value: separator >= 0 ? header.line.slice(separator + 1).trimStart() : "",
       };
     }),
-  };
-}
-
-export async function getGmailDraftResourceForUser(
-  input: { userId: string; gmailDraftId: string },
-  database: Database = getDatabase(),
-) {
-  const [draft] = await database
-    .select({
-      id: drafts.id,
-      accountId: drafts.accountId,
-      providerDraftId: drafts.providerDraftId,
-      providerThreadId: drafts.providerThreadId,
-    })
-    .from(drafts)
-    .innerJoin(connectedAccounts, eq(connectedAccounts.id, drafts.accountId))
-    .innerJoin(messages, eq(messages.id, drafts.messageId))
-    .where(
-      and(
-        eq(drafts.id, input.gmailDraftId),
-        eq(drafts.kind, "gmail"),
-        eq(connectedAccounts.userId, input.userId),
-        eq(connectedAccounts.status, "connected"),
-      ),
-    )
-    .limit(1);
-  if (!draft?.providerDraftId || !draft.providerThreadId) return null;
-  return {
-    id: draft.id,
-    accountId: draft.accountId,
-    providerDraftId: draft.providerDraftId,
-    providerThreadId: draft.providerThreadId,
   };
 }
 
@@ -799,44 +751,6 @@ export async function enqueueGmailHistoryCatchup(
     },
     database,
   );
-}
-
-export async function enqueueGmailHistoryCatchupForAccount(
-  input: { userId: string; accountId: string },
-  database: Database = getDatabase(),
-): Promise<
-  | { stepId: string; reason: null }
-  | { stepId: null; reason: "not_found" | "replica_not_ready" }
-> {
-  return database.transaction(async (transaction) => {
-    const [account] = await transaction
-      .select({
-        id: connectedAccounts.id,
-        state: gmailReplicaStates.state,
-      })
-      .from(connectedAccounts)
-      .innerJoin(
-        gmailReplicaStates,
-        eq(gmailReplicaStates.accountId, connectedAccounts.id),
-      )
-      .where(
-        and(
-          eq(connectedAccounts.userId, input.userId),
-          eq(connectedAccounts.id, input.accountId),
-          eq(connectedAccounts.status, "connected"),
-        ),
-      )
-      .limit(1);
-    if (!account) return { stepId: null, reason: "not_found" };
-    if (account.state !== "ready") {
-      return { stepId: null, reason: "replica_not_ready" };
-    }
-    const stepId = await enqueueGmailHistoryCatchup(
-      { userId: input.userId, accountId: account.id, reason: "manual" },
-      transaction as unknown as Database,
-    );
-    return { stepId, reason: null };
-  });
 }
 
 export async function applyGmailHistoryBatch(

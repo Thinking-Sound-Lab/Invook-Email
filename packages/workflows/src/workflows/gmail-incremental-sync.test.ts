@@ -9,7 +9,6 @@ import type { WorkflowHandle } from "@temporalio/client";
 import type {
   GmailCatchUpOutcome,
   GmailIncrementalSyncWorkflowInput,
-  GmailIncrementalSyncWorkflowResult,
 } from "../contracts/gmail-incremental-sync";
 import {
   gmailAccountDisconnectedSignal,

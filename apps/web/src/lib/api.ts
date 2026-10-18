@@ -1,5 +1,4 @@
 import type {
-  MailboxSettings,
   MailboxShell,
   MailboxSidebarCounts,
   MailboxThreadPage,
@@ -67,18 +66,6 @@ export async function getMailboxThreadPage(input: {
   if (response.status === 401 || response.status === 404) return null;
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`The mailbox thread list API returned ${response.status}.`);
-  }
-  return response.data;
-}
-
-export async function getMailboxSettings(accountId: string): Promise<MailboxSettings | null> {
-  const query = new URLSearchParams({ account: accountId });
-  const response = await apiRequest<MailboxSettings>(
-    `/v1/mailbox/settings?${query.toString()}`,
-  );
-  if (response.status === 401 || response.status === 404) return null;
-  if (response.status < 200 || response.status >= 300) {
-    throw new Error(`The mailbox settings API returned ${response.status}.`);
   }
   return response.data;
 }

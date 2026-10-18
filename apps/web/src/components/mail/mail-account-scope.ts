@@ -6,7 +6,7 @@ import type {
   MailboxSidebarCounts,
 } from "@invook/contracts";
 
-export const ALL_MAILBOX_ACCOUNTS = "all" as const;
+const ALL_MAILBOX_ACCOUNTS = "all" as const;
 
 export type MailboxAccountSelection = typeof ALL_MAILBOX_ACCOUNTS | string;
 
@@ -50,7 +50,7 @@ export function selectedSidebarCounts(
     : counts.accounts[selection] ?? null;
 }
 
-export function mailboxAccountQueryValue(
+function mailboxAccountQueryValue(
   selection: MailboxAccountSelection,
 ): string {
   return selection === ALL_MAILBOX_ACCOUNTS ? ALL_MAILBOX_ACCOUNTS : selection;

@@ -6,14 +6,11 @@ import {
   eq,
   gt,
   inArray,
-  isNotNull,
   isNull,
   not,
   or,
   sql,
 } from "drizzle-orm";
-import { validate as validateUuid } from "uuid";
-
 import type { TaskQueueLane } from "@invook/workflows";
 
 import {
@@ -23,8 +20,6 @@ import {
 } from "./client";
 import {
   connectedAccounts,
-  threadLabelBatchSubmissions,
-  historicalThreadLabelScans,
   gmailAccountCleanups,
   gmailReplicaStates,
   gmailWatchStates,

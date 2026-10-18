@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DEFAULT_LABEL_MODEL, getAiModel, isAiConfigured } from "./model";
+import {
+  DEFAULT_LABEL_MODEL,
+  getAgentModel,
+  getAiModel,
+  isAiConfigured,
+} from "./model";
 import { getThreadLabelBatchModelId } from "./thread-label-batch";
 
 function withEnvironment(
@@ -63,5 +68,32 @@ test("mailbox analysis needs only the shared OpenAI credential", () => {
   withEnvironment({ OPENAI_API_KEY: undefined, OPENAI_MODEL: undefined }, () => {
     assert.equal(isAiConfigured(), false);
     assert.throws(() => getAiModel(), /OPENAI_API_KEY is required/);
+  });
+});
+
+test("the mail agent overrides its model without changing labeling", () => {
+  withEnvironment(
+    {
+      OPENAI_API_KEY: "test-key",
+      OPENAI_MODEL: "live-override",
+      OPENAI_AGENT_MODEL: undefined,
+    },
+    () => {
+      assert.equal(getAgentModel().modelId, DEFAULT_LABEL_MODEL);
+    },
+  );
+  withEnvironment(
+    {
+      OPENAI_API_KEY: "test-key",
+      OPENAI_MODEL: undefined,
+      OPENAI_AGENT_MODEL: "agent-override",
+    },
+    () => {
+      assert.equal(getAgentModel().modelId, "agent-override");
+      assert.equal(getAiModel().modelId, DEFAULT_LABEL_MODEL);
+    },
+  );
+  withEnvironment({ OPENAI_API_KEY: undefined, OPENAI_AGENT_MODEL: undefined }, () => {
+    assert.throws(() => getAgentModel(), /OPENAI_API_KEY is required/);
   });
 });

@@ -1,3 +1,4 @@
+export * from "./agent";
 export * from "./gmail-compose";
 export * from "./mailbox-events";
 
@@ -137,21 +138,12 @@ export type SetInvookLabelEnabledResponse = InvookLabelResponse & {
   } | null;
 };
 
-export type AcceptedMailboxSyncResponse = {
-  accepted: true;
-  stepId: string;
-};
-
 export type SetGmailThreadReadStateRequest = {
   isRead: boolean;
 };
 
 export type GmailThreadReadStateResponse = {
   stepId: string;
-};
-
-export type DeletedResourceResponse = {
-  deleted: true;
 };
 
 export type SessionState =
@@ -269,34 +261,6 @@ export type MailSearchResult = {
   matches: MailSearchMatch[];
   score: number;
 };
-
-export type MailboxQueryMessage = {
-  accountId: string;
-  messageId: string;
-  threadId: string;
-  subject: string;
-  sender: { raw: string; email: string };
-  sentAt: string;
-  bodyPreview: string;
-  isInbox: boolean;
-  isUnread: boolean;
-  invookLabel: { id: string; name: string } | null;
-};
-
-export type MailboxQueryResult =
-  | {
-      status: "available";
-      messages: MailboxQueryMessage[];
-      availableInvookLabels: Array<{ accountId: string; id: string; name: string }>;
-      nextCursor: string | null;
-    }
-  | {
-      status: "unavailable";
-      reason: "mailbox_not_connected";
-      messages: [];
-      availableInvookLabels?: never;
-      nextCursor: null;
-    };
 
 export type MailboxSelectedThread = Omit<MailboxThreadSummary, "snippet"> & {
   messages: MailboxThreadMessage[];

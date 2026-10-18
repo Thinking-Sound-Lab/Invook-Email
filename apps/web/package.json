@@ -6,11 +6,12 @@
     "dev": "node ../../scripts/run-with-root-env.mjs node_modules/next/dist/bin/next dev",
     "build": "node ../../scripts/run-with-root-env.mjs node_modules/next/dist/bin/next build",
     "start": "node ../../scripts/run-with-root-env.mjs node_modules/next/dist/bin/next start",
-    "test": "node --import tsx --test src/lib/*.test.ts src/components/mail/*.test.ts src/components/mail/*.test.tsx src/components/settings/*.test.ts src/components/ui/*.test.tsx src/hooks/*.test.ts src/stores/*/*.test.ts",
+    "test": "node --import tsx --test src/lib/*.test.ts src/lib/agent/*.test.ts src/components/agent/*.test.tsx src/components/mail/*.test.ts src/components/mail/*.test.tsx src/components/settings/*.test.ts src/components/ui/*.test.tsx src/hooks/*.test.ts src/stores/*/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
   },
   "dependencies": {
+    "@ai-sdk/provider-utils": "5.0.25",
     "@ai-sdk/react": "^4.0.61",
     "@hugeicons/core-free-icons": "^4.2.3",
     "@hugeicons/react": "^1.1.9",

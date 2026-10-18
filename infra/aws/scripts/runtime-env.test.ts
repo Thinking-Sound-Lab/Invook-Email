@@ -80,6 +80,24 @@ test("release validates the deployed secret together with CloudFormation setting
   assert.throws(() => parseProductionRuntime(serializeSecrets(runtime), serializeParameters({ ...runtime, TEMPORAL_NAMESPACE: "" })), /TEMPORAL_NAMESPACE/);
 });
 
+test("release accepts a stack deployed before a defaulted setting existed", () => {
+  const runtime = createRuntime();
+  const parameterName = CONFIGURATION_PARAMETER_NAMES.OPENAI_AGENT_MODEL;
+  const parameters: unknown = JSON.parse(serializeParameters(runtime));
+  assert.ok(Array.isArray(parameters));
+  const olderStack = parameters.filter((parameter: { ParameterKey: string }) => parameter.ParameterKey !== parameterName);
+  assert.equal(olderStack.length, parameters.length - 1);
+  assert.equal(
+    parseProductionRuntime(serializeSecrets(runtime), JSON.stringify(olderStack)).OPENAI_AGENT_MODEL,
+    CONFIGURATION_DEFAULTS.OPENAI_AGENT_MODEL,
+  );
+  const duplicated = [...parameters, { ParameterKey: parameterName, ParameterValue: "another-model" }];
+  assert.throws(() => parseProductionRuntime(serializeSecrets(runtime), JSON.stringify(duplicated)), /OPENAI_AGENT_MODEL/);
+  // A setting without a default is still required on the deployed stack.
+  const withoutAppUrl = parameters.filter((parameter: { ParameterKey: string }) => parameter.ParameterKey !== CONFIGURATION_PARAMETER_NAMES.APP_URL);
+  assert.throws(() => parseProductionRuntime(serializeSecrets(runtime), JSON.stringify(withoutAppUrl)), /APP_URL/);
+});
+
 test("configuration splits values without changing generated keys and limits file permissions", () => {
   const directory = mkdtempSync(join(tmpdir(), "invook-runtime-test-"));
   try {

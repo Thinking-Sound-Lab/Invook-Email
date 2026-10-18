@@ -10,7 +10,7 @@ infra/aws/
   lib/production-stack.ts          Parameters, constructs and stack outputs
   lib/constructs/
     mail-storage.ts                Private, encrypted, retained S3 bucket
-    api-ingress.ts                 Security groups, internal ALB and streaming API Gateway
+    api-ingress.ts                 Security groups, internal ALB, streaming API Gateway and agent socket CloudFront
     runtime-configuration.ts       Ordinary runtime settings as stack parameters
     runtime-resources.ts           ECR, ECS cluster, IAM roles, secrets and logs
     mail-services.ts               API, worker and migration task definitions and services
@@ -43,7 +43,13 @@ aws sso login --profile "$AWS_PROFILE"  # When the profile uses SSO.
 ./infra/aws/scripts/deploy.sh diff
 ```
 
-`bootstrap` validates and reuses the default VPC. It creates the CDK-managed S3 bucket, image repositories, runtime secret, logs, IAM roles, ECS cluster, API Gateway, VPC link, and internal load balancer. Services are stopped until credentials and images are ready. Run bootstrap again if changing the IAM principal used for deployments.
+`bootstrap` validates and reuses the default VPC. It creates the CDK-managed S3 bucket, image repositories, runtime secret, logs, IAM roles, ECS cluster, API Gateway, VPC link, internal load balancer, and the agent socket's CloudFront distribution. Services are stopped until credentials and images are ready. Run bootstrap again if changing the IAM principal used for deployments.
+
+### Agent WebSocket
+
+The agent pane streams over a WebSocket. Neither API Gateway REST APIs nor Vercel rewrites carry WebSocket upgrades, so browsers connect through a CloudFront distribution whose [VPC origin](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html) reaches the same internal load balancer privately. CloudFront supplies HTTPS on its `*.cloudfront.net` domain, so no custom domain is needed. The distribution serves only `/v1/agent/socket`; every other path returns 404 at the edge. The load balancer accepts it through the region's `com.amazonaws.global.cloudfront.origin-facing` managed prefix list, which `deploy.sh` resolves on every stack update.
+
+The stack passes the socket address to the API as `AGENT_SOCKET_URL` and prints it as the `AgentSocketUrl` output. The browser first requests a one-minute, single-use ticket from the API through the Vercel proxy, then offers it as a WebSocket subprotocol, so no credential appears in a URL or access log. The API accepts the upgrade only from `APP_URL`. Each turn re-checks the sign-in session, so signing out ends agent access at the next message.
 
 Fargate tasks receive public IPs for outgoing connections to Supabase, Temporal Cloud and providers, avoiding NAT gateway charges. API task ingress is limited to the internal load balancer. Worker and migration tasks have no incoming ports. S3 requests use short-lived ECS IAM role credentials; no static AWS keys belong in the production env file. Infrastructure such as the ALB can incur charges while services are stopped.
 
@@ -91,6 +97,7 @@ The single env file is the setup input. Ordinary settings go into CloudFormation
 | `GMAIL_PUBSUB_TOPIC`, `GOOGLE_PUBSUB_SUBSCRIPTION` | `BETTER_AUTH_SECRET`, `TOKEN_ENCRYPTION_KEY` |
 | `GOOGLE_PUBSUB_PUSH_AUDIENCE`, `GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL` | `OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET` |
 | `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` | `TEMPORAL_API_KEY` |
+| `OPENAI_AGENT_MODEL` (defaults to `gpt-5.6-luna`) | |
 
 `configure` stops API and worker before applying settings and credentials together. It can prepare incomplete configuration; services stay stopped until `release` validates the deployed CloudFormation parameters and secret. To update a value, edit the same env file, run `configure`, then `release`. Preserve the existing auth and encryption keys when updating provider credentials. Vercel gets only the API origin; database, OAuth, Temporal and OpenAI credentials stay on AWS.
 
@@ -137,4 +144,4 @@ make verify
 docker compose -f docker/compose.yml config --quiet
 ```
 
-Before accepting production, verify `/health/ready`, Google sign-in, Gmail connection and push delivery, Temporal task execution, S3 attachments, OpenAI webhooks, and SSE updates with your real production credentials. Successful infrastructure deployment alone does not verify these integrations.
+Before accepting production, verify `/health/ready`, Google sign-in, Gmail connection and push delivery, Temporal task execution, S3 attachments, OpenAI webhooks, SSE updates, and an agent pane conversation that saves a draft and sends one approved email, with your real production credentials. Successful infrastructure deployment alone does not verify these integrations.

@@ -18,7 +18,7 @@
   <a href="./.github/CONTRIBUTING.md">Contribute</a>
 </p>
 
-Invook brings your Gmail accounts into one workspace and organizes your inbox with labels you control, classified by an LLM. Run it on your own infrastructure with your own OpenAI key.
+Invook brings your Gmail accounts into one workspace and organizes your inbox with labels you control, classified by an LLM. An agent beside your mail drafts replies and new email, and finds messages and attachments for you. Run it on your own infrastructure with your own OpenAI key.
 
 > [!NOTE]
 > Invook is in early development, with no stable release yet. The current setup uses Google OAuth, Gmail Pub/Sub, and Temporal Cloud; Docker provides the local applications, PostgreSQL, and MinIO.
@@ -44,6 +44,12 @@ Invook brings your Gmail accounts into one workspace and organizes your inbox wi
     <td valign="top">
       <h3>Stay connected to Gmail</h3>
       Read, star, archive, and manage drafts with Gmail as the source of truth. Browse stored mail while the rest of your mailbox synchronizes.
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <h3>An agent beside your mail</h3>
+      Open the Agent pane to reply to the email you are reading, write new email, or find mail and attachments. Drafts land in Gmail for you to review. The agent never sends without your approval of the exact email, and conversations are saved so you can return to them.
     </td>
   </tr>
 </table>
@@ -72,9 +78,9 @@ Use the settings documented in [`.env.example`](./.env.example) to fill in `.env
 | --- | --- |
 | Google OAuth + Gmail Pub/Sub | Sign-in, mailbox access, and ongoing synchronization |
 | Temporal Cloud | Durable sync and background work; no local Temporal server is bundled |
-| AI provider | One OpenAI key for both live thread classification and the historical label Batch |
+| AI provider | One OpenAI key for live thread classification, the historical label Batch, and the mail agent |
 
-Generate `BETTER_AUTH_SECRET` and `TOKEN_ENCRYPTION_KEY` independently with `openssl rand -base64 32`. Gmail Pub/Sub and Batch webhooks require public HTTPS endpoints. Local database and object-storage defaults are already in `.env.example`.
+Generate `BETTER_AUTH_SECRET` and `TOKEN_ENCRYPTION_KEY` independently with `openssl rand -base64 32`. The agent pane connects to the API's WebSocket at `AGENT_SOCKET_URL`; Docker Compose sets it to the published API port. Gmail Pub/Sub and Batch webhooks require public HTTPS endpoints. Local database and object-storage defaults are already in `.env.example`.
 
 ### 3. Start Invook
 
@@ -102,7 +108,7 @@ Disconnect removes only that user's connection and local data. Watch operations 
 
 Automatic labeling considers Inbox threads with an Inbox message from the last 14 days and uses individual model calls, including during initial sync. Older mail still syncs, but does not start automatic labeling. OpenAI Batch is used for labels only when you explicitly choose to apply a label to past mail in Settings (7, 30, or 90 days); that request considers only the selected label and preserves nonmatches. Gmail categories, custom labels, and Gmail Important are not imported as Invook labels. Operational Gmail state such as read, star, Inbox, and draft status remains synchronized.
 
-Mailbox data lives in your configured PostgreSQL database; attachment bytes live in S3-compatible storage. AI features send the mail context they need to the providers you configure. Self-hosting does not mean every operation stays on your machine.
+Mailbox data lives in your configured PostgreSQL database; attachment bytes live in S3-compatible storage. Agent conversations are stored in PostgreSQL with your Invook profile, including the email text the agent read or searched while answering and the drafts and email it proposed. They are not tied to one Gmail account, so disconnecting an account does not remove them, and continuing an old conversation sends that stored text to OpenAI again. Delete a conversation from the Agent pane's history to remove it and every copy it holds. AI features send the mail context they need to the providers you configure: the agent sends the open email, and the mail it searches or reads, to OpenAI. Self-hosting does not mean every operation stays on your machine.
 
 Sign-in sessions live in PostgreSQL. The browser also holds a signed copy that the API trusts for five minutes, so most requests skip the session lookup. Signing out clears that copy immediately; a session deleted directly in the database can keep working for up to five minutes.
 
@@ -113,6 +119,8 @@ Sender-hosted images currently load directly from their original URLs. Opening a
 When upgrading across the label-policy migration, stop API and worker processes before migrating, then restart them together with the updated web build. The migration retires automatic label jobs, preserves completed assignments and pending explicit settings requests, and removes imported Gmail label metadata. The worker resumes eligible recent labeling and saved settings requests after startup.
 
 Shared-mailbox support adds migration `0038_shared_gmail_connections` after label-policy migrations 0036/0037. Apply them in order with API and workers stopped, then deploy the updated API, worker, and web together. Do not run the older single-recipient push or unconditional watch-stop implementation after enabling multi-user connections. Migration 0038 preserves existing IDs and data while changing provider-identity uniqueness to `(user_id, provider, provider_account_id)`.
+
+Migration `0041_agent_conversations` adds agent conversation history and single-use socket tickets. It only creates tables, and the API needs `OPENAI_API_KEY` and `AGENT_SOCKET_URL` for the agent pane; without them the pane reports that the agent is not configured.
 
 Migration `0040` narrows Invook to labelling. It permanently drops the Memory tables, the AI reply-draft columns, and every locally generated Invook draft, and it removes the `AI_*`, `MEMORY_BATCH_PROVIDER`, and `AZURE_OPENAI_*` environment variables in favour of a single `OPENAI_*` group. There is no down migration; take a backup first if the database holds anything you want to keep. Stop the API and worker, migrate, then deploy all three processes together. In-flight Memory work is retired rather than deleted: its workflow steps are marked failed so a Workflow that Temporal already started finishes through the inactive path instead of retrying an Activity whose handler is gone, and its undispatched Temporal commands are removed so none are admitted after the upgrade.
 

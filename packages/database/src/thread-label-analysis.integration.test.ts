@@ -42,7 +42,7 @@ import {
   setUserThreadLabel,
 } from "./thread-label-analysis";
 import { automaticThreadLabelCutoff } from "./thread-label-eligibility";
-import { failWorkflowStep, markWorkflowStepRunning } from "./workflows";
+import { markWorkflowStepRunning } from "./workflows";
 import * as schema from "./schema";
 import {
   connectedAccounts,
@@ -623,8 +623,8 @@ test(
         database,
       );
       assert.deepEqual(recovery, {
-        enqueuedCount: 0,
-        continuationStepId: null,
+        reservedThreadCount: 0,
+        nextCursorThreadId: null,
       });
       const detail = await getMailboxThreadDetail(
         userId,
@@ -895,24 +895,38 @@ test(
         { sentAt: new Date(referenceAt.getTime() - 100 * DAY_MS) },
       ]);
       const request = await createHistoricalRequest(context);
+      const scanStatus = async () =>
+        (
+          await context.database
+            .select({ status: historicalThreadLabelScans.status })
+            .from(historicalThreadLabelScans)
+            .where(eq(historicalThreadLabelScans.id, request.scan.id))
+        )[0]?.status;
+      // Another user's identity finds no scan to claim, and cannot end the
+      // owner's scan by trying.
       await withContext(async (other) => {
-        assert.equal(
-          (
-            await claimThreadLabelBatchSubmission(
-              {
-                historicalScanId: request.scan.id,
-                userId: other.userId,
-                accountId: other.accountId,
-                modelId: "test",
-                retryAttempt: 0,
-              },
-              other.database,
-            )
-          ).status,
-          null,
+        assert.deepEqual(
+          await claimThreadLabelBatchSubmission(
+            {
+              historicalScanId: request.scan.id,
+              userId: other.userId,
+              accountId: other.accountId,
+              modelId: "test",
+              retryAttempt: 0,
+            },
+            other.database,
+          ),
+          { status: "superseded" },
         );
       });
-      assert.equal(await claimBatch(context, request.scan.id, openingScope), null);
+      assert.equal(await scanStatus(), request.scan.status);
+      // None of the owner's threads is eligible, so the first page is empty
+      // and the scan completes without submitting a Batch.
+      assert.deepEqual(await claim(context, request.scan.id, openingScope), {
+        status: "skipped",
+        nextScope: null,
+      });
+      assert.equal(await scanStatus(), "complete");
     });
   },
 );
@@ -1025,7 +1039,7 @@ for (const action of ["edit", "disable"] as const) {
           {
             alreadyFinalized: false,
             appliedCount: 0,
-            continuationStepId: null,
+            nextScope: null,
           },
         );
         const [scan] = await context.database

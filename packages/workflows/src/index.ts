@@ -8,7 +8,6 @@ export type {
   WorkflowStepResult,
 } from "./contracts/workflow-step";
 export {
-  gmailSyncPagesPerExecution,
   gmailSyncThreadBatchSize,
   type GmailSyncActivities,
   type GmailSyncFinalizeInput,
@@ -21,8 +20,6 @@ export {
   type GmailSyncWorkflowResult,
 } from "./contracts/gmail-sync";
 export {
-  gmailIncrementalSyncCatchUpsPerExecution,
-  gmailIncrementalSyncIdleTimeout,
   type GmailCatchUpInput,
   type GmailCatchUpOutcome,
   type GmailIncrementalSyncActivities,
@@ -33,7 +30,6 @@ export {
 } from "./contracts/gmail-incremental-sync";
 export { workflowStepWorkflow } from "./workflows/workflow-step";
 export {
-  threadLabelScanPagesPerExecution,
   type ThreadLabelScanActivities,
   type ThreadLabelScanPageInput,
   type ThreadLabelScanPageOutcome,
@@ -45,8 +41,6 @@ export {
   threadLabelScanWorkflow,
 } from "./workflows/thread-label-scan";
 export {
-  historicalLabelScanBatchesPerExecution,
-  historicalLabelScanCompletionTimeout,
   historicalLabelScanRetryLimit,
   type FailHistoricalLabelScanInput,
   type FinalizeHistoricalLabelBatchInput,
@@ -65,9 +59,7 @@ export {
   historicalLabelScanWorkflow,
 } from "./workflows/historical-label-scan";
 export {
-  gmailAccountDisconnectedSignal,
   gmailCatchUpSignal,
-  gmailIncrementalSyncStateQuery,
   gmailIncrementalSyncWorkflow,
 } from "./workflows/gmail-incremental-sync";
 export { gmailSyncWorkflow } from "./workflows/gmail-sync";

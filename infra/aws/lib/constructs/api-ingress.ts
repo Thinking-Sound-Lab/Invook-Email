@@ -2,14 +2,22 @@ import { createHash } from "node:crypto";
 
 import {
   Fn, Stack, aws_apigateway as apigateway, aws_apigatewayv2 as apigatewayv2,
-  aws_ec2 as ec2, aws_elasticloadbalancingv2 as elbv2,
+  aws_cloudfront as cloudfront, aws_ec2 as ec2, aws_elasticloadbalancingv2 as elbv2,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
 
 export interface ApiIngressProps {
   vpcId: string;
   subnetIds: string[];
+  /** Regional ID of `com.amazonaws.global.cloudfront.origin-facing`. */
+  cloudFrontOriginFacingPrefixListId: string;
 }
+
+const AGENT_SOCKET_PATH = "/v1/agent/socket";
+// AWS managed CloudFront policies: CachingDisabled and AllViewer. WebSocket
+// upgrades need the viewer's Sec-WebSocket headers and its Origin forwarded.
+const CACHING_DISABLED_POLICY_ID = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
+const ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID = "216adef6-5c7f-47e4-b989-5492eafa07d3";
 
 export class ApiIngress extends Construct {
   readonly apiSecurityGroup: ec2.CfnSecurityGroup;
@@ -17,6 +25,7 @@ export class ApiIngress extends Construct {
   readonly targetGroup: elbv2.CfnTargetGroup;
   readonly listener: elbv2.CfnListener;
   readonly apiUrl: string;
+  readonly agentSocketUrl: string;
 
   constructor(scope: Construct, constructId: string, props: ApiIngressProps) {
     super(scope, constructId);
@@ -31,6 +40,12 @@ export class ApiIngress extends Construct {
       vpcId: props.vpcId,
       securityGroupIngress: [{
         ipProtocol: "tcp", fromPort: 80, toPort: 80, sourceSecurityGroupId: vpcLinkSecurityGroup.ref,
+      }, {
+        // CloudFront VPC origin traffic for the agent socket. The managed prefix
+        // list counts as about 55 rules toward the group's 60-rule quota.
+        ipProtocol: "tcp", fromPort: 80, toPort: 80,
+        sourcePrefixListId: props.cloudFrontOriginFacingPrefixListId,
+        description: "CloudFront VPC origin for the agent WebSocket",
       }],
       securityGroupEgress: [{ ipProtocol: "tcp", fromPort: 4000, toPort: 4000, cidrIp: "0.0.0.0/0" }],
     });
@@ -113,5 +128,47 @@ export class ApiIngress extends Construct {
     });
     stage.overrideLogicalId("ApiStage");
     this.apiUrl = Fn.sub("https://${RestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/prod");
+
+    // API Gateway REST APIs and Vercel rewrites do not carry WebSocket upgrades,
+    // so browsers reach the agent socket through CloudFront, which reaches the
+    // internal load balancer privately and provides HTTPS without a custom domain.
+    const vpcOrigin = new cloudfront.CfnVpcOrigin(this, "AgentSocketVpcOrigin", {
+      vpcOriginEndpointConfig: {
+        name: Fn.sub("${AWS::StackName}-agent-socket"), arn: loadBalancer.ref,
+        httpPort: 80, httpsPort: 443, originProtocolPolicy: "http-only",
+      },
+    });
+    vpcOrigin.overrideLogicalId("AgentSocketVpcOrigin");
+    vpcOrigin.addResourceDependency(this.listener);
+    const notFound = new cloudfront.CfnFunction(this, "AgentSocketNotFound", {
+      name: Fn.sub("${AWS::StackName}-agent-socket-only"), autoPublish: true,
+      functionConfig: { comment: "Serves only the agent socket path.", runtime: "cloudfront-js-2.0" },
+      functionCode: "function handler() { return { statusCode: 404, statusDescription: 'Not Found' }; }",
+    });
+    notFound.overrideLogicalId("AgentSocketNotFound");
+    const originId = "agent-socket-load-balancer";
+    const distribution = new cloudfront.CfnDistribution(this, "AgentSocketDistribution", {
+      distributionConfig: {
+        enabled: true, comment: Fn.sub("${AWS::StackName} agent WebSocket"),
+        // CloudFront carries WebSockets over HTTP/1.1 only.
+        httpVersion: "http1.1",
+        origins: [{
+          id: originId, domainName: loadBalancer.attrDnsName,
+          vpcOriginConfig: { vpcOriginId: vpcOrigin.attrId },
+        }],
+        defaultCacheBehavior: {
+          targetOriginId: originId, viewerProtocolPolicy: "https-only",
+          allowedMethods: ["GET", "HEAD"], cachePolicyId: CACHING_DISABLED_POLICY_ID,
+          functionAssociations: [{ eventType: "viewer-request", functionArn: notFound.attrFunctionArn }],
+        },
+        cacheBehaviors: [{
+          pathPattern: AGENT_SOCKET_PATH, targetOriginId: originId, viewerProtocolPolicy: "https-only",
+          allowedMethods: ["GET", "HEAD"], cachePolicyId: CACHING_DISABLED_POLICY_ID,
+          originRequestPolicyId: ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID,
+        }],
+      },
+    });
+    distribution.overrideLogicalId("AgentSocketDistribution");
+    this.agentSocketUrl = Fn.join("", ["wss://", distribution.attrDomainName, AGENT_SOCKET_PATH]);
   }
 }

@@ -2,6 +2,8 @@ import type { InvookAuth } from "./auth";
 
 export interface InvookSession {
   userId: string;
+  /** The stored Better Auth session, so long-lived connections can re-check it. */
+  sessionId: string;
   user: {
     email: string;
     image: string | null;
@@ -33,6 +35,7 @@ export async function getInvookSession(
   return {
     session: {
       userId: result.user.id,
+      sessionId: result.session.id,
       user: {
         email: result.user.email,
         image: result.user.image ?? null,

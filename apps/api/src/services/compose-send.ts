@@ -29,11 +29,23 @@ export class GmailDraftSendPendingError extends Error {
   }
 }
 
+export class GmailDraftChangedError extends Error {
+  constructor() {
+    super("The Gmail draft changed after its content was approved.");
+    this.name = "GmailDraftChangedError";
+  }
+}
+
 export interface SendComposeDraftInput {
   userId: string;
   access: GmailProviderAccess;
   idempotencyKey: string;
   providerDraftId: string;
+  /**
+   * The draft message the caller approved. Gmail sends a draft by ID, so a
+   * draft edited after approval is refused instead of sent.
+   */
+  expectedProviderMessageId?: string;
 }
 
 export interface ComposeSendDependencies {
@@ -200,6 +212,17 @@ async function prepareAndSend(
   const target = draftTarget(draft);
   if (target.providerDraftId !== input.providerDraftId) {
     throw new Error("Gmail returned a different draft than the requested send target.");
+  }
+  if (
+    input.expectedProviderMessageId &&
+    target.providerMessageId !== input.expectedProviderMessageId
+  ) {
+    const wasAbandoned = await dependencies.abandonUnpreparedSend({
+      operationId,
+      userId: input.userId,
+    });
+    if (!wasAbandoned) throw new GmailDraftSendPendingError();
+    throw new GmailDraftChangedError();
   }
   await dependencies.prepareSend({
     operationId,

@@ -19,7 +19,6 @@ import {
   getGmailMessageMutationContext,
   getGmailForwardContext,
   getGmailReplyContext,
-  getGmailProviderWriteContext,
   getGmailProviderWriteContextForAccount,
   getGmailThreadMutationContext,
 } from "./replica";
@@ -247,10 +246,8 @@ test(
         accountId,
         threadId,
         messageId,
-        gmailLabelId,
         invookLabelId,
       } = fixture;
-      const missingThreadId = uuidv4();
 
       const [shell, threadPage, threadDetail, sidebarCounts] = await Promise.all([
         getMailboxShellData(userId, database),
@@ -306,7 +303,7 @@ test(
 );
 
 test(
-  "All and Invook label views count every stored thread in the selected account",
+  "All and Invook label views keep archived threads out of the list and its counts",
   { skip: !testDatabaseUrl },
   async () => {
     await withPartialReplicaFixture(async (fixture) => {
@@ -355,26 +352,32 @@ test(
         definitionVersion: 1,
       });
 
-      const [allThreads, labelThreads, sidebarCounts] = await Promise.all([
-        listMailboxThreads(userId, { accountId, view: "all" }, database),
-        listMailboxThreads(
-          userId,
-          { accountId, view: `label:${invookLabelId}` },
-          database,
-        ),
-        getMailboxSidebarCounts(userId, database),
-      ]);
+      const [allThreads, labelThreads, sidebarCounts, archivedDetail] =
+        await Promise.all([
+          listMailboxThreads(userId, { accountId, view: "all" }, database),
+          listMailboxThreads(
+            userId,
+            { accountId, view: `label:${invookLabelId}` },
+            database,
+          ),
+          getMailboxSidebarCounts(userId, database),
+          getMailboxThreadDetail(userId, archivedThreadId, accountId, database),
+        ]);
 
+      // All and the Invook labels describe the inbox, and their counts share
+      // that scope, so an archived thread leaves the list and the count together.
       assert.deepEqual(
-        allThreads?.threads.map((thread) => thread.id).sort(),
-        [threadId, archivedThreadId].sort(),
+        allThreads?.threads.map((thread) => thread.id),
+        [threadId],
       );
       assert.deepEqual(
-        labelThreads?.threads.map((thread) => thread.id).sort(),
-        [threadId, archivedThreadId].sort(),
+        labelThreads?.threads.map((thread) => thread.id),
+        [threadId],
       );
-      assert.equal(sidebarCounts?.accounts[accountId]?.views.all, 2);
-      assert.equal(sidebarCounts?.accounts[accountId]?.labels[invookLabelId], 2);
+      assert.equal(sidebarCounts?.accounts[accountId]?.views.all, 1);
+      assert.equal(sidebarCounts?.accounts[accountId]?.labels[invookLabelId], 1);
+      // The archived conversation still opens from search or a direct link.
+      assert.equal(archivedDetail?.thread.id, archivedThreadId);
     });
   },
 );
@@ -569,9 +572,6 @@ test(
         threadId,
         messageId,
       } = fixture;
-
-      const defaultAccess = await getGmailProviderWriteContext(userId, database);
-      assert.equal(defaultAccess?.accountId, accountId);
 
       const access = await getGmailProviderWriteContextForAccount(
         { userId, accountId },

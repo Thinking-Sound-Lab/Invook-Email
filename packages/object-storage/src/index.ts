@@ -36,7 +36,7 @@ function requireValue(name: string, value: string | undefined): string {
   return normalized;
 }
 
-export function getObjectStorageConfiguration(): ObjectStorageConfiguration {
+function getObjectStorageConfiguration(): ObjectStorageConfiguration {
   return {
     endpoint: requireValue("S3_ENDPOINT", process.env.S3_ENDPOINT).replace(/\/$/, ""),
     region: requireValue("S3_REGION", process.env.S3_REGION),

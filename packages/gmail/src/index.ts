@@ -1,6 +1,5 @@
 export {
   createGmailDraft,
-  deleteGmailDraft,
   getGmailDraft,
   getGmailAttachment,
   getGmailMessage,
@@ -13,7 +12,6 @@ export {
   isGoogleReauthenticationRequired,
   listGmailDrafts,
   listGmailHistory,
-  listGmailMessages,
   listGmailThreads,
   modifyGmailMessageLabels,
   modifyGmailThreadLabels,
@@ -22,7 +20,6 @@ export {
   startGmailWatch,
   stopGmailWatch,
   trashGmailMessage,
-  untrashGmailMessage,
   updateGmailDraft,
   type GmailDraft,
   type GmailDraftPage,
@@ -31,7 +28,6 @@ export {
   type GmailHistoryChange,
   type GmailHistoryPage,
   type GmailHistoryRecord,
-  type GmailMessagePage,
   type GmailMessagePart,
   type GmailMessagePartBody,
   type GmailMessageReference,
@@ -45,23 +41,20 @@ export {
   type GmailWatchResponse,
 } from "./client";
 export {
-  filterGmailSystemLabelIds,
-  GMAIL_SYSTEM_LABEL_IDS,
   gmailSystemLabels,
-  isGmailSystemLabelId,
   type GmailSystemLabel,
   type GmailSystemLabelId,
 } from "./system-labels";
 export {
   composePlainTextGmailMessage,
   composePlainTextGmailReply,
+  formatGmailReplySubject,
 } from "./draft";
 export {
   extractEmailAddress,
   GMAIL_MESSAGE_FUTURE_TOLERANCE_MS,
   normalizeGmailFullMessage,
   parseGmailMessage,
-  resolveGmailMessageDate,
   type ParsedGmailAttachment,
   type ParsedGmailHeader,
   type ParsedGmailMessage,
@@ -74,4 +67,3 @@ export {
   type GoogleAuthorizationResult,
   type VerifiedGoogleIdTokenClaims,
 } from "./oauth";
-export { GMAIL_SCOPE_DESCRIPTION, GMAIL_SCOPES } from "./scopes";

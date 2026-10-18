@@ -3,10 +3,7 @@ import test from "node:test";
 
 import { encryptGoogleCredential } from "@invook/database";
 
-import {
-  getGmailProviderAccess,
-  getGmailProviderAccessForAccount,
-} from "./gmail-provider";
+import { getGmailProviderAccessForAccount } from "./gmail-provider";
 
 const userId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
@@ -16,7 +13,7 @@ test("a connected Gmail credential is usable without a replica-readiness gate", 
   const encryptionKey = Buffer.alloc(32, 9).toString("base64");
   process.env.TOKEN_ENCRYPTION_KEY = encryptionKey;
   try {
-    const result = await getGmailProviderAccess(userId, {
+    const result = await getGmailProviderAccessForAccount({ userId, accountId }, {
       getWriteContext: async () => ({
         userId,
         accountId,
@@ -51,7 +48,7 @@ test("a connected Gmail credential is usable without a replica-readiness gate", 
 });
 
 test("Gmail provider access remains unavailable without an owned connected context", async () => {
-  const result = await getGmailProviderAccess(userId, {
+  const result = await getGmailProviderAccessForAccount({ userId, accountId }, {
     getWriteContext: async () => null,
   });
 

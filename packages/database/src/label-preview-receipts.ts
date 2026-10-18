@@ -11,7 +11,6 @@ import {
   lte,
   not,
   or,
-  sql,
 } from "drizzle-orm";
 import { validate as validateUuid } from "uuid";
 

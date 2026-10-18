@@ -5,7 +5,6 @@ import axios, { type AxiosRequestConfig } from "axios";
 
 import {
   GmailApiError,
-  GMAIL_MESSAGE_LIST_MAX_RESULTS,
   GMAIL_THREAD_LIST_MAX_RESULTS,
   getGmailAttachment,
   getGmailDraft,
@@ -15,7 +14,6 @@ import {
   gmailHistoryChanges,
   isGoogleReauthenticationRequired,
   listGmailDrafts,
-  listGmailMessages,
   listGmailThreads,
   modifyGmailMessageLabels,
   modifyGmailThreadLabels,
@@ -40,20 +38,6 @@ beforeEach(() => {
 
 after(() => {
   axios.request = originalAxiosRequest;
-});
-
-test("complete Gmail message pages use the provider maximum with Spam and Trash", async () => {
-  await listGmailMessages("access-token", { pageToken: "next-page" });
-
-  assert.equal(GMAIL_MESSAGE_LIST_MAX_RESULTS, 500);
-  const request = requests[0];
-  assert.ok(request);
-  const url = new URL(request.url ?? "", request.baseURL);
-  assert.equal(request.baseURL, "https://gmail.googleapis.com/gmail/v1");
-  assert.equal(url.pathname, "/users/me/messages");
-  assert.equal(url.searchParams.get("includeSpamTrash"), "true");
-  assert.equal(url.searchParams.get("maxResults"), "500");
-  assert.equal(url.searchParams.get("pageToken"), "next-page");
 });
 
 test("incremental Gmail messages are fetched as parsed full payloads", async () => {

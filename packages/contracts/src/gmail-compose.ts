@@ -1,4 +1,4 @@
-export const GMAIL_COMPOSE_MAX_RECIPIENTS = 50;
+const GMAIL_COMPOSE_MAX_RECIPIENTS = 50;
 export const GMAIL_COMPOSE_MAX_SUBJECT_LENGTH = 998;
 export const GMAIL_COMPOSE_MAX_BODY_LENGTH = 10_000;
 
@@ -29,8 +29,6 @@ export type CreateGmailComposeDraftRequest = GmailComposeDraftFields &
     idempotencyKey: string;
   };
 
-export type UpdateGmailComposeDraftRequest = CreateGmailComposeDraftRequest;
-
 export type SendGmailComposeDraftRequest = {
   accountId: string;
   idempotencyKey: string;
@@ -55,6 +53,11 @@ export type GmailComposeSentMessage = {
 export type GmailComposeSendResponse = {
   message: GmailComposeSentMessage;
   stepId: string;
+};
+
+/** The original message exactly as a forward of it appends it to the body. */
+export type GmailForwardedTextResponse = {
+  text: string;
 };
 
 const EMAIL_ADDRESS_PATTERN =

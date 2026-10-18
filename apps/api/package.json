@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
+    "@fastify/websocket": "^11.3.4",
     "@invook/ai": "workspace:*",
     "@invook/auth": "workspace:*",
     "@invook/contracts": "workspace:*",
@@ -30,7 +31,9 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/sanitize-html": "^2.16.1",
+    "@types/ws": "^8.18.2",
     "tsx": "^4.20.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "ws": "^8.21.3"
   }
 }

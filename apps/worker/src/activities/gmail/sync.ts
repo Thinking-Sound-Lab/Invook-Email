@@ -52,7 +52,6 @@ import type {
 } from "@invook/workflows";
 
 import { gmailContentConcurrency } from "./concurrency";
-import { classifyGmailWorkflowFailure } from "./workflow-failure";
 import {
   GmailConnectionInactiveError,
   runGmailConnectionCleanup,

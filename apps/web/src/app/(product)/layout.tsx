@@ -1,7 +1,5 @@
 import type { Metadata } from "next";
 
-import { TooltipProvider } from "@/components/ui/tooltip";
-
 import { jakarta } from "../fonts";
 import "../globals.css";
 
@@ -14,7 +12,7 @@ export default function ProductLayout({ children }: Readonly<{ children: React.R
   return (
     <html lang="en" className={`dark ${jakarta.className}`}>
       <body>
-        <TooltipProvider>{children}</TooltipProvider>
+        {children}
       </body>
     </html>
   );

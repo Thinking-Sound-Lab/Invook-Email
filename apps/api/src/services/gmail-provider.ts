@@ -1,7 +1,6 @@
 import {
   decryptGoogleCredential,
   encryptGoogleCredential,
-  getGmailProviderWriteContext,
   getGmailProviderWriteContextForAccount,
   markGmailAccountReconnectRequired,
   updateStoredCredential,
@@ -37,10 +36,6 @@ export type GmailProviderAccessResult =
   | { status: "not_found"; access: null }
   | { status: "ready"; access: GmailProviderAccess };
 
-export interface GmailProviderAccessDependencies {
-  getWriteContext: typeof getGmailProviderWriteContext;
-}
-
 export interface GmailProviderAccessForAccountDependencies {
   getWriteContext: typeof getGmailProviderWriteContextForAccount;
 }
@@ -49,10 +44,6 @@ export interface GetGmailProviderAccessForAccountInput {
   accountId: string;
   userId: string;
 }
-
-const defaultDependencies: GmailProviderAccessDependencies = {
-  getWriteContext: getGmailProviderWriteContext,
-};
 
 const defaultForAccountDependencies: GmailProviderAccessForAccountDependencies = {
   getWriteContext: getGmailProviderWriteContextForAccount,
@@ -105,7 +96,7 @@ async function refreshCredentialIfRequired(
 }
 
 async function resolveGmailProviderAccess(
-  context: Awaited<ReturnType<typeof getGmailProviderWriteContext>>,
+  context: Awaited<ReturnType<typeof getGmailProviderWriteContextForAccount>>,
 ): Promise<GmailProviderAccessResult> {
   if (!context) return { status: "not_found", access: null };
 
@@ -131,15 +122,6 @@ async function resolveGmailProviderAccess(
       email: context.email,
     },
   };
-}
-
-export async function getGmailProviderAccess(
-  userId: string,
-  dependencies: GmailProviderAccessDependencies = defaultDependencies,
-): Promise<GmailProviderAccessResult> {
-  return resolveGmailProviderAccess(
-    await dependencies.getWriteContext(userId),
-  );
 }
 
 export async function getGmailProviderAccessForAccount(

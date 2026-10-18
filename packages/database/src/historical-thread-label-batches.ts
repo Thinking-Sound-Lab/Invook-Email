@@ -16,7 +16,6 @@ import {
   threadLabelAssignments,
   threadLabelBatchSubmissions,
   threads,
-  workflowSteps,
 } from "./schema";
 import {
   listInboxThreadMessages,

@@ -160,7 +160,7 @@ function receivedHeaderDate(
   return null;
 }
 
-export function resolveGmailMessageDate(input: {
+function resolveGmailMessageDate(input: {
   internalDate?: string | null;
   headerDate?: Date;
   headers: ParsedGmailHeader[];

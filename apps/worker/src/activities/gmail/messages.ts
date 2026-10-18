@@ -17,16 +17,6 @@ import {
 
 import { objectStorage } from "../configuration";
 
-export function normalizedEmails(values: string[], ownerEmail: string): string[] {
-  return Array.from(
-    new Set(
-      values
-        .map(extractEmailAddress)
-        .filter((email) => email.includes("@") && email !== ownerEmail.toLowerCase()),
-    ),
-  );
-}
-
 export async function prepareMessage(options: {
   userId: string;
   accountId: string;
