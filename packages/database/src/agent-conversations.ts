@@ -284,6 +284,27 @@ export async function getAgentConversation(
   };
 }
 
+/**
+ * Deletes a conversation and, by cascade, every stored message, including
+ * the mail content its tool results copied. A turn still running on it loses
+ * its lease and stops before its next Gmail write.
+ */
+export async function deleteAgentConversation(
+  input: { userId: string; conversationId: string },
+  database: Database = getDatabase(),
+): Promise<boolean> {
+  const deleted = await database
+    .delete(agentConversations)
+    .where(
+      and(
+        eq(agentConversations.id, input.conversationId),
+        eq(agentConversations.userId, input.userId),
+      ),
+    )
+    .returning({ id: agentConversations.id });
+  return deleted.length > 0;
+}
+
 /** Stores a ticket by hash; the raw value exists only in the issuing response. */
 export async function createAgentSocketTicket(
   input: {

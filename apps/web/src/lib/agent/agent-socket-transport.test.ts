@@ -219,10 +219,10 @@ test("a rejected turn and a closed socket surface plain errors", async () => {
   assert.notDeepEqual(sockets[0]?.protocols, sockets[1]?.protocols);
 });
 
-test("stopping a turn tells the server and frees the conversation", async () => {
+test("stopping a turn tells the server, settles its stream, and frees the conversation", async () => {
   const { connection, sockets } = harness();
   const controller = new AbortController();
-  await connection.startTurn(messageFrame, controller.signal);
+  const stream = await connection.startTurn(messageFrame, controller.signal);
   await assert.rejects(
     connection.startTurn(messageFrame, undefined),
     /still working on this conversation/,
@@ -231,7 +231,23 @@ test("stopping a turn tells the server and frees the conversation", async () => 
   controller.abort();
 
   assert.deepEqual(sockets[0]?.sent.at(-1), { type: "stop", conversationId });
+  assert.deepEqual(await readAll(stream), []);
+  // A late frame for the stopped turn is ignored rather than misrouted.
+  sockets[0]?.receive({ type: "end", conversationId });
   await connection.startTurn(messageFrame, undefined);
+});
+
+test("a stop pressed while the socket opens never reaches the server", async () => {
+  const { connection, sockets } = harness();
+  const controller = new AbortController();
+
+  const started = connection.startTurn(messageFrame, controller.signal);
+  controller.abort();
+
+  await assert.rejects(started, (error: unknown) =>
+    error instanceof Error && error.name === "AbortError",
+  );
+  assert.deepEqual(sockets[0]?.sent ?? [], []);
 });
 
 test("an unreadable frame fails the turn instead of showing partial data", async () => {

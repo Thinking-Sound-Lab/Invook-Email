@@ -137,6 +137,13 @@ export interface AgentSocketConnectionDependencies {
 
 const SOCKET_OPEN = 1;
 
+function throwIfStopped(abortSignal: AbortSignal | undefined): void {
+  // The chat treats an AbortError as a stop rather than a failure.
+  if (abortSignal?.aborted) {
+    throw new DOMException("The agent request was stopped.", "AbortError");
+  }
+}
+
 /**
  * One browser connection to the agent socket, opened on demand with a fresh
  * one-time ticket. Connections close when idle or when the server restarts, so
@@ -163,20 +170,36 @@ export class AgentSocketConnection {
     if (this.turns.has(conversationId)) {
       throw new AgentTurnError(rejectionMessages.busy);
     }
+    throwIfStopped(abortSignal);
     const socket = await this.open();
+    // A stop pressed while the socket was opening means the request never
+    // reaches the server, so it cannot save a draft or send an email.
+    throwIfStopped(abortSignal);
+    if (this.turns.has(conversationId)) {
+      throw new AgentTurnError(rejectionMessages.busy);
+    }
+    let turn: ReadableStreamDefaultController<InvookAgentUIMessageChunk> | null =
+      null;
     const stream = new ReadableStream<InvookAgentUIMessageChunk>({
       start: (controller) => {
+        turn = controller;
         this.turns.set(conversationId, controller);
       },
       cancel: () => {
-        this.turns.delete(conversationId);
+        if (this.turns.get(conversationId) === turn) {
+          this.turns.delete(conversationId);
+        }
       },
     });
     abortSignal?.addEventListener(
       "abort",
       () => {
+        if (!turn || this.turns.get(conversationId) !== turn) return;
         this.turns.delete(conversationId);
         this.sendFrame({ type: "stop", conversationId });
+        // Settle the stream the chat stopped reading; later frames for this
+        // turn find no stream and are ignored.
+        turn.close();
       },
       { once: true },
     );

@@ -55,6 +55,11 @@ export type GmailComposeSendResponse = {
   stepId: string;
 };
 
+/** The original message exactly as a forward of it appends it to the body. */
+export type GmailForwardedTextResponse = {
+  text: string;
+};
+
 const EMAIL_ADDRESS_PATTERN =
   /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+$/;
 const HEADER_CONTROL_PATTERN = /[\u0000-\u001f\u007f]/;

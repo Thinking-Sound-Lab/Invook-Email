@@ -859,6 +859,27 @@ test("account sync progress events require an authenticated session", async () =
   assert.equal(response.json().title, "Authentication required");
 });
 
+test("the forwarded text read requires a session, a message ID, and an account", async () => {
+  const messageUrl = "/v1/gmail/messages/00000000-0000-4000-8000-000000000000/forwarded-text";
+  const unauthenticated = await api.inject({ method: "GET", url: messageUrl });
+  assert.equal(unauthenticated.statusCode, 401);
+
+  const invalidMessage = await api.inject({
+    method: "GET",
+    url: "/v1/gmail/messages/not-a-uuid/forwarded-text",
+    headers: { cookie: `test_session=${attachmentOwnerId}` },
+  });
+  assert.equal(invalidMessage.statusCode, 400);
+
+  const missingAccount = await api.inject({
+    method: "GET",
+    url: messageUrl,
+    headers: { cookie: `test_session=${attachmentOwnerId}` },
+  });
+  assert.equal(missingAccount.statusCode, 400);
+  assert.equal(missingAccount.json().title, "A valid mailbox account is required");
+});
+
 test("Gmail provider writes require an authenticated session", async () => {
   const requests = [
     { method: "POST", url: "/v1/gmail/messages/not-a-uuid/actions" },

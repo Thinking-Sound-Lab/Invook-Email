@@ -10,6 +10,7 @@ import {
   AgentMessageConflictError,
   consumeAgentSocketTicket,
   createAgentSocketTicket,
+  deleteAgentConversation,
   getAgentConversation,
   getAgentSessionIdentity,
   listAgentConversations,
@@ -192,6 +193,34 @@ test(
       const conversations = await listAgentConversations({ userId, limit: 30 }, database);
       assert.deepEqual(conversations.map((conversation) => conversation.id), [conversationId]);
       assert.deepEqual(await listAgentConversations({ userId: otherUserId, limit: 30 }, database), []);
+
+      // Only the owner can delete, and deleting removes the copied history.
+      assert.equal(
+        await deleteAgentConversation({ userId: otherUserId, conversationId }, database),
+        false,
+      );
+      assert.equal(await deleteAgentConversation({ userId, conversationId }, database), true);
+      assert.equal(await getAgentConversation({ userId, conversationId }, database), null);
+      assert.deepEqual(
+        await database.select().from(schema.agentMessages).where(
+          eq(schema.agentMessages.conversationId, conversationId),
+        ),
+        [],
+      );
+      // The superseded run can no longer store anything.
+      assert.deepEqual(
+        await saveAgentRunMessages(
+          {
+            userId,
+            conversationId,
+            runId: takeoverRun,
+            messages: [{ id: uuidv4(), role: "assistant", parts: [{ type: "text", text: "Late" }] }],
+            finishRun: true,
+          },
+          database,
+        ),
+        { saved: false },
+      );
     } finally {
       await database.delete(profiles).where(inArray(profiles.id, [userId, otherUserId]));
       await client.end();

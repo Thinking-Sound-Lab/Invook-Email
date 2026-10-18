@@ -117,6 +117,12 @@ function AgentPaneContent() {
     setIsHistoryOpen(false);
   }
 
+  function handleConversationDeleted(conversationId: string): void {
+    if (conversation.conversationId === conversationId) {
+      setConversation(createNewConversation());
+    }
+  }
+
   function handleToggleHistory(): void {
     setHistoryError(null);
     setIsHistoryOpen((isOpen) => !isOpen);
@@ -197,6 +203,7 @@ function AgentPaneContent() {
           ) : null}
           <AgentHistory
             onSelect={(conversationId) => void handleOpenConversation(conversationId)}
+            onDeleted={handleConversationDeleted}
           />
         </>
       ) : null}

@@ -18,6 +18,7 @@ import {
   type InvookAgentUIMessage,
 } from "@invook/contracts";
 import {
+  deleteAgentConversation,
   getAgentConversation,
   listAgentConversations,
 } from "@invook/database";
@@ -319,6 +320,29 @@ export function registerAgentRoutes(
           })),
         };
         await sendJson(reply, 200, response);
+      },
+    );
+
+    api.delete<{ Params: ConversationParams }>(
+      "/v1/agent/conversations/:conversationId",
+      {
+        onRequest: [
+          ...mutationAccessHooks,
+          requireUuidParameter("conversationId", "Agent conversation ID must be valid"),
+        ],
+      },
+      async (request, reply) => {
+        const session = request.invookSession;
+        if (!session) return;
+        const isDeleted = await deleteAgentConversation({
+          userId: session.userId,
+          conversationId: request.params.conversationId,
+        });
+        if (!isDeleted) {
+          await sendProblem(request, reply, 404, "Agent conversation not found");
+          return;
+        }
+        await reply.code(204).send();
       },
     );
 

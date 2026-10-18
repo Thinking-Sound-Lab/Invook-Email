@@ -163,7 +163,8 @@ function harness(input: {
       events.push("release");
     },
     createCapabilities: (scope) => {
-      assert.deepEqual(scope, { userId, conversationId });
+      assert.equal(scope.userId, userId);
+      assert.equal(scope.conversationId, conversationId);
       return capabilities;
     },
     getModel: () => ({ model: input.model }),
@@ -186,7 +187,7 @@ function harness(input: {
   return { run, frames, events, savedMessages, toolCalls };
 }
 
-const messageFrame: AgentTurnFrame = {
+const messageFrame: Extract<AgentTurnFrame, { type: "message" }> = {
   type: "message",
   conversationId,
   messageId,
@@ -200,7 +201,7 @@ test("a message turn streams the answer and stores it before reporting the end",
 
   assert.deepEqual(await run(messageFrame), { isSessionEnded: false });
 
-  assert.deepEqual(events, ["start", "renew", "save-and-finish"]);
+  assert.deepEqual(events, ["start", "save-and-finish"]);
   assert.equal(frames.at(-1)?.type, "end");
   assert.ok(frames.some(
     (frame) =>
@@ -254,18 +255,145 @@ test("a send stops at the approval card, then runs once the user approves", asyn
     focus: { accountSelection: "all", threadId: null },
   });
 
-  assert.deepEqual(second.events, ["start", "save", "renew", "save-and-finish"]);
-  assert.equal(
-    (second.savedMessages[0]?.messages[0]?.parts.find(
-      (part) => typeof part === "object" && part !== null && "approval" in part,
-    ) as { state: string } | undefined)?.state,
-    "approval-responded",
-  );
+  // The decision is stored only with the turn's response, never on its own.
+  assert.deepEqual(second.events, ["start", "save-and-finish"]);
   assert.deepEqual(second.toolCalls, [
     { name: "sendEmail", input: email, toolCallId: "call-sendEmail" },
   ]);
   // The continuation extends the same assistant message.
-  assert.equal(second.savedMessages[1]?.messages[0]?.id, stored.id);
+  assert.equal(second.savedMessages[0]?.messages[0]?.id, stored.id);
+  assert.equal(partState(second.savedMessages[0]?.messages[0]), "output-available");
+});
+
+function partState(message: StoredAgentMessage | undefined): unknown {
+  const part = message?.parts.find(
+    (candidate) =>
+      typeof candidate === "object" && candidate !== null && "approval" in candidate,
+  );
+  return part && typeof part === "object" && "state" in part ? part.state : undefined;
+}
+
+function pendingSendHistory(
+  state: "approval-requested" | "approval-responded",
+): StoredAgentMessage[] {
+  return [
+    { id: messageId, role: "user", parts: [{ type: "text", text: messageFrame.text }] },
+    {
+      id: "assistant-message",
+      role: "assistant",
+      parts: [{
+        type: "tool-sendEmail",
+        toolCallId: "call-sendEmail",
+        state,
+        input: email,
+        approval: state === "approval-requested"
+          ? { id: "approval-1" }
+          : { id: "approval-1", approved: true },
+      }],
+    },
+  ];
+}
+
+const approveFrame: AgentTurnFrame = {
+  type: "approval",
+  conversationId,
+  decisions: [{ approvalId: "approval-1", approved: true }],
+  focus: { accountSelection: "all", threadId: null },
+};
+
+test("a turn that fails after an approval leaves it open to approve again", async () => {
+  const failed = harness({
+    model: scriptedModel([]),
+    history: pendingSendHistory("approval-requested"),
+    overrides: {
+      listAccounts: async () => {
+        throw new Error("database unavailable");
+      },
+    },
+  });
+
+  await failed.run(approveFrame);
+
+  assert.deepEqual(failed.frames, [
+    { type: "rejected", conversationId, reason: "unavailable" },
+  ]);
+  // Nothing was stored, so the request is still pending and approvable.
+  assert.deepEqual(failed.events, ["start", "release"]);
+  assert.deepEqual(failed.toolCalls, []);
+});
+
+test("an interrupted approved send resumes under its original tool call", async () => {
+  const resumed = harness({
+    model: scriptedModel([textResponse("Sent.")]),
+    history: pendingSendHistory("approval-responded"),
+  });
+
+  await resumed.run(approveFrame);
+
+  assert.deepEqual(resumed.toolCalls, [
+    { name: "sendEmail", input: email, toolCallId: "call-sendEmail" },
+  ]);
+
+  // A stored approval can be resumed, never reversed.
+  const reversed = harness({
+    model: scriptedModel([]),
+    history: pendingSendHistory("approval-responded"),
+  });
+  await reversed.run({
+    ...approveFrame,
+    decisions: [{ approvalId: "approval-1", approved: false }],
+  });
+  assert.deepEqual(reversed.frames, [
+    { type: "rejected", conversationId, reason: "invalid" },
+  ]);
+  assert.deepEqual(reversed.toolCalls, []);
+});
+
+test("a new message settles an approval left open before it", async () => {
+  const followUp = harness({
+    model: scriptedModel([textResponse("I did not send it.")]),
+    history: pendingSendHistory("approval-requested"),
+  });
+
+  await followUp.run({
+    ...messageFrame,
+    messageId: "66666666-6666-4666-8666-666666666666",
+    text: "Actually, change the subject first.",
+  });
+
+  assert.deepEqual(followUp.events, ["start", "save", "save-and-finish"]);
+  assert.equal(followUp.savedMessages[0]?.messages[0]?.id, "assistant-message");
+  assert.equal(partState(followUp.savedMessages[0]?.messages[0]), "output-denied");
+  assert.deepEqual(followUp.toolCalls.map((call) => call.name), ["readThread"]);
+});
+
+test("a turn that loses its conversation stops before another model step", async () => {
+  const model = scriptedModel([
+    toolCallResponse("searchMail", { query: "invoice", accountId: null }),
+    textResponse("Found nothing."),
+  ]);
+  const superseded = harness({
+    model,
+    overrides: { renewRun: async () => false },
+  });
+
+  await superseded.run(messageFrame);
+
+  assert.equal(model.doStreamCalls.length, 1);
+  assert.equal(superseded.frames.at(-1)?.type, "end");
+});
+
+test("a turn that still owns its conversation renews it and keeps working after a tool", async () => {
+  const model = scriptedModel([
+    toolCallResponse("searchMail", { query: "invoice", accountId: null }),
+    textResponse("Found nothing."),
+  ]);
+  const active = harness({ model });
+
+  await active.run(messageFrame);
+
+  assert.equal(model.doStreamCalls.length, 2);
+  assert.deepEqual(active.events, ["start", "renew", "save-and-finish"]);
 });
 
 test("an approval that does not match the pending request releases the turn untouched", async () => {

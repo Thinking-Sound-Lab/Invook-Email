@@ -1,8 +1,13 @@
 import type { FastifyPluginAsync } from "fastify";
 
-import type { SetGmailThreadReadStateRequest } from "@invook/contracts";
+import type {
+  GmailForwardedTextResponse,
+  SetGmailThreadReadStateRequest,
+} from "@invook/contracts";
+import { buildGmailForwardedMessageText } from "@invook/contracts/gmail-forward";
 import {
   enqueueGmailHistoryCatchup,
+  getGmailForwardContext,
   getGmailMessageMutationContext,
   getGmailThreadMutationContext,
 } from "@invook/database";
@@ -13,7 +18,12 @@ import {
   type GmailSystemLabelId,
 } from "@invook/gmail";
 
-import { mutationAccessHooks, requireUuidParameter } from "../access";
+import {
+  mutationAccessHooks,
+  requireSession,
+  requireUuidParameter,
+} from "../access";
+import { parseRequiredMailboxAccountId } from "../mailbox-account-scope";
 import { sendJson, sendProblem } from "../responses";
 import type { GmailProviderAccess } from "../services/gmail-provider";
 import { setGmailThreadReadState } from "../services/gmail-thread-read-state";
@@ -100,6 +110,45 @@ async function enqueueProviderCatchup(
 }
 
 export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
+  // The text a forward appends, built by the same function the send path uses,
+  // so an approval card can show the forwarded message exactly as it is sent.
+  api.get<{ Params: GmailMessageParams; Querystring: { account?: unknown } }>(
+    "/v1/gmail/messages/:messageId/forwarded-text",
+    {
+      onRequest: [
+        requireSession,
+        requireUuidParameter("messageId", "Message ID must be valid"),
+      ],
+    },
+    async (request, reply) => {
+      const session = request.invookSession;
+      if (!session) return;
+      const accountId = parseRequiredMailboxAccountId(request.query.account);
+      if (!accountId) {
+        await sendProblem(request, reply, 400, "A valid mailbox account is required");
+        return;
+      }
+      const message = await getGmailForwardContext({
+        userId: session.userId,
+        accountId,
+        messageId: request.params.messageId,
+      });
+      if (!message) {
+        await sendProblem(
+          request,
+          reply,
+          404,
+          "Forwarded message is unavailable for this Gmail account",
+        );
+        return;
+      }
+      const response: GmailForwardedTextResponse = {
+        text: buildGmailForwardedMessageText(message),
+      };
+      await sendJson(reply, 200, response);
+    },
+  );
+
   api.post<{ Params: GmailMessageParams; Body: unknown }>(
     "/v1/gmail/messages/:messageId/actions",
     {

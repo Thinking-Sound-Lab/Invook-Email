@@ -6,6 +6,7 @@ import { GmailApiError } from "@invook/gmail";
 
 import { parseGmailComposeSendRequest } from "../routes/compose-drafts";
 import {
+  GmailDraftChangedError,
   sendComposeDraft,
   type ComposeSendDependencies,
 } from "./compose-send";
@@ -201,4 +202,25 @@ test("a missing draft clears only an unprepared send operation", async () => {
 
   await assert.rejects(sendComposeDraft(sendInput, dependencies), GmailApiError);
   assert.equal(abandoned, true);
+});
+
+test("a draft edited after approval is refused instead of sent", async () => {
+  const { dependencies, counts } = memoryDependencies();
+
+  await assert.rejects(
+    sendComposeDraft(
+      { ...sendInput, expectedProviderMessageId: "approved-draft-message" },
+      dependencies,
+    ),
+    GmailDraftChangedError,
+  );
+  assert.equal(counts.send, 0);
+
+  // The unchanged draft still sends under a fresh attempt.
+  const sent = await sendComposeDraft(
+    { ...sendInput, expectedProviderMessageId: "provider-draft-message" },
+    dependencies,
+  );
+  assert.equal(sent.message.providerMessageId, "provider-sent-message");
+  assert.equal(counts.send, 1);
 });

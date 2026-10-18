@@ -377,6 +377,25 @@ test("ticket and conversation routes require a session and an honest configurati
   });
   assert.equal(invalidId.statusCode, 400);
 
+  const unauthenticatedDelete = await api.inject({
+    method: "DELETE",
+    url: `/v1/agent/conversations/${conversationId}`,
+    headers: { origin: appOrigin },
+  });
+  assert.equal(unauthenticatedDelete.statusCode, 401);
+  const foreignDelete = await api.inject({
+    method: "DELETE",
+    url: `/v1/agent/conversations/${conversationId}`,
+    headers: { origin: "https://attacker.example", cookie: "test_session=1" },
+  });
+  assert.equal(foreignDelete.statusCode, 403);
+  const invalidDelete = await api.inject({
+    method: "DELETE",
+    url: "/v1/agent/conversations/conversation",
+    headers: { origin: appOrigin, cookie: "test_session=1" },
+  });
+  assert.equal(invalidDelete.statusCode, 400);
+
   const plainRequest = await api.inject({ method: "GET", url: "/v1/agent/socket" });
   assert.equal(plainRequest.statusCode, 426);
 });

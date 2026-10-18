@@ -82,7 +82,7 @@ test("ordinary settings and secrets are complete, disjoint and bound to the inte
   const template = createTemplate();
   const environment = parseEnv(readFileSync(new URL("../production.env.example", import.meta.url), "utf8"));
   assert.deepEqual(Object.keys(environment).sort(), [...RUNTIME_KEYS].sort());
-  assert.equal(CONFIGURATION_KEYS.length, 11);
+  assert.equal(CONFIGURATION_KEYS.length, 12);
   assert.equal(SECRET_KEYS.length, 8);
   assert.equal(new Set(RUNTIME_KEYS).size, RUNTIME_KEYS.length);
   for (const key of CONFIGURATION_KEYS) template.hasParameter(CONFIGURATION_PARAMETER_NAMES[key], { Default: CONFIGURATION_DEFAULTS[key] ?? "" });

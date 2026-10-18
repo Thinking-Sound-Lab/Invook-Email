@@ -13,6 +13,7 @@ import {
   splitAddressList,
   type AgentCapabilityDependencies,
 } from "./agent-capabilities";
+import { GmailDraftChangedError } from "./compose-send";
 import type { SaveComposeDraftInput } from "./compose-drafts";
 import type { SendComposeDraftInput } from "./compose-send";
 
@@ -21,6 +22,7 @@ const accountId = "22222222-2222-4222-8222-222222222222";
 const conversationId = "33333333-3333-4333-8333-333333333333";
 const replyMessageId = "44444444-4444-4444-8444-444444444444";
 const access = { accountId, accessToken: "access-token", email: "owner@example.com" };
+const scope = { userId, conversationId, ensureRunActive: async () => true };
 const email: AgentEmailInput = {
   accountId,
   to: ["recipient@example.com"],
@@ -77,7 +79,7 @@ function fakeDependencies(overrides: Partial<AgentCapabilityDependencies> = {}) 
 
 test("a draft is written for the scoped user with a key stable per tool call", async () => {
   const { dependencies, saved } = fakeDependencies();
-  const capabilities = createAgentCapabilities({ userId, conversationId }, dependencies);
+  const capabilities = createAgentCapabilities(scope, dependencies);
 
   const first = await capabilities.saveDraft(email, { toolCallId: "call-1" });
   await capabilities.saveDraft(email, { toolCallId: "call-1" });
@@ -104,7 +106,7 @@ test("a draft is written for the scoped user with a key stable per tool call", a
 
 test("revising a saved draft updates it instead of creating another", async () => {
   const { dependencies, saved } = fakeDependencies();
-  const capabilities = createAgentCapabilities({ userId, conversationId }, dependencies);
+  const capabilities = createAgentCapabilities(scope, dependencies);
 
   await capabilities.saveDraft({ ...email, draftId: "r-123" }, { toolCallId: "call-1" });
 
@@ -114,7 +116,7 @@ test("revising a saved draft updates it instead of creating another", async () =
 
 test("sending writes the approved content to the draft, then sends that draft", async () => {
   const { dependencies, saved, sent } = fakeDependencies();
-  const capabilities = createAgentCapabilities({ userId, conversationId }, dependencies);
+  const capabilities = createAgentCapabilities(scope, dependencies);
 
   const result = await capabilities.sendEmail(
     { ...email, draftId: "r-123" },
@@ -144,7 +146,7 @@ test("sending writes the approved content to the draft, then sends that draft", 
 
 test("model-chosen identifiers outside the user's scope fail without a Gmail write", async () => {
   const { dependencies, saved, sent } = fakeDependencies();
-  const capabilities = createAgentCapabilities({ userId, conversationId }, dependencies);
+  const capabilities = createAgentCapabilities(scope, dependencies);
 
   const results = await Promise.all([
     capabilities.saveDraft(
@@ -186,7 +188,7 @@ test("a reply shows the subject Gmail threading will actually use", async () => 
         ? { providerThreadId: "provider-thread", subject: "Signed contract", headerLines: [] }
         : null,
   });
-  const capabilities = createAgentCapabilities({ userId, conversationId }, dependencies);
+  const capabilities = createAgentCapabilities(scope, dependencies);
 
   assert.equal(
     (await capabilities.resolveEmail({ ...email, replyToMessageId: replyMessageId })).subject,
@@ -202,7 +204,7 @@ test("provider failures become plain reasons and expired grants require reconnec
       throw revoked;
     },
   });
-  const capabilities = createAgentCapabilities({ userId, conversationId }, dependencies);
+  const capabilities = createAgentCapabilities(scope, dependencies);
 
   assert.deepEqual(await capabilities.sendEmail(email, { toolCallId: "call-1" }), {
     status: "failed",
@@ -211,7 +213,7 @@ test("provider failures become plain reasons and expired grants require reconnec
   assert.deepEqual(reconnects, [accountId]);
 
   const unavailable = createAgentCapabilities(
-    { userId, conversationId },
+    scope,
     fakeDependencies({
       saveDraft: async () => {
         throw new GmailApiError("Backend Error", 503, "");
@@ -224,7 +226,7 @@ test("provider failures become plain reasons and expired grants require reconnec
   });
 
   const unexpected = createAgentCapabilities(
-    { userId, conversationId },
+    scope,
     fakeDependencies({
       saveDraft: async () => {
         throw new Error("connection string postgres://secret@host");
@@ -268,7 +270,7 @@ test("search and thread reads are scoped, bounded, and honest about bad input", 
       }];
     },
   });
-  const capabilities = createAgentCapabilities({ userId, conversationId }, dependencies);
+  const capabilities = createAgentCapabilities(scope, dependencies);
 
   const result = await capabilities.searchMail({ query: " invoice ", accountId: null });
 
@@ -294,4 +296,54 @@ test("address headers split on commas outside quoted names", () => {
     splitAddressList('"Doe, Jane" <jane@example.com>, bob@example.com,  <a,b@example.com>'),
     ['"Doe, Jane" <jane@example.com>', "bob@example.com", "<a,b@example.com>"],
   );
+});
+
+test("a send is bound to the approved draft message and refused if it changed", async () => {
+  const { dependencies, sent } = fakeDependencies();
+  const capabilities = createAgentCapabilities(scope, dependencies);
+
+  await capabilities.sendEmail(email, { toolCallId: "call-1" });
+  assert.equal(sent[0]?.expectedProviderMessageId, "provider-message");
+
+  const changed = createAgentCapabilities(
+    scope,
+    fakeDependencies({
+      sendDraft: async () => {
+        throw new GmailDraftChangedError();
+      },
+    }).dependencies,
+  );
+  assert.deepEqual(await changed.sendEmail(email, { toolCallId: "call-2" }), {
+    status: "failed",
+    reason: "The draft changed after you approved it, so it was not sent.",
+  });
+});
+
+test("a turn that lost its conversation makes no Gmail write", async () => {
+  const { dependencies, saved, sent } = fakeDependencies();
+  const capabilities = createAgentCapabilities(
+    { ...scope, ensureRunActive: async () => false },
+    dependencies,
+  );
+  const superseded = {
+    status: "failed",
+    reason:
+      "This conversation continued elsewhere, so Invook stopped before changing Gmail.",
+  };
+
+  assert.deepEqual(await capabilities.saveDraft(email, { toolCallId: "call-1" }), superseded);
+  assert.deepEqual(await capabilities.sendEmail(email, { toolCallId: "call-2" }), superseded);
+  assert.deepEqual(saved, []);
+  assert.deepEqual(sent, []);
+
+  // Ownership lost between writing the draft and sending it stops the send.
+  let checks = 0;
+  const lostMidway = fakeDependencies();
+  const midway = createAgentCapabilities(
+    { ...scope, ensureRunActive: async () => (checks += 1) === 1 },
+    lostMidway.dependencies,
+  );
+  assert.deepEqual(await midway.sendEmail(email, { toolCallId: "call-3" }), superseded);
+  assert.equal(lostMidway.saved.length, 1);
+  assert.deepEqual(lostMidway.sent, []);
 });

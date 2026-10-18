@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { after, afterEach, test } from "node:test";
 
+import axios, { type InternalAxiosRequestConfig } from "axios";
 import { Window } from "happy-dom";
 import { act } from "react";
 import type { Root } from "react-dom/client";
@@ -56,8 +57,10 @@ const email: AgentEmailInput = {
 };
 
 let root: Root | null = null;
+const originalAdapter = axios.defaults.adapter;
 
 afterEach(async () => {
+  axios.defaults.adapter = originalAdapter;
   const currentRoot = root;
   root = null;
   if (currentRoot) await act(async () => currentRoot.unmount());
@@ -70,7 +73,11 @@ after(async () => {
 
 async function renderMessage(
   message: InvookAgentUIMessage,
-  input: { canDecide?: boolean; onDecide?: (decision: AgentApprovalDecision) => void } = {},
+  input: {
+    canDecide?: boolean;
+    onDecide?: (decision: AgentApprovalDecision) => void;
+    onRetry?: () => void;
+  } = {},
 ): Promise<void> {
   const [{ createRoot }, { MailShellProvider }, { AgentMessage }] = await Promise.all([
     import("react-dom/client"),
@@ -89,6 +96,7 @@ async function renderMessage(
           accountSelection="all"
           canDecide={input.canDecide ?? true}
           onDecide={input.onDecide ?? (() => {})}
+          onRetry={input.onRetry ?? (() => {})}
         />
       </MailShellProvider>,
     );
@@ -231,4 +239,102 @@ test("a saved draft links to Drafts for its account", async () => {
     (anchor) => anchor.textContent === "Open Drafts",
   );
   assert.equal(link?.getAttribute("href"), `/mail?account=${accountId}&view=drafts`);
+});
+
+const forwardedMessageId = "44444444-4444-4444-8444-444444444444";
+const forward: AgentEmailInput = {
+  ...email,
+  subject: "Fwd: Contract",
+  body: "See below.",
+  replyToMessageId: null,
+  forwardOfMessageId: forwardedMessageId,
+};
+
+function pendingForward(): InvookAgentUIMessage {
+  return {
+    id: "assistant",
+    role: "assistant",
+    parts: [{
+      type: "tool-sendEmail",
+      toolCallId: "call-1",
+      state: "approval-requested",
+      input: forward,
+      approval: { id: "approval-1" },
+    }],
+  };
+}
+
+test("a forward cannot be approved until the forwarded message is shown", async () => {
+  const requests: InternalAxiosRequestConfig[] = [];
+  let respond: (text: string) => void = () => {};
+  axios.defaults.adapter = async (config) => {
+    requests.push(config);
+    const text = await new Promise<string>((resolve) => {
+      respond = resolve;
+    });
+    return { data: { text }, status: 200, statusText: "OK", headers: {}, config };
+  };
+  await renderMessage(pendingForward());
+
+  assert.equal(findButton("Send")?.disabled, true);
+  assert.equal(findButton("Don’t send")?.disabled, false);
+  assert.equal(
+    requests[0]?.url,
+    `/v1/gmail/messages/${forwardedMessageId}/forwarded-text`,
+  );
+  assert.deepEqual(requests[0]?.params, { account: accountId });
+
+  await act(async () => respond("---------- Forwarded message ---------\nSigned copy attached."));
+
+  const preview = document.querySelector('[aria-label="Forwarded message"]');
+  assert.ok(preview?.textContent?.includes("Signed copy attached."));
+  assert.equal(findButton("Send")?.disabled, false);
+});
+
+test("a forward whose original cannot be loaded cannot be approved", async () => {
+  axios.defaults.adapter = async (config) => {
+    throw new axios.AxiosError("Not found", "ERR_BAD_REQUEST", config);
+  };
+  await renderMessage(pendingForward());
+  await act(async () => {});
+
+  assert.ok(document.body.textContent?.includes("could not be loaded"));
+  assert.equal(findButton("Send")?.disabled, true);
+});
+
+test("an interrupted approval offers a retry, and a send left behind says it was not sent", async () => {
+  let retries = 0;
+  await renderMessage(
+    {
+      id: "assistant",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-sendEmail",
+          toolCallId: "call-1",
+          state: "approval-responded",
+          input: email,
+          approval: { id: "approval-1", approved: true },
+        },
+        {
+          type: "tool-sendEmail",
+          toolCallId: "call-2",
+          state: "output-denied",
+          input: email,
+          approval: {
+            id: "approval-2",
+            approved: false,
+            reason: "Not approved before the next message.",
+          },
+        },
+      ],
+    },
+    { onRetry: () => (retries += 1) },
+  );
+
+  const text = document.body.textContent ?? "";
+  assert.ok(text.includes("Sending did not finish."));
+  assert.ok(text.includes("Not sent. Not approved before the next message."));
+  await act(async () => findButton("Retry")?.click());
+  assert.equal(retries, 1);
 });

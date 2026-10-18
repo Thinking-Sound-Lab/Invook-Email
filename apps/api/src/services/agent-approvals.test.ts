@@ -7,7 +7,10 @@ import type {
   InvookAgentUIMessage,
 } from "@invook/contracts";
 
-import { applyAgentApprovalDecisions } from "./agent-approvals";
+import {
+  applyAgentApprovalDecisions,
+  closeOpenApprovals,
+} from "./agent-approvals";
 
 const email: AgentEmailInput = {
   accountId: "22222222-2222-4222-8222-222222222222",
@@ -105,6 +108,54 @@ test("an already decided request cannot be decided again", () => {
     applyAgentApprovalDecisions([history[0]!, decided], [
       { approvalId: "approval-1", approved: true },
     ]),
+    null,
+  );
+});
+
+test("an interrupted decision can be resumed unchanged but never reversed", () => {
+  const decided = applyAgentApprovalDecisions(history, [
+    { approvalId: "approval-1", approved: true },
+  ]);
+  assert.ok(decided);
+
+  assert.deepEqual(
+    applyAgentApprovalDecisions([history[0]!, decided], [
+      { approvalId: "approval-1", approved: true },
+    ]),
+    decided,
+  );
+  assert.equal(
+    applyAgentApprovalDecisions([history[0]!, decided], [
+      { approvalId: "approval-1", approved: false },
+    ]),
+    null,
+  );
+});
+
+test("moving on settles open approvals without claiming a send happened", () => {
+  const approved = applyAgentApprovalDecisions(history, [
+    { approvalId: "approval-1", approved: true },
+  ]);
+  const declined = applyAgentApprovalDecisions(history, [
+    { approvalId: "approval-1", approved: false },
+  ]);
+  assert.ok(approved && declined);
+
+  const states = [history[1]!, declined, approved].map((message) => {
+    const closed = closeOpenApprovals(message);
+    const part = closed?.parts.find((candidate) => candidate.type === "tool-sendEmail");
+    return part && "state" in part ? part.state : null;
+  });
+
+  // Undecided and declined sends were not sent; an approved send that was
+  // interrupted is unconfirmed, because Gmail may have sent it.
+  assert.deepEqual(states, ["output-denied", "output-denied", "output-error"]);
+  assert.equal(closeOpenApprovals(history[0]!), null);
+  assert.equal(
+    closeOpenApprovals({
+      ...history[1]!,
+      parts: [{ type: "text", text: "No approvals here." }],
+    }),
     null,
   );
 });

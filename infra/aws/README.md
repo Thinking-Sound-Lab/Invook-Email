@@ -97,6 +97,7 @@ The single env file is the setup input. Ordinary settings go into CloudFormation
 | `GMAIL_PUBSUB_TOPIC`, `GOOGLE_PUBSUB_SUBSCRIPTION` | `BETTER_AUTH_SECRET`, `TOKEN_ENCRYPTION_KEY` |
 | `GOOGLE_PUBSUB_PUSH_AUDIENCE`, `GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL` | `OPENAI_API_KEY`, `OPENAI_WEBHOOK_SECRET` |
 | `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` | `TEMPORAL_API_KEY` |
+| `OPENAI_AGENT_MODEL` (defaults to `gpt-5.6-luna`) | |
 
 `configure` stops API and worker before applying settings and credentials together. It can prepare incomplete configuration; services stay stopped until `release` validates the deployed CloudFormation parameters and secret. To update a value, edit the same env file, run `configure`, then `release`. Preserve the existing auth and encryption keys when updating provider credentials. Vercel gets only the API origin; database, OAuth, Temporal and OpenAI credentials stay on AWS.
 

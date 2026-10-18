@@ -2,7 +2,7 @@ export const API_CONFIGURATION_KEYS = [
   "DATABASE_POOL_SIZE", "DATABASE_CONTROL_POOL_SIZE",
   "APP_URL", "BETTER_AUTH_GOOGLE_CLIENT_ID", "GMAIL_GOOGLE_CLIENT_ID", "GMAIL_PUBSUB_TOPIC",
   "GOOGLE_PUBSUB_PUSH_AUDIENCE", "GOOGLE_PUBSUB_PUSH_SERVICE_ACCOUNT_EMAIL",
-  "GOOGLE_PUBSUB_SUBSCRIPTION",
+  "GOOGLE_PUBSUB_SUBSCRIPTION", "OPENAI_AGENT_MODEL",
 ] as const;
 
 export const WORKER_CONFIGURATION_KEYS = [
@@ -48,11 +48,14 @@ export const CONFIGURATION_PARAMETER_NAMES = {
   GOOGLE_PUBSUB_SUBSCRIPTION: "GooglePubsubSubscription",
   TEMPORAL_ADDRESS: "TemporalAddress",
   TEMPORAL_NAMESPACE: "TemporalNamespace",
+  OPENAI_AGENT_MODEL: "OpenaiAgentModel",
 } as const satisfies Record<RuntimeConfigurationKey, string>;
 
 export const CONFIGURATION_DEFAULTS: Partial<Record<RuntimeConfigurationKey, string>> = {
   DATABASE_POOL_SIZE: "3",
   DATABASE_CONTROL_POOL_SIZE: "2",
+  // Matches the API's own default; set another model to override the agent's.
+  OPENAI_AGENT_MODEL: "gpt-5.6-luna",
 };
 
 export const RUNTIME_KEYS: readonly RuntimeEnvironmentKey[] = [

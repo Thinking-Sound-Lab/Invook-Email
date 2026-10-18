@@ -2,6 +2,7 @@ import type {
   AgentConversationListResponse,
   AgentConversationResponse,
   AgentSocketTicketResponse,
+  GmailForwardedTextResponse,
 } from "@invook/contracts";
 import axios from "axios";
 
@@ -31,4 +32,19 @@ export async function getAgentConversation(
     { signal },
   );
   return response.data;
+}
+
+export async function deleteAgentConversation(conversationId: string): Promise<void> {
+  await axios.delete(`/v1/agent/conversations/${encodeURIComponent(conversationId)}`);
+}
+
+export async function getForwardedMessageText(
+  input: { accountId: string; messageId: string },
+  signal?: AbortSignal,
+): Promise<string> {
+  const response = await axios.get<GmailForwardedTextResponse>(
+    `/v1/gmail/messages/${encodeURIComponent(input.messageId)}/forwarded-text`,
+    { params: { account: input.accountId }, signal },
+  );
+  return response.data.text;
 }

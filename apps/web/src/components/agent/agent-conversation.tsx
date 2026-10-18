@@ -76,6 +76,14 @@ export function AgentConversation({
     submitDraft();
   }
 
+  // Resubmits the last request. The server holds the history, so this resumes
+  // an interrupted approval or reruns a failed turn without duplicating it.
+  function handleRetry(): void {
+    if (isWorking) return;
+    clearError();
+    void sendMessage();
+  }
+
   function handleDecide(decision: AgentApprovalDecision): void {
     clearError();
     void addToolApprovalResponse({
@@ -105,6 +113,7 @@ export function AgentConversation({
                 accountSelection={accountSelection}
                 canDecide={!isWorking}
                 onDecide={handleDecide}
+                onRetry={handleRetry}
               />
             ))}
             {status === "submitted" ? (
@@ -115,9 +124,20 @@ export function AgentConversation({
           </div>
         )}
         {error ? (
-          <p role="alert" className="mt-4 text-xs leading-5 text-destructive">
-            {error.message}
-          </p>
+          <div role="alert" className="mt-4 flex items-center justify-between gap-3">
+            <p className="text-xs leading-5 text-destructive">{error.message}</p>
+            {messages.length > 0 && !isWorking ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="shrink-0 rounded-md"
+                onClick={handleRetry}
+              >
+                Try again
+              </Button>
+            ) : null}
+          </div>
         ) : null}
         <div ref={endRef} />
       </div>

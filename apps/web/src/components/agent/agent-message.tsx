@@ -18,6 +18,10 @@ import type {
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import {
+  useForwardedMessageText,
+  type ForwardedMessageText,
+} from "@/hooks/use-forwarded-message-text";
 import { LocalMailDate } from "@/components/mail/local-mail-date";
 import { MailboxLink } from "@/components/mail/mailbox-link";
 import { useMailShell } from "@/components/mail/mail-shell-provider";
@@ -32,6 +36,8 @@ export interface AgentMessageProps {
   accountSelection: string;
   canDecide: boolean;
   onDecide: (decision: AgentApprovalDecision) => void;
+  /** Resubmits the conversation's last request after an interrupted turn. */
+  onRetry: () => void;
 }
 
 export function AgentMessage({
@@ -39,6 +45,7 @@ export function AgentMessage({
   accountSelection,
   canDecide,
   onDecide,
+  onRetry,
 }: AgentMessageProps) {
   if (message.role === "user") {
     const text = message.parts
@@ -61,6 +68,7 @@ export function AgentMessage({
           accountSelection={accountSelection}
           canDecide={canDecide}
           onDecide={onDecide}
+          onRetry={onRetry}
         />
       ))}
     </div>
@@ -72,6 +80,7 @@ interface AgentMessagePartViewProps {
   accountSelection: string;
   canDecide: boolean;
   onDecide: (decision: AgentApprovalDecision) => void;
+  onRetry: () => void;
 }
 
 function AgentMessagePartView({
@@ -79,6 +88,7 @@ function AgentMessagePartView({
   accountSelection,
   canDecide,
   onDecide,
+  onRetry,
 }: AgentMessagePartViewProps) {
   switch (part.type) {
     case "text":
@@ -94,7 +104,14 @@ function AgentMessagePartView({
     case "tool-saveDraft":
       return <SaveDraftPart part={part} />;
     case "tool-sendEmail":
-      return <SendEmailPart part={part} canDecide={canDecide} onDecide={onDecide} />;
+      return (
+        <SendEmailPart
+          part={part}
+          canDecide={canDecide}
+          onDecide={onDecide}
+          onRetry={onRetry}
+        />
+      );
     default:
       return null;
   }
@@ -223,7 +240,44 @@ function ReadThreadPart({
   );
 }
 
-function EmailSummary({ email }: { email: AgentEmailInput }) {
+function ForwardedMessagePreview({ forwarded }: { forwarded: ForwardedMessageText }) {
+  if (forwarded.loadState === "none") return null;
+  if (forwarded.loadState === "loading") {
+    return (
+      <p className="text-xs text-muted-foreground" role="status">
+        Loading the forwarded message…
+      </p>
+    );
+  }
+  if (forwarded.loadState === "error") {
+    return (
+      <p className="text-xs text-destructive" role="alert">
+        The forwarded message could not be loaded, so it cannot be reviewed here.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <p className="text-xs text-muted-foreground">
+        Forwarded message, included below the text. Its attachments are not.
+      </p>
+      <p
+        aria-label="Forwarded message"
+        className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words rounded-lg bg-background/70 px-3 py-2 text-xs leading-5 text-foreground/80"
+      >
+        {forwarded.text}
+      </p>
+    </div>
+  );
+}
+
+function EmailSummary({
+  email,
+  forwarded,
+}: {
+  email: AgentEmailInput;
+  forwarded: ForwardedMessageText;
+}) {
   const { accounts } = useMailShell();
   const sender = accounts.find((account) => account.id === email.accountId)?.email;
   const rows: Array<[string, string]> = [
@@ -248,12 +302,34 @@ function EmailSummary({ email }: { email: AgentEmailInput }) {
           {email.body}
         </p>
       ) : null}
-      {email.forwardOfMessageId ? (
-        <p className="text-xs text-muted-foreground">
-          The original message is included below the text. Its attachments are not.
-        </p>
-      ) : null}
+      <ForwardedMessagePreview forwarded={forwarded} />
     </div>
+  );
+}
+
+/**
+ * Shows an email with the forwarded message it would include. `children`
+ * receives whether everything that would be sent is on screen, which an
+ * approval requires.
+ */
+function EmailDetails({
+  email,
+  children,
+}: {
+  email: AgentEmailInput;
+  children?: (isComplete: boolean) => ReactNode;
+}) {
+  const forwarded = useForwardedMessageText({
+    accountId: email.accountId,
+    messageId: email.forwardOfMessageId,
+  });
+  return (
+    <>
+      <EmailSummary email={email} forwarded={forwarded} />
+      {children?.(
+        forwarded.loadState === "none" || forwarded.loadState === "available",
+      )}
+    </>
   );
 }
 
@@ -274,7 +350,7 @@ function SaveDraftPart({ part }: { part: ToolPart<"saveDraft"> }) {
         <StatusLine icon={Alert02Icon} tone="destructive">
           Draft not saved. {part.output.reason}
         </StatusLine>
-        <EmailSummary email={part.input} />
+        <EmailDetails email={part.input} />
       </section>
     );
   }
@@ -287,7 +363,7 @@ function SaveDraftPart({ part }: { part: ToolPart<"saveDraft"> }) {
       <StatusLine icon={isSaved ? CheckmarkCircle02Icon : FileEditIcon} tone={isSaved ? "success" : "muted"}>
         {isSaved ? "Draft saved in Gmail" : "Saving draft…"}
       </StatusLine>
-      <EmailSummary email={part.input} />
+      <EmailDetails email={part.input} />
       {part.state === "output-available" && part.output.status === "saved" ? (
         <MailboxLink
           href={draftsHref(part.output.accountId)}
@@ -304,22 +380,33 @@ function SendEmailPart({
   part,
   canDecide,
   onDecide,
+  onRetry,
 }: {
   part: ToolPart<"sendEmail">;
   canDecide: boolean;
   onDecide: (decision: AgentApprovalDecision) => void;
+  onRetry: () => void;
 }) {
   if (part.state === "input-streaming") {
     return <StatusLine icon={SentIcon}>Preparing an email…</StatusLine>;
   }
   if (part.state === "output-error") {
-    return <StatusLine icon={Alert02Icon} tone="destructive">{part.errorText}</StatusLine>;
+    return (
+      <section aria-label="Email not confirmed" className="space-y-2.5 rounded-xl bg-card/60 px-3.5 py-3">
+        <StatusLine icon={Alert02Icon} tone="destructive">{part.errorText}</StatusLine>
+        {part.input ? <EmailDetails email={part.input} /> : null}
+      </section>
+    );
   }
   if (part.state === "output-denied") {
     return (
-      <section aria-label="Declined email" className="space-y-2.5 rounded-xl bg-card/60 px-3.5 py-3">
-        <StatusLine icon={Alert02Icon}>You chose not to send this email.</StatusLine>
-        <EmailSummary email={part.input} />
+      <section aria-label="Email not sent" className="space-y-2.5 rounded-xl bg-card/60 px-3.5 py-3">
+        <StatusLine icon={Alert02Icon}>
+          {part.approval.reason
+            ? `Not sent. ${part.approval.reason}`
+            : "You chose not to send this email."}
+        </StatusLine>
+        <EmailDetails email={part.input} />
       </section>
     );
   }
@@ -327,19 +414,46 @@ function SendEmailPart({
     return part.output.status === "sent" ? (
       <section aria-label="Sent email" className="space-y-2.5 rounded-xl bg-card px-3.5 py-3">
         <StatusLine icon={CheckmarkCircle02Icon} tone="success">Sent</StatusLine>
-        <EmailSummary email={part.input} />
+        <EmailDetails email={part.input} />
       </section>
     ) : (
       <section aria-label="Email not sent" className="space-y-2.5 rounded-xl bg-card/60 px-3.5 py-3">
         <StatusLine icon={Alert02Icon} tone="destructive">
           Not sent. {part.output.reason}
         </StatusLine>
-        <EmailSummary email={part.input} />
+        <EmailDetails email={part.input} />
+      </section>
+    );
+  }
+  if (part.state === "approval-responded") {
+    // A decision whose turn ended before the tool ran can be resumed: the
+    // server repeats the same call, and Gmail writes under its ID are
+    // idempotent, so retrying never sends twice.
+    const isInterrupted = canDecide;
+    return (
+      <section aria-label="Email being sent" className="space-y-2.5 rounded-xl bg-card px-3.5 py-3">
+        <StatusLine icon={SentIcon}>
+          {!isInterrupted
+            ? part.approval.approved ? "Sending…" : "Not sending."
+            : part.approval.approved
+              ? "Sending did not finish."
+              : "Your decision was not recorded yet."}
+        </StatusLine>
+        <EmailDetails email={part.input} />
+        {isInterrupted ? (
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={onRetry}
+            className="h-8 rounded-lg text-sm font-normal"
+          >
+            Retry
+          </Button>
+        ) : null}
       </section>
     );
   }
   const isRequested = part.state === "approval-requested";
-  const isApproved = part.state === "approval-responded" && part.approval.approved;
   return (
     <section
       aria-label="Email waiting for your approval"
@@ -348,34 +462,33 @@ function SendEmailPart({
       <StatusLine icon={SentIcon}>
         {isRequested
           ? "Review this email. Nothing is sent until you approve it."
-          : isApproved
-            ? "Sending…"
-            : part.state === "approval-responded"
-              ? "Not sending."
-              : "Preparing an email…"}
+          : "Preparing an email…"}
       </StatusLine>
-      <EmailSummary email={part.input} />
-      {isRequested && !part.approval.isAutomatic ? (
-        <div className="flex gap-2">
-          <Button
-            type="button"
-            disabled={!canDecide}
-            onClick={() => onDecide({ approvalId: part.approval.id, approved: true })}
-            className="h-8 rounded-lg bg-compose-accent px-3.5 text-sm font-normal text-compose-accent-foreground hover:bg-compose-accent-hover"
-          >
-            Send
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={!canDecide}
-            onClick={() => onDecide({ approvalId: part.approval.id, approved: false })}
-            className="h-8 rounded-lg text-sm font-normal"
-          >
-            Don’t send
-          </Button>
-        </div>
-      ) : null}
+      <EmailDetails email={part.input}>
+        {(isComplete) =>
+          isRequested && !part.approval.isAutomatic ? (
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                disabled={!canDecide || !isComplete}
+                onClick={() => onDecide({ approvalId: part.approval.id, approved: true })}
+                className="h-8 rounded-lg bg-compose-accent px-3.5 text-sm font-normal text-compose-accent-foreground hover:bg-compose-accent-hover"
+              >
+                Send
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={!canDecide}
+                onClick={() => onDecide({ approvalId: part.approval.id, approved: false })}
+                className="h-8 rounded-lg text-sm font-normal"
+              >
+                Don’t send
+              </Button>
+            </div>
+          ) : null
+        }
+      </EmailDetails>
     </section>
   );
 }

@@ -31,8 +31,14 @@ import {
   type StoredAgentMessage,
 } from "@invook/database";
 
-import { applyAgentApprovalDecisions } from "./agent-approvals";
-import { createAgentCapabilities } from "./agent-capabilities";
+import {
+  applyAgentApprovalDecisions,
+  closeOpenApprovals,
+} from "./agent-approvals";
+import {
+  createAgentCapabilities,
+  type AgentCapabilityScope,
+} from "./agent-capabilities";
 
 const TITLE_LIMIT = 80;
 const RESPONSE_FAILURE_TEXT = "The agent could not finish this response.";
@@ -59,10 +65,7 @@ export interface AgentTurnDependencies {
   saveRunMessages: typeof saveAgentRunMessages;
   renewRun: typeof renewAgentRun;
   finishRun: typeof finishAgentRun;
-  createCapabilities: (scope: {
-    userId: string;
-    conversationId: string;
-  }) => MailAgentCapabilities;
+  createCapabilities: (scope: AgentCapabilityScope) => MailAgentCapabilities;
   getModel: () => { model: LanguageModel };
   generateId: () => string;
   now: () => Date;
@@ -169,10 +172,22 @@ export async function runAgentTurn(
 
   let isRunFinished = false;
   let hasStreamed = false;
+  // Stops the turn when the client stops it or when another turn takes the
+  // conversation over, so a superseded turn cannot keep changing Gmail.
+  const runController = new AbortController();
+  const abortRun = () => runController.abort();
+  input.abortSignal.addEventListener("abort", abortRun, { once: true });
+  if (input.abortSignal.aborted) abortRun();
+  const ensureRunActive = async () => {
+    const isActive = await dependencies.renewRun({ conversationId, runId });
+    if (!isActive) abortRun();
+    return isActive;
+  };
   try {
     const capabilities = dependencies.createCapabilities({
       userId: input.userId,
       conversationId,
+      ensureRunActive,
     });
     const validation = await safeValidateUIMessages<InvookAgentUIMessage>({
       messages: start.messages,
@@ -185,24 +200,34 @@ export async function runAgentTurn(
     }
     let messages = validation.data;
     if (frame.type === "approval") {
+      // Decisions stay in memory until the turn's response is stored. A turn
+      // that fails first leaves the approval open, so the user can decide
+      // again; the tool call's ID keeps a repeated Gmail write idempotent.
       const decided = applyAgentApprovalDecisions(messages, frame.decisions);
-      const stored = decided ? toStoredMessage(decided) : null;
-      if (!decided || !stored) {
+      if (!decided) {
         reject("invalid");
         return { isSessionEnded: false };
       }
-      const { saved } = await dependencies.saveRunMessages({
-        userId: input.userId,
-        conversationId,
-        runId,
-        messages: [stored],
-        finishRun: false,
-      });
-      if (!saved) {
-        reject("busy");
-        return { isSessionEnded: false };
-      }
       messages = [...messages.slice(0, -1), decided];
+    } else {
+      // A new message leaves any open approval behind it unanswered.
+      const previous = messages.at(-2);
+      const closed = previous ? closeOpenApprovals(previous) : null;
+      const stored = closed ? toStoredMessage(closed) : null;
+      if (closed && stored) {
+        const { saved } = await dependencies.saveRunMessages({
+          userId: input.userId,
+          conversationId,
+          runId,
+          messages: [stored],
+          finishRun: false,
+        });
+        if (!saved) {
+          reject("busy");
+          return { isSessionEnded: false };
+        }
+        messages = [...messages.slice(0, -2), closed, ...messages.slice(-1)];
+      }
     }
 
     const accounts = await dependencies.listAccounts(input.userId);
@@ -227,13 +252,14 @@ export async function runAgentTurn(
       model: dependencies.getModel().model,
       ...settings,
       messages: await convertToModelMessages(messages, { tools: settings.tools }),
-      abortSignal: input.abortSignal,
+      abortSignal: runController.signal,
       // Replaces the SDK default, which prints the provider request body and
       // with it the mailbox content in the prompt.
       onError: ({ error }) => logTurnFailure(conversationId, "model", error),
-      onStepEnd: async () => {
-        await dependencies.renewRun({ conversationId, runId });
-      },
+      // Checked before every further step: the SDK does not consult the abort
+      // signal between steps, so ownership is confirmed (and the lease
+      // renewed) here, and a superseded turn takes no further step.
+      stopWhen: [settings.stopWhen, async () => !(await ensureRunActive())],
     });
     const reader = toUIMessageStream({
       stream: result.stream,
@@ -281,6 +307,7 @@ export async function runAgentTurn(
       reject("unavailable");
     }
   } finally {
+    input.abortSignal.removeEventListener("abort", abortRun);
     if (!isRunFinished) {
       await dependencies.finishRun({ conversationId, runId });
     }

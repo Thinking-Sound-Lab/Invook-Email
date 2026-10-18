@@ -33,7 +33,11 @@ import {
   GmailReplyContextUnavailableError,
   saveComposeDraft,
 } from "./compose-drafts";
-import { GmailDraftSendPendingError, sendComposeDraft } from "./compose-send";
+import {
+  GmailDraftChangedError,
+  GmailDraftSendPendingError,
+  sendComposeDraft,
+} from "./compose-send";
 import {
   getGmailProviderAccessForAccount,
   GmailProviderConfigurationError,
@@ -170,6 +174,9 @@ function describeProviderFailure(error: unknown): string | null {
   ) {
     return "Gmail is still finishing an earlier attempt. Try again in a moment.";
   }
+  if (error instanceof GmailDraftChangedError) {
+    return "The draft changed after you approved it, so it was not sent.";
+  }
   if (error instanceof GmailDraftWriteConflictError) {
     return "This conflicts with an earlier attempt to save the same email.";
   }
@@ -184,13 +191,26 @@ function describeProviderFailure(error: unknown): string | null {
   return null;
 }
 
+export interface AgentCapabilityScope {
+  userId: string;
+  conversationId: string;
+  /**
+   * Confirms this turn still owns the conversation before a Gmail write. A
+   * turn whose lease another turn took over must not keep changing mail.
+   */
+  ensureRunActive: () => Promise<boolean>;
+}
+
+const RUN_SUPERSEDED_REASON =
+  "This conversation continued elsewhere, so Invook stopped before changing Gmail.";
+
 /**
  * Binds the agent's tools to one signed-in user and conversation. Every read
  * and write is scoped by the server-resolved user ID; model output can only
  * name records that this scope then authorizes.
  */
 export function createAgentCapabilities(
-  scope: { userId: string; conversationId: string },
+  scope: AgentCapabilityScope,
   dependencies: AgentCapabilityDependencies = defaultDependencies,
 ): MailAgentCapabilities {
   const writeKey = (toolCallId: string, purpose: string) =>
@@ -247,7 +267,12 @@ export function createAgentCapabilities(
   async function writeDraft(
     input: AgentEmailInput,
     idempotencyKey: string,
-  ): Promise<{ access: GmailProviderAccess; providerDraftId: string; providerThreadId: string }> {
+  ): Promise<{
+    access: GmailProviderAccess;
+    providerDraftId: string;
+    providerMessageId: string;
+    providerThreadId: string;
+  }> {
     const { fields, source } = prepareEmail(input);
     const access = await getAccess(input.accountId);
     try {
@@ -263,6 +288,7 @@ export function createAgentCapabilities(
       return {
         access,
         providerDraftId: result.draft.providerDraftId,
+        providerMessageId: result.draft.providerMessageId,
         providerThreadId: result.draft.providerThreadId,
       };
     } catch (error) {
@@ -356,6 +382,7 @@ export function createAgentCapabilities(
 
     async saveDraft(input, { toolCallId }): Promise<AgentDraftOutput> {
       try {
+        if (!(await scope.ensureRunActive())) return failed(RUN_SUPERSEDED_REASON);
         const draft = await writeDraft(input, writeKey(toolCallId, "draft"));
         return {
           status: "saved",
@@ -370,15 +397,19 @@ export function createAgentCapabilities(
 
     async sendEmail(input, { toolCallId }): Promise<AgentSendOutput> {
       try {
-        // The approved content is written to the draft first, so the message
-        // Gmail sends is exactly the one the user approved.
+        if (!(await scope.ensureRunActive())) return failed(RUN_SUPERSEDED_REASON);
+        // The approved content is written to the draft first, and the send is
+        // bound to that exact draft message, so an edit made after approval is
+        // refused rather than sent.
         const draft = await writeDraft(input, writeKey(toolCallId, "send-draft"));
+        if (!(await scope.ensureRunActive())) return failed(RUN_SUPERSEDED_REASON);
         try {
           const sent = await dependencies.sendDraft({
             userId: scope.userId,
             access: draft.access,
             idempotencyKey: writeKey(toolCallId, "send"),
             providerDraftId: draft.providerDraftId,
+            expectedProviderMessageId: draft.providerMessageId,
           });
           return {
             status: "sent",
