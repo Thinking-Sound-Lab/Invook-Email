@@ -254,6 +254,49 @@ function connectedThreadAccountCondition() {
   )`;
 }
 
+async function releaseLiveLabelReservationWhenAccountUnavailable(
+  input: {
+    userId: string;
+    accountId: string;
+    checkpoint: ThreadLabelAnalysisCheckpoint;
+  },
+  database: DatabaseExecutor,
+): Promise<boolean> {
+  // The assign step finishes without applying a label, consuming
+  // `label.thread.assign:${threadId}:${version}:${hash}`. Bump the version so
+  // reconnect can admit a fresh step. Leaving the row `running` excludes every
+  // later live/batch candidate, including worker-boot scan recovery.
+  const [released] = await database
+    .update(threads)
+    .set({
+      labelAnalysisState: "not_requested",
+      labelAnalysisVersion: sql`${threads.labelAnalysisVersion} + 1`,
+      labelAnalysisError: null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(threads.id, input.checkpoint.threadId),
+        eq(threads.userId, input.userId),
+        eq(threads.accountId, input.accountId),
+        eq(threads.labelAnalysisVersion, input.checkpoint.analysisVersion),
+        eq(
+          threads.labelAnalysisDefinitionHash,
+          input.checkpoint.definitionHash,
+        ),
+        eq(threads.labelAnalysisState, "running"),
+        sql`not exists (
+          select 1 from ${connectedAccounts} account
+          where account.id = ${threads.accountId}
+            and account.user_id = ${threads.userId}
+            and account.status = 'connected'
+        )`,
+      ),
+    )
+    .returning({ id: threads.id });
+  return Boolean(released);
+}
+
 function automaticThreadLabelAssignmentAllowed() {
   return sql<boolean>`not exists (
     select 1 from ${threadLabelAssignments} manual_assignment
@@ -453,8 +496,13 @@ export async function beginThreadLabelAnalysis(
         labelAnalysisState: threads.labelAnalysisState,
         labelAnalysisAfter: threads.labelAnalysisAfter,
         assignmentSource: threadLabelAssignments.source,
+        accountStatus: connectedAccounts.status,
       })
       .from(threads)
+      .innerJoin(
+        connectedAccounts,
+        eq(connectedAccounts.id, threads.accountId),
+      )
       .leftJoin(
         threadLabelAssignments,
         eq(threadLabelAssignments.threadId, threads.id),
@@ -462,7 +510,6 @@ export async function beginThreadLabelAnalysis(
       .where(
         and(
           eq(threads.id, input.checkpoint.threadId),
-          connectedThreadAccountCondition(),
           eq(threads.userId, input.userId),
           eq(threads.accountId, input.accountId),
         ),
@@ -470,6 +517,18 @@ export async function beginThreadLabelAnalysis(
       .for("update", { of: threads })
       .limit(1);
     if (!thread) return { status: "missing" };
+    if (thread.accountStatus !== "connected") {
+      if (
+        checkpointMatches(thread, input.checkpoint) &&
+        thread.labelAnalysisState === "running"
+      ) {
+        await releaseLiveLabelReservationWhenAccountUnavailable(
+          input,
+          transaction,
+        );
+      }
+      return { status: "missing" };
+    }
     if (!checkpointMatches(thread, input.checkpoint)) {
       return { status: "superseded" };
     }
@@ -546,8 +605,13 @@ export async function completeThreadLabelAnalysis(
         labelAnalysisState: threads.labelAnalysisState,
         labelAnalysisAfter: threads.labelAnalysisAfter,
         assignmentSource: threadLabelAssignments.source,
+        accountStatus: connectedAccounts.status,
       })
       .from(threads)
+      .innerJoin(
+        connectedAccounts,
+        eq(connectedAccounts.id, threads.accountId),
+      )
       .leftJoin(
         threadLabelAssignments,
         eq(threadLabelAssignments.threadId, threads.id),
@@ -555,7 +619,6 @@ export async function completeThreadLabelAnalysis(
       .where(
         and(
           eq(threads.id, input.checkpoint.threadId),
-          connectedThreadAccountCondition(),
           eq(threads.userId, input.userId),
           eq(threads.accountId, input.accountId),
         ),
@@ -563,6 +626,22 @@ export async function completeThreadLabelAnalysis(
       .for("update", { of: threads })
       .limit(1);
     if (!thread) return { status: "missing" };
+    if (thread.accountStatus !== "connected") {
+      if (
+        checkpointMatches(thread, input.checkpoint) &&
+        thread.labelAnalysisState === "running"
+      ) {
+        await releaseLiveLabelReservationWhenAccountUnavailable(
+          {
+            userId: input.userId,
+            accountId: input.accountId,
+            checkpoint: input.checkpoint,
+          },
+          transaction,
+        );
+      }
+      return { status: "missing" };
+    }
     if (!checkpointMatches(thread, input.checkpoint)) {
       return { status: "superseded" };
     }
@@ -689,8 +768,16 @@ export async function failThreadLabelAnalysis(
         ),
       )
       .returning({ id: threads.id });
-    if (!updated) return false;
-    return true;
+    if (updated) return true;
+    await releaseLiveLabelReservationWhenAccountUnavailable(
+      {
+        userId: input.userId,
+        accountId: input.accountId,
+        checkpoint: input.checkpoint,
+      },
+      transaction,
+    );
+    return false;
   });
 }
 
