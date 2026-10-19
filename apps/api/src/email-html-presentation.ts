@@ -270,6 +270,11 @@ function sanitizeEmailHtml(
       ul: ["type"],
     },
     allowedSchemes: ["data", "http", "https", "mailto", "tel"],
+    // `data:` is for self-contained images. A `data:text/html` link would open
+    // attacker markup in a new tab from the message body.
+    allowedSchemesByTag: {
+      a: ["http", "https", "mailto", "tel"],
+    },
     // Email presentation depends on embedded CSS. The rendered content is
     // isolated from the application stylesheet by a Shadow DOM boundary.
     allowVulnerableTags: true,
