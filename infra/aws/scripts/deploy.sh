@@ -43,6 +43,15 @@ cloudfront_origin_prefix_list() {
   [[ "$prefix_list" == pl-* ]] || { echo "The CloudFront origin-facing prefix list is unavailable in $region." >&2; exit 1; }
   printf '%s' "$prefix_list"
 }
+# Tags are immutable, so a retried release reuses an image an earlier attempt pushed.
+publish_image() {
+  local target="$1" repository="$2" tag="$3"
+  if aws_cli ecr describe-images --repository-name "$stack/$target" --image-ids "imageTag=$tag" >/dev/null 2>&1; then
+    echo "The $target image is already published as $tag."
+    return
+  fi
+  docker buildx build --platform linux/amd64 --target "$target" -f docker/Dockerfile -t "$repository:$tag" --push .
+}
 apply_stack() {
   local arguments=(deploy "$stack" --require-approval never)
   if [[ -n "${AWS_CLOUDFORMATION_ROLE_ARN:-}" ]]; then arguments+=(--role-arn "$AWS_CLOUDFORMATION_ROLE_ARN"); fi
@@ -104,8 +113,8 @@ case "${1:-}" in
     api_repository="$(output ApiRepository)"
     worker_repository="$(output WorkerRepository)"
     aws_cli ecr get-login-password | docker login --username AWS --password-stdin "${api_repository%%/*}"
-    docker buildx build --platform linux/amd64 --target api -f docker/Dockerfile -t "$api_repository:$tag" --push .
-    docker buildx build --platform linux/amd64 --target worker -f docker/Dockerfile -t "$worker_repository:$tag" --push .
+    publish_image api "$api_repository" "$tag"
+    publish_image worker "$worker_repository" "$tag"
     echo "Published release tag: $tag"
     ;;
   stage|release)
@@ -149,6 +158,15 @@ if (response.status !== 200) throw new Error('API readiness check failed.');
 console.log('Production API is ready.');
 NODE
     ;;
+  authorize-ci)
+    repository="${2:?Provide the GitHub repository as owner/name.}"
+    [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Use the GitHub repository as owner/name." >&2; exit 1; }
+    parameters=("ReleaseRepository=$repository")
+    # IAM allows one GitHub Actions OIDC provider per account, so an existing one is reused.
+    if [[ -n "${AWS_GITHUB_OIDC_PROVIDER_ARN:-}" ]]; then parameters+=("GitHubOidcProviderArn=$AWS_GITHUB_OIDC_PROVIDER_ARN"); fi
+    apply_stack "${parameters[@]}"
+    echo "Set the $repository production environment variable AWS_RELEASE_ROLE_ARN to: $(output ReleaseRoleArn)"
+    ;;
   diff)
     cdk_cli diff "$stack"
     ;;
@@ -156,5 +174,5 @@ NODE
     aws_cli cloudformation describe-stacks --stack-name "$stack" \
       --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' --output json
     ;;
-  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|diff|configure [env-file]|publish [tag]|stage tag|release tag|status}" >&2; exit 1 ;;
+  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|authorize-ci owner/name|diff|configure [env-file]|publish [tag]|stage tag|release tag|status}" >&2; exit 1 ;;
 esac

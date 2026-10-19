@@ -15,8 +15,9 @@ infra/aws/
     runtime-resources.ts           ECR, ECS cluster, IAM roles, secrets and logs
     mail-services.ts               API, worker and migration task definitions and services
     task-operations.ts             Scoped role for one-off migrations and infrastructure checks
+    release-access.ts              Optional GitHub Actions role that publishes and releases
   scripts/
-    deploy.sh                      Bootstrap, configuration, image publication and release
+    deploy.sh                      Bootstrap, configuration, GitHub release access, image publication and release
     runtime-env.ts                 Runtime validation and stable key generation
   production.env.example           Documented API and worker variables
   cdk.json                         CDK configuration
@@ -130,6 +131,18 @@ Declare the scopes requested by `packages/gmail/src/scopes.ts` in the Google pro
 ```
 
 Images use immutable ECR tags and Linux amd64. Use a new tag for each build. `release` checks the deployed settings, secret and images, stops API and worker, runs the migration task, checks its exit code, starts both services, and checks API readiness. It intentionally permits downtime while migrations run, including breaking migrations. If migration fails, services stay stopped and the migration log group contains diagnostics. Changes made directly in Secrets Manager apply to containers after another `release`; keep the ignored setup file synchronized before the next `configure`.
+
+### Release from GitHub Actions
+
+`.github/workflows/release-aws.yml` releases each push to `main` that changes the API, worker, database schema or infrastructure; changes to only `apps/web` or Markdown ship through Vercel alone. It runs `make verify`, then `deploy.sh publish` and `release` with the commit SHA as the image tag, so the Supabase migrations in `packages/database/drizzle` apply from the migration task before the new services start. Database credentials stay in Secrets Manager; GitHub holds no long-lived AWS keys. A rerun reuses images already published for its commit, and releases never overlap or cancel one another.
+
+The release job runs in the GitHub `production` environment, and the AWS role trusts only that environment of one repository. Give the environment a deployment branch rule that allows only `main`, and add required reviewers to approve each release's downtime before it starts. To connect a repository, run this once with the operator credentials used for `bootstrap`:
+
+```bash
+./infra/aws/scripts/deploy.sh authorize-ci owner/repository
+```
+
+It adds the `<AWS_STACK_NAME>-github-release` role, and a GitHub OIDC provider unless `AWS_GITHUB_OIDC_PROVIDER_ARN` names the account's existing one; IAM allows one per account. Then set the `production` environment variables `AWS_REGION`, `AWS_RELEASE_ROLE_ARN` (printed by the command) and, for a stack other than `invookemail-prod`, `AWS_STACK_NAME`. The role can update this stack through the CDK bootstrap roles, push its two image repositories, read its runtime secret to validate a release, and start the migration task; protect the environment accordingly. Vercel still deploys the web app as soon as a change merges, so a release that changes the API contract leaves the new UI running against the previous API until the release finishes.
 
 Logs are under `/<AWS_STACK_NAME>/api`, `/worker`, and `/migration`, with 14-day retention. S3 and the runtime secret are retained if the CDK stack is deleted. Delete those explicitly only when intentionally removing all installation data. Tagged container releases remain available for rollback; returning to an older image does not undo database migrations.
 

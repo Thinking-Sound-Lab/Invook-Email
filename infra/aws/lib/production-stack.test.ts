@@ -120,7 +120,10 @@ test("one-off task operations trust only the configured deployer and scoped ECS 
       Version: "2012-10-17", Statement: [{
         Effect: "Allow", Action: "sts:AssumeRole",
         Principal: { AWS: { "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root" } },
-        Condition: { ArnEquals: { "aws:PrincipalArn": { Ref: "DeploymentPrincipalArn" } } },
+        Condition: { ArnEquals: { "aws:PrincipalArn": [
+          { Ref: "DeploymentPrincipalArn" },
+          { "Fn::If": ["HasReleaseAccess", { "Fn::Sub": releaseRoleArn }, { Ref: "AWS::NoValue" }] },
+        ] } },
       }],
     },
     Policies: [{
@@ -132,6 +135,82 @@ test("one-off task operations trust only the configured deployer and scoped ECS 
           Resource: [{ "Fn::GetAtt": ["ExecutionRole", "Arn"] }, { "Fn::GetAtt": ["ApiRole", "Arn"] }],
           Condition: { StringEquals: { "iam:PassedToService": "ecs-tasks.amazonaws.com" } },
         }]),
+      },
+    }],
+  });
+});
+
+const releaseRoleArn = "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-github-release";
+
+test("GitHub releases are off until a repository is set, and then only its production environment may release", () => {
+  const template = createTemplate();
+  template.hasParameter("ReleaseRepository", { Default: "" });
+  template.hasParameter("GitHubOidcProviderArn", { Default: "" });
+  template.hasCondition("HasReleaseAccess", { "Fn::Not": [{ "Fn::Equals": [{ Ref: "ReleaseRepository" }, ""] }] });
+  // An account that already trusts GitHub reuses its provider.
+  template.hasCondition("CreatesGitHubOidcProvider", {
+    "Fn::And": [{ Condition: "HasReleaseAccess" }, { "Fn::Equals": [{ Ref: "GitHubOidcProviderArn" }, ""] }],
+  });
+  template.hasResource("AWS::IAM::OIDCProvider", {
+    Condition: "CreatesGitHubOidcProvider",
+    Properties: { Url: "https://token.actions.githubusercontent.com", ClientIdList: ["sts.amazonaws.com"] },
+  });
+  template.hasResource("AWS::IAM::Role", {
+    Condition: "HasReleaseAccess",
+    Properties: Match.objectLike({
+      RoleName: { "Fn::Sub": "${AWS::StackName}-github-release" },
+      AssumeRolePolicyDocument: {
+        Version: "2012-10-17",
+        Statement: [{
+          Effect: "Allow", Action: "sts:AssumeRoleWithWebIdentity",
+          Principal: { Federated: { "Fn::If": [
+            "CreatesGitHubOidcProvider", { Ref: "GitHubOidcProvider" }, { Ref: "GitHubOidcProviderArn" },
+          ] } },
+          Condition: { StringEquals: {
+            "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+            "token.actions.githubusercontent.com:sub": {
+              "Fn::Join": ["", ["repo:", { Ref: "ReleaseRepository" }, ":environment:production"]],
+            },
+          } },
+        }],
+      },
+    }),
+  });
+  template.hasOutput("ReleaseRoleArn", { Condition: "HasReleaseAccess", Value: { "Fn::GetAtt": ["ReleaseRole", "Arn"] } });
+});
+
+test("the release role reaches only this stack's images, secret, services and task operations", () => {
+  const template = createTemplate();
+  template.hasResourceProperties("AWS::IAM::Role", {
+    Policies: [{
+      PolicyName: "PublishAndRelease",
+      PolicyDocument: {
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow", Action: "sts:AssumeRole",
+            Resource: { "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-*-${AWS::AccountId}-${AWS::Region}" },
+          },
+          {
+            Effect: "Allow", Action: "cloudformation:DescribeStacks",
+            Resource: { "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*" },
+          },
+          { Effect: "Allow", Action: ["ec2:DescribeManagedPrefixLists", "ecr:GetAuthorizationToken"], Resource: "*" },
+          Match.objectLike({
+            Action: Match.arrayWith(["ecr:DescribeImages", "ecr:PutImage"]),
+            Resource: [{ "Fn::GetAtt": ["ApiRepository", "Arn"] }, { "Fn::GetAtt": ["WorkerRepository", "Arn"] }],
+          }),
+          { Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: "RuntimeSecret" } },
+          {
+            Effect: "Allow", Action: "ecs:DescribeServices",
+            Resource: { "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:service/${AWS::StackName}/*" },
+          },
+          { "Fn::If": [
+            "HasTaskOperations",
+            { Effect: "Allow", Action: "sts:AssumeRole", Resource: { "Fn::GetAtt": ["TaskOperationsRole", "Arn"] } },
+            { Ref: "AWS::NoValue" },
+          ] },
+        ],
       },
     }],
   });
