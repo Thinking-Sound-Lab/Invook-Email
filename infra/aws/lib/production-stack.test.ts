@@ -113,6 +113,16 @@ test("ordinary settings and secrets are complete, disjoint and bound to the inte
   }
 });
 
+test("the API receives the OpenAI key its label previews and AI status read", () => {
+  createTemplate().hasResourceProperties("AWS::ECS::TaskDefinition", {
+    ContainerDefinitions: [Match.objectLike({
+      Name: "api", Secrets: Match.arrayWith([{
+        Name: "OPENAI_API_KEY", ValueFrom: { "Fn::Join": ["", [{ Ref: "RuntimeSecret" }, ":OPENAI_API_KEY::"]] },
+      }]),
+    })],
+  });
+});
+
 test("one-off task operations trust only the configured deployer and scoped ECS roles", () => {
   const template = createTemplate();
   template.hasResourceProperties("AWS::IAM::Role", {
