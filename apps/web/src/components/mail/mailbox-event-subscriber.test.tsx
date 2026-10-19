@@ -675,6 +675,30 @@ test("failed canonical reads retain cached mail and show an unavailable state", 
   assert.equal(refreshCount, 0);
 });
 
+test("a live deletion still leaves the list after canonical recovery fails", async () => {
+  await renderMailbox();
+  await ready();
+  respond = (config) => {
+    if (config.url === "/v1/mailbox/threads") throw new Error("List read unavailable");
+    return defaultResponse(config);
+  };
+  await visibility("visible");
+  assert.match(document.body.textContent ?? "", /Previously stored mail/);
+  assert.match(document.querySelector('[role="alert"]')?.textContent ?? "", /updates are unavailable/);
+  respond = (config) => {
+    if (config.url === "/v1/mailbox/threads") throw new Error("List read unavailable");
+    if (config.url === "/v1/mailbox/thread-updates") {
+      return { threads: [], missingThreadIds: [threadId] };
+    }
+    return defaultResponse(config);
+  };
+  await emit("mailbox", historyEvent([threadId]));
+  assert.doesNotMatch(document.body.textContent ?? "", /Previously stored mail/);
+  assert.equal(useMailboxStore.getState().threadsById[threadId], undefined);
+  assert.equal(requests.filter((request) => request.url === "/v1/mailbox/thread-updates").length, 1);
+  assert.match(document.querySelector('[role="alert"]')?.textContent ?? "", /updates are unavailable/);
+});
+
 test("recovery failures remain visible through the first stream error and reconnect", async () => {
   await renderMailbox();
   await ready();

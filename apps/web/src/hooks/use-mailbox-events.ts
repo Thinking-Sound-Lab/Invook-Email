@@ -162,9 +162,12 @@ export function useMailboxEvents(): MailboxEventStreamStatus {
       try {
         while (!signal.aborted && (shouldRecover || pendingThreadIds.size > 0)) {
           const isRecovery = shouldRecover;
-          const threadIds = Array.from(pendingThreadIds);
+          const threadIds = isRecovery ? [] : Array.from(pendingThreadIds);
           shouldRecover = false;
-          pendingThreadIds.clear();
+          // Recovery must not drop named thread ids. A patch can be coalesced
+          // into canonical recovery while the stream is unhealthy, and those
+          // ids are the only way to apply a deletion if the list read fails.
+          if (!isRecovery) pendingThreadIds.clear();
           requestController = new AbortController();
           const requestSignal = AbortSignal.any([signal, requestController.signal]);
           try {
