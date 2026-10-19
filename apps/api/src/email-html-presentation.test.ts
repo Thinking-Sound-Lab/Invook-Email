@@ -288,6 +288,7 @@ test("email HTML includes the isolated viewer root without a document wrapper", 
   const { sanitizedHtml: content } = buildEmailHtmlPresentation("<p>Hello</p>");
 
   assert.match(content, /:host \{/);
+  assert.match(content, /transform: translateZ\(0\)/);
   assert.match(content, /color-scheme: inherit/);
   assert.match(content, /background-color: transparent/);
   assert.match(content, /color: inherit/);
@@ -303,6 +304,29 @@ test("email HTML includes the isolated viewer root without a document wrapper", 
     /<invook-email-root class="invook-email-root" role="document"><invook-email-body><p>Hello<\/p><\/invook-email-body><\/invook-email-root>$/,
   );
   assert.doesNotMatch(content, /<!doctype|<html|<body|postMessage|ResizeObserver/);
+});
+
+test("email HTML cannot let sender CSS overlay thread actions", () => {
+  const { sanitizedHtml: content } = buildEmailHtmlPresentation(`
+    <html>
+      <body>
+        <style>
+          :host {
+            position: fixed !important;
+            inset: 0 !important;
+            z-index: 2147483647 !important;
+          }
+          a.cover { position: sticky; top: 0; }
+        </style>
+        <a class="cover" href="https://attacker.example/capture" style="position:fixed;inset:0;opacity:0.01">Invoice</a>
+      </body>
+    </html>
+  `);
+
+  const senderCss = content.replace(/^<style>[\s\S]*?<\/style>/, "");
+  assert.match(senderCss, /\.invook-email-root \{/);
+  assert.match(senderCss, /a\.cover \{ top: 0; \}/);
+  assert.doesNotMatch(senderCss, /:host|position:\s*(?:fixed|sticky)/);
 });
 
 test("email HTML marks common quoted reply containers for collapsed display", () => {

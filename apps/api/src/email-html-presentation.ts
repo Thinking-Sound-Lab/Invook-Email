@@ -389,6 +389,8 @@ function buildEmailContentStyles(canvas: EmailCanvas): string {
     display: block;
     font-family: inherit;
     min-width: 0;
+    position: relative;
+    transform: translateZ(0);
     width: 100%;
   }
   ${EMAIL_ROOT_ELEMENT} {
