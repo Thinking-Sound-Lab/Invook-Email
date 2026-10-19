@@ -15,6 +15,10 @@ cdk_cli() {
   if [[ -n "${AWS_PROFILE:-}" ]]; then arguments+=(--profile "$AWS_PROFILE"); fi
   pnpm --dir infra/aws exec cdk "${arguments[@]}"
 }
+stack_parameter() {
+  aws_cli cloudformation describe-stacks --stack-name "$stack" --output json |
+    jq -r --arg key "$1" '.Stacks[0].Parameters[] | select(.ParameterKey == $key) | .ParameterValue'
+}
 output() {
   aws_cli cloudformation describe-stacks --stack-name "$stack" --output json |
     jq -er --arg key "$1" '.Stacks[0].Outputs[] | select(.OutputKey == $key) | .OutputValue'
@@ -158,6 +162,23 @@ if (response.status !== 200) throw new Error('API readiness check failed.');
 console.log('Production API is ready.');
 NODE
     ;;
+  release-commit)
+    commit="${2:?Provide the commit to release.}"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "Provide the full commit SHA." >&2; exit 1; }
+    deployed_image="$(stack_parameter ApiImage)"
+    deployed_tag="${deployed_image##*:}"
+    # Releases can run out of commit order. A release that already contains
+    # this commit is never replaced by it, unless it is this commit stopped
+    # partway, which releasing again completes.
+    if [[ "$deployed_tag" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$commit" "$deployed_tag" 2>/dev/null; then
+      if [[ "$deployed_tag" != "$commit" || "$(stack_parameter ApiCount)" != 0 ]]; then
+        echo "Production already runs $deployed_tag, which includes $commit."
+        exit 0
+      fi
+    fi
+    "$repository_root/infra/aws/scripts/deploy.sh" publish "$commit"
+    "$repository_root/infra/aws/scripts/deploy.sh" release "$commit"
+    ;;
   authorize-ci)
     repository="${2:?Provide the GitHub repository as owner/name.}"
     [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Use the GitHub repository as owner/name." >&2; exit 1; }
@@ -174,5 +195,5 @@ NODE
     aws_cli cloudformation describe-stacks --stack-name "$stack" \
       --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' --output json
     ;;
-  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|authorize-ci owner/name|diff|configure [env-file]|publish [tag]|stage tag|release tag|status}" >&2; exit 1 ;;
+  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|authorize-ci owner/name|diff|configure [env-file]|publish [tag]|stage tag|release tag|release-commit sha|status}" >&2; exit 1 ;;
 esac
