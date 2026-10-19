@@ -188,8 +188,11 @@ case "${1:-}" in
     "$repository_root/infra/aws/scripts/deploy.sh" release "$commit"
     ;;
   authorize-ci)
-    repository="${2:?Provide the GitHub repository as owner/name.}"
-    [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Use the GitHub repository as owner/name." >&2; exit 1; }
+    # GitHub's OIDC subject names a repository with immutable subjects as
+    # owner@id/name@id, which the role must match exactly.
+    repository="${2:?Provide the GitHub repository as its OIDC subject names it.}"
+    [[ "$repository" =~ ^[A-Za-z0-9_.-]+(@[0-9]+)?/[A-Za-z0-9_.-]+(@[0-9]+)?$ ]] ||
+      { echo "Use owner/name, or owner@id/name@id for a repository with immutable OIDC subjects." >&2; exit 1; }
     parameters=("ReleaseRepository=$repository")
     # IAM allows one GitHub Actions OIDC provider per account, so an existing one is reused.
     if [[ -n "${AWS_GITHUB_OIDC_PROVIDER_ARN:-}" ]]; then parameters+=("GitHubOidcProviderArn=$AWS_GITHUB_OIDC_PROVIDER_ARN"); fi
@@ -203,5 +206,5 @@ case "${1:-}" in
     aws_cli cloudformation describe-stacks --stack-name "$stack" \
       --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' --output json
     ;;
-  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|authorize-ci owner/name|diff|configure [env-file]|publish [tag]|stage tag|release tag|release-commit sha|status}" >&2; exit 1 ;;
+  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|authorize-ci owner[@id]/name[@id]|diff|configure [env-file]|publish [tag]|stage tag|release tag|release-commit sha|status}" >&2; exit 1 ;;
 esac
