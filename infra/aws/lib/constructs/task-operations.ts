@@ -6,6 +6,8 @@ import type { RuntimeResources } from "./runtime-resources";
 
 export interface TaskOperationsProps {
   principalArn: string;
+  /** The GitHub release role, or `AWS::NoValue` when releases run only by hand. */
+  releasePrincipalArn: string;
   runtime: RuntimeResources;
   services: MailServices;
 }
@@ -29,7 +31,7 @@ export class TaskOperations extends Construct {
         Statement: [{
           Effect: "Allow", Action: "sts:AssumeRole",
           Principal: { AWS: Fn.sub("arn:${AWS::Partition}:iam::${AWS::AccountId}:root") },
-          Condition: { ArnEquals: { "aws:PrincipalArn": props.principalArn } },
+          Condition: { ArnEquals: { "aws:PrincipalArn": [props.principalArn, props.releasePrincipalArn] } },
         }],
       },
       policies: [{

@@ -15,6 +15,10 @@ cdk_cli() {
   if [[ -n "${AWS_PROFILE:-}" ]]; then arguments+=(--profile "$AWS_PROFILE"); fi
   pnpm --dir infra/aws exec cdk "${arguments[@]}"
 }
+stack_parameter() {
+  aws_cli cloudformation describe-stacks --stack-name "$stack" --output json |
+    jq -r --arg key "$1" '.Stacks[0].Parameters[] | select(.ParameterKey == $key) | .ParameterValue'
+}
 output() {
   aws_cli cloudformation describe-stacks --stack-name "$stack" --output json |
     jq -er --arg key "$1" '.Stacks[0].Outputs[] | select(.OutputKey == $key) | .OutputValue'
@@ -42,6 +46,25 @@ cloudfront_origin_prefix_list() {
     --query 'PrefixLists[0].PrefixListId' --output text)"
   [[ "$prefix_list" == pl-* ]] || { echo "The CloudFront origin-facing prefix list is unavailable in $region." >&2; exit 1; }
   printf '%s' "$prefix_list"
+}
+# Waits for both services to settle, then requires the API to report ready.
+check_release_health() {
+  aws_cli ecs wait services-stable --cluster "$(output Cluster)" --services "$stack-api" "$stack-worker" &&
+    node --input-type=module - "$(output ApiUrl)/health/ready" <<'NODE'
+import axios from './apps/api/node_modules/axios/index.js';
+const response = await axios.get(process.argv[2]);
+if (response.status !== 200) throw new Error('API readiness check failed.');
+console.log('Production API is ready.');
+NODE
+}
+# Tags are immutable, so a retried release reuses an image an earlier attempt pushed.
+publish_image() {
+  local target="$1" repository="$2" tag="$3"
+  if aws_cli ecr describe-images --repository-name "$stack/$target" --image-ids "imageTag=$tag" >/dev/null 2>&1; then
+    echo "The $target image is already published as $tag."
+    return
+  fi
+  docker buildx build --platform linux/amd64 --target "$target" -f docker/Dockerfile -t "$repository:$tag" --push .
 }
 apply_stack() {
   local arguments=(deploy "$stack" --require-approval never)
@@ -104,8 +127,8 @@ case "${1:-}" in
     api_repository="$(output ApiRepository)"
     worker_repository="$(output WorkerRepository)"
     aws_cli ecr get-login-password | docker login --username AWS --password-stdin "${api_repository%%/*}"
-    docker buildx build --platform linux/amd64 --target api -f docker/Dockerfile -t "$api_repository:$tag" --push .
-    docker buildx build --platform linux/amd64 --target worker -f docker/Dockerfile -t "$worker_repository:$tag" --push .
+    publish_image api "$api_repository" "$tag"
+    publish_image worker "$worker_repository" "$tag"
     echo "Published release tag: $tag"
     ;;
   stage|release)
@@ -141,13 +164,37 @@ case "${1:-}" in
         echo "Migration failed. Check /$stack/migration; services remain stopped." >&2; exit 1;
       }
     apply_stack ApiCount=1 WorkerCount=1
-    aws_cli ecs wait services-stable --cluster "$cluster" --services "$stack-api" "$stack-worker"
-    node --input-type=module - "$(output ApiUrl)/health/ready" <<'NODE'
-import axios from './apps/api/node_modules/axios/index.js';
-const response = await axios.get(process.argv[2]);
-if (response.status !== 200) throw new Error('API readiness check failed.');
-console.log('Production API is ready.');
-NODE
+    check_release_health
+    ;;
+  release-commit)
+    commit="${2:?Provide the commit to release.}"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "Provide the full commit SHA." >&2; exit 1; }
+    deployed_image="$(stack_parameter ApiImage)"
+    deployed_tag="${deployed_image##*:}"
+    # Releases can run out of commit order, so a newer release that already
+    # contains this commit is never replaced by it.
+    if [[ "$deployed_tag" =~ ^[0-9a-f]{40}$ && "$deployed_tag" != "$commit" ]] &&
+      git merge-base --is-ancestor "$commit" "$deployed_tag" 2>/dev/null; then
+      echo "Production already runs $deployed_tag, which includes $commit."
+      exit 0
+    fi
+    # An earlier attempt at this commit may have stopped at any step, so it
+    # counts as released only while both services run and the API is ready.
+    if [[ "$deployed_tag" == "$commit" && "$(stack_parameter ApiCount)" != 0 ]] && check_release_health; then
+      echo "Production already runs $commit and is ready."
+      exit 0
+    fi
+    "$repository_root/infra/aws/scripts/deploy.sh" publish "$commit"
+    "$repository_root/infra/aws/scripts/deploy.sh" release "$commit"
+    ;;
+  authorize-ci)
+    repository="${2:?Provide the GitHub repository as owner/name.}"
+    [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "Use the GitHub repository as owner/name." >&2; exit 1; }
+    parameters=("ReleaseRepository=$repository")
+    # IAM allows one GitHub Actions OIDC provider per account, so an existing one is reused.
+    if [[ -n "${AWS_GITHUB_OIDC_PROVIDER_ARN:-}" ]]; then parameters+=("GitHubOidcProviderArn=$AWS_GITHUB_OIDC_PROVIDER_ARN"); fi
+    apply_stack "${parameters[@]}"
+    echo "Set the $repository aws-production environment variable AWS_RELEASE_ROLE_ARN to: $(output ReleaseRoleArn)"
     ;;
   diff)
     cdk_cli diff "$stack"
@@ -156,5 +203,5 @@ NODE
     aws_cli cloudformation describe-stacks --stack-name "$stack" \
       --query 'Stacks[0].{Status:StackStatus,Outputs:Outputs}' --output json
     ;;
-  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|diff|configure [env-file]|publish [tag]|stage tag|release tag|status}" >&2; exit 1 ;;
+  *) echo "Usage: AWS_REGION=... AWS_PROFILE=... $0 {bootstrap|authorize-ci owner/name|diff|configure [env-file]|publish [tag]|stage tag|release tag|release-commit sha|status}" >&2; exit 1 ;;
 esac

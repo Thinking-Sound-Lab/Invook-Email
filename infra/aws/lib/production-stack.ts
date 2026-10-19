@@ -1,9 +1,10 @@
-import { CfnOutput, CfnParameter, Fn, Stack, type StackProps } from "aws-cdk-lib";
+import { CfnCondition, CfnOutput, CfnParameter, Fn, Stack, Token, type StackProps } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 
 import { ApiIngress } from "./constructs/api-ingress";
 import { MailServices } from "./constructs/mail-services";
 import { MailStorage } from "./constructs/mail-storage";
+import { getReleaseRoleArn, ReleaseAccess } from "./constructs/release-access";
 import { RuntimeConfiguration } from "./constructs/runtime-configuration";
 import { RuntimeResources } from "./constructs/runtime-resources";
 import { TaskOperations } from "./constructs/task-operations";
@@ -27,11 +28,26 @@ export class ProductionStack extends Stack {
       type: "String", allowedPattern: "^pl-[0-9a-f]+$",
       description: "Regional ID of the com.amazonaws.global.cloudfront.origin-facing managed prefix list.",
     });
+    const releaseRepository = new CfnParameter(this, "ReleaseRepository", {
+      type: "String", default: "",
+      description: "GitHub repository (owner/name) whose aws-production environment may release this stack. Empty disables it.",
+      allowedPattern: "^$|^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+    });
+    const gitHubOidcProviderArn = new CfnParameter(this, "GitHubOidcProviderArn", {
+      type: "String", default: "",
+      description: "The account's existing GitHub Actions OIDC provider. Empty creates one.",
+      allowedPattern: "^$|^arn:[a-z0-9-]+:iam::[0-9]{12}:oidc-provider/token\\.actions\\.githubusercontent\\.com$",
+    });
     for (const parameter of [
       vpcId, subnetIds, apiImage, workerImage, apiCount, workerCount, deploymentPrincipalArn, originFacingPrefixListId,
+      releaseRepository, gitHubOidcProviderArn,
     ]) {
       parameter.overrideLogicalId(parameter.node.id);
     }
+    const hasReleaseAccess = new CfnCondition(this, "HasReleaseAccess", {
+      expression: Fn.conditionNot(Fn.conditionEquals(releaseRepository.valueAsString, "")),
+    });
+    hasReleaseAccess.overrideLogicalId("HasReleaseAccess");
 
     const storage = new MailStorage(this, "Storage");
     const ingress = new ApiIngress(this, "Ingress", {
@@ -46,7 +62,15 @@ export class ProductionStack extends Stack {
       apiCount: apiCount.valueAsNumber, workerCount: workerCount.valueAsNumber,
     });
     const operations = new TaskOperations(this, "TaskOperations", {
-      principalArn: deploymentPrincipalArn.valueAsString, runtime, services,
+      principalArn: deploymentPrincipalArn.valueAsString,
+      releasePrincipalArn: Token.asString(
+        Fn.conditionIf(hasReleaseAccess.logicalId, getReleaseRoleArn(), Fn.ref("AWS::NoValue")),
+      ),
+      runtime, services,
+    });
+    const release = new ReleaseAccess(this, "ReleaseAccess", {
+      isConfigured: hasReleaseAccess, repository: releaseRepository.valueAsString,
+      oidcProviderArn: gitHubOidcProviderArn.valueAsString, runtime, operations,
     });
 
     const outputs = {
@@ -73,5 +97,9 @@ export class ProductionStack extends Stack {
       value: operations.role.attrArn, condition: operations.isConfigured,
     });
     operationsOutput.overrideLogicalId("TaskOperationsRoleArn");
+    const releaseOutput = new CfnOutput(this, "ReleaseRoleArnOutput", {
+      value: release.role.attrArn, condition: hasReleaseAccess,
+    });
+    releaseOutput.overrideLogicalId("ReleaseRoleArn");
   }
 }
