@@ -139,8 +139,11 @@ Images use immutable ECR tags and Linux amd64. Use a new tag for each build. `re
 The release job runs in the GitHub `aws-production` environment, and the AWS role trusts only that environment of one repository. Environment names ignore case, and Vercel's GitHub integration already uses `Production`, so the release environment has its own name. Give the environment a deployment branch rule that allows only `main`, and add required reviewers to approve each release's downtime before it starts. To connect a repository, run this once with the operator credentials used for `bootstrap`:
 
 ```bash
-./infra/aws/scripts/deploy.sh authorize-ci owner/repository
+gh api repos/OWNER/REPOSITORY/actions/oidc/customization/sub --jq .sub_claim_prefix
+./infra/aws/scripts/deploy.sh authorize-ci OWNER/REPOSITORY
 ```
+
+Pass the repository exactly as GitHub's OIDC subject names it, which is the `sub_claim_prefix` above without `repo:`. A repository that uses immutable subjects is named with its owner and repository IDs, such as `owner@123/repository@456`; the role compares that value exactly, so the plain name would be refused.
 
 It adds the `<AWS_STACK_NAME>-github-release` role, and a GitHub OIDC provider unless `AWS_GITHUB_OIDC_PROVIDER_ARN` names the account's existing one; IAM allows one per account. Then set the `aws-production` environment variables `AWS_REGION`, `AWS_RELEASE_ROLE_ARN` (printed by the command) and, for a stack other than `invookemail-prod`, `AWS_STACK_NAME`. The role can update this stack through the CDK bootstrap roles, push its two image repositories, read its runtime secret to validate a release, and start the migration task; protect the environment accordingly. Vercel still deploys the web app as soon as a change merges, so a release that changes the API contract leaves the new UI running against the previous API until the release finishes.
 

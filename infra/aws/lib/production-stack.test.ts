@@ -145,6 +145,14 @@ const releaseRoleArn = "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS:
 test("GitHub releases are off until a repository is set, and then only its aws-production environment may release", () => {
   const template = createTemplate();
   template.hasParameter("ReleaseRepository", { Default: "" });
+  // GitHub names a repository with immutable OIDC subjects by owner and repository ID.
+  const repositoryPattern = new RegExp(template.toJSON().Parameters.ReleaseRepository.AllowedPattern);
+  for (const repository of ["", "Thinking-Sound-Lab/Invook-Email", "Thinking-Sound-Lab@230501294/Invook-Email@1328790913"]) {
+    assert.match(repository, repositoryPattern);
+  }
+  for (const repository of ["Invook-Email", "owner/name:environment:x", "owner@id/name"]) {
+    assert.doesNotMatch(repository, repositoryPattern);
+  }
   template.hasParameter("GitHubOidcProviderArn", { Default: "" });
   template.hasCondition("HasReleaseAccess", { "Fn::Not": [{ "Fn::Equals": [{ Ref: "ReleaseRepository" }, ""] }] });
   // An account that already trusts GitHub reuses its provider.
