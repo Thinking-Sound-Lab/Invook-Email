@@ -47,6 +47,16 @@ cloudfront_origin_prefix_list() {
   [[ "$prefix_list" == pl-* ]] || { echo "The CloudFront origin-facing prefix list is unavailable in $region." >&2; exit 1; }
   printf '%s' "$prefix_list"
 }
+# Waits for both services to settle, then requires the API to report ready.
+check_release_health() {
+  aws_cli ecs wait services-stable --cluster "$(output Cluster)" --services "$stack-api" "$stack-worker" &&
+    node --input-type=module - "$(output ApiUrl)/health/ready" <<'NODE'
+import axios from './apps/api/node_modules/axios/index.js';
+const response = await axios.get(process.argv[2]);
+if (response.status !== 200) throw new Error('API readiness check failed.');
+console.log('Production API is ready.');
+NODE
+}
 # Tags are immutable, so a retried release reuses an image an earlier attempt pushed.
 publish_image() {
   local target="$1" repository="$2" tag="$3"
@@ -154,27 +164,25 @@ case "${1:-}" in
         echo "Migration failed. Check /$stack/migration; services remain stopped." >&2; exit 1;
       }
     apply_stack ApiCount=1 WorkerCount=1
-    aws_cli ecs wait services-stable --cluster "$cluster" --services "$stack-api" "$stack-worker"
-    node --input-type=module - "$(output ApiUrl)/health/ready" <<'NODE'
-import axios from './apps/api/node_modules/axios/index.js';
-const response = await axios.get(process.argv[2]);
-if (response.status !== 200) throw new Error('API readiness check failed.');
-console.log('Production API is ready.');
-NODE
+    check_release_health
     ;;
   release-commit)
     commit="${2:?Provide the commit to release.}"
     [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "Provide the full commit SHA." >&2; exit 1; }
     deployed_image="$(stack_parameter ApiImage)"
     deployed_tag="${deployed_image##*:}"
-    # Releases can run out of commit order. A release that already contains
-    # this commit is never replaced by it, unless it is this commit stopped
-    # partway, which releasing again completes.
-    if [[ "$deployed_tag" =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$commit" "$deployed_tag" 2>/dev/null; then
-      if [[ "$deployed_tag" != "$commit" || "$(stack_parameter ApiCount)" != 0 ]]; then
-        echo "Production already runs $deployed_tag, which includes $commit."
-        exit 0
-      fi
+    # Releases can run out of commit order, so a newer release that already
+    # contains this commit is never replaced by it.
+    if [[ "$deployed_tag" =~ ^[0-9a-f]{40}$ && "$deployed_tag" != "$commit" ]] &&
+      git merge-base --is-ancestor "$commit" "$deployed_tag" 2>/dev/null; then
+      echo "Production already runs $deployed_tag, which includes $commit."
+      exit 0
+    fi
+    # An earlier attempt at this commit may have stopped at any step, so it
+    # counts as released only while both services run and the API is ready.
+    if [[ "$deployed_tag" == "$commit" && "$(stack_parameter ApiCount)" != 0 ]] && check_release_health; then
+      echo "Production already runs $commit and is ready."
+      exit 0
     fi
     "$repository_root/infra/aws/scripts/deploy.sh" publish "$commit"
     "$repository_root/infra/aws/scripts/deploy.sh" release "$commit"
