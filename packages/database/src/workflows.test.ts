@@ -8,6 +8,7 @@ import {
 } from "./gmail-watch";
 import {
   createGmailSyncRunStep,
+  pendingMailSyncPageThreadIds,
   TEMPORAL_COMMAND_DISPATCH_BATCH_SIZE,
   temporalCommandJobFromRow,
   temporalCommandPriority,
@@ -188,5 +189,22 @@ test("terminal initial synchronization failure creates an immediate repair trigg
     "gmail-repair-recovery:22222222-2222-4222-8222-222222222222:33333333-3333-4333-8333-333333333333",
   );
   assert.equal(taskQueueLaneForStepType(step.stepType), "control");
+});
+
+test("a shifted Gmail page replay keeps leftover queued threads", () => {
+  assert.deepEqual(
+    pendingMailSyncPageThreadIds({
+      listedThreadIds: ["thread-b", "thread-c", "thread-d"],
+      queuedThreadIds: ["thread-a", "thread-b", "thread-c", "thread-d"],
+    }),
+    ["thread-b", "thread-c", "thread-d", "thread-a"],
+  );
+  assert.deepEqual(
+    pendingMailSyncPageThreadIds({
+      listedThreadIds: ["thread-a", "thread-b"],
+      queuedThreadIds: ["thread-a", "thread-b"],
+    }),
+    ["thread-a", "thread-b"],
+  );
 });
 
