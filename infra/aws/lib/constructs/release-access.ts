@@ -8,7 +8,7 @@ const GITHUB_OIDC_HOST = "token.actions.githubusercontent.com";
 const RELEASE_ROLE_NAME = "${AWS::StackName}-github-release";
 
 /** The GitHub environment whose jobs may release; its protection rules gate every release. */
-const RELEASE_ENVIRONMENT = "production";
+const RELEASE_ENVIRONMENT = "aws-production";
 
 /**
  * Named so the task operations trust policy can refer to it without depending
@@ -27,7 +27,7 @@ export interface ReleaseAccessProps {
 }
 
 /**
- * Lets one GitHub repository's production environment run `deploy.sh publish`
+ * Lets one GitHub repository's aws-production environment run `deploy.sh publish`
  * and `release` with short-lived credentials. The stack update itself runs
  * through the CDK bootstrap roles, as it does for an operator.
  */

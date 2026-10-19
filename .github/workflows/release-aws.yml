@@ -55,7 +55,8 @@ jobs:
     runs-on: ubuntu-latest
     # The environment's protection rules decide when production takes the
     # release's downtime; the AWS role trusts only jobs in this environment.
-    environment: production
+    # Vercel already uses `Production`, and environment names ignore case.
+    environment: aws-production
     permissions:
       contents: read
       id-token: write

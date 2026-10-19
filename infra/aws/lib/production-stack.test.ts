@@ -142,7 +142,7 @@ test("one-off task operations trust only the configured deployer and scoped ECS 
 
 const releaseRoleArn = "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-github-release";
 
-test("GitHub releases are off until a repository is set, and then only its production environment may release", () => {
+test("GitHub releases are off until a repository is set, and then only its aws-production environment may release", () => {
   const template = createTemplate();
   template.hasParameter("ReleaseRepository", { Default: "" });
   template.hasParameter("GitHubOidcProviderArn", { Default: "" });
@@ -169,7 +169,7 @@ test("GitHub releases are off until a repository is set, and then only its produ
           Condition: { StringEquals: {
             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
             "token.actions.githubusercontent.com:sub": {
-              "Fn::Join": ["", ["repo:", { Ref: "ReleaseRepository" }, ":environment:production"]],
+              "Fn::Join": ["", ["repo:", { Ref: "ReleaseRepository" }, ":environment:aws-production"]],
             },
           } },
         }],

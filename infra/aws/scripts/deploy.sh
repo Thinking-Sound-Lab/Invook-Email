@@ -194,7 +194,7 @@ case "${1:-}" in
     # IAM allows one GitHub Actions OIDC provider per account, so an existing one is reused.
     if [[ -n "${AWS_GITHUB_OIDC_PROVIDER_ARN:-}" ]]; then parameters+=("GitHubOidcProviderArn=$AWS_GITHUB_OIDC_PROVIDER_ARN"); fi
     apply_stack "${parameters[@]}"
-    echo "Set the $repository production environment variable AWS_RELEASE_ROLE_ARN to: $(output ReleaseRoleArn)"
+    echo "Set the $repository aws-production environment variable AWS_RELEASE_ROLE_ARN to: $(output ReleaseRoleArn)"
     ;;
   diff)
     cdk_cli diff "$stack"

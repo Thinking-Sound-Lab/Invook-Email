@@ -30,7 +30,7 @@ export class ProductionStack extends Stack {
     });
     const releaseRepository = new CfnParameter(this, "ReleaseRepository", {
       type: "String", default: "",
-      description: "GitHub repository (owner/name) whose production environment may release this stack. Empty disables it.",
+      description: "GitHub repository (owner/name) whose aws-production environment may release this stack. Empty disables it.",
       allowedPattern: "^$|^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
     });
     const gitHubOidcProviderArn = new CfnParameter(this, "GitHubOidcProviderArn", {
