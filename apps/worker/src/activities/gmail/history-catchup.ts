@@ -26,6 +26,35 @@ export type GmailHistoryCatchupPlan =
       state: Exclude<GmailReplicaState, "ready">;
     };
 
+/**
+ * Replay starts at the later of the run baseline and the committed cursor.
+ * Live catch-up during snapshot/repair advances `historyCursor`; listing from
+ * the original baseline after that can 404 once Gmail expires it.
+ */
+export function gmailHistoryReplayStart(input: {
+  expectedCursor: string;
+  baselineHistoryId: string;
+}): string {
+  return BigInt(input.expectedCursor) > BigInt(input.baselineHistoryId)
+    ? input.expectedCursor
+    : input.baselineHistoryId;
+}
+
+export function planGmailSyncFinalizeReplay(input: {
+  historyCursor: string | null;
+  initialHistoryId: string;
+  startingHistoryCursor: string;
+}): { expectedCursor: string; startHistoryId: string } {
+  const expectedCursor = input.historyCursor ?? input.initialHistoryId;
+  return {
+    expectedCursor,
+    startHistoryId: gmailHistoryReplayStart({
+      expectedCursor,
+      baselineHistoryId: input.startingHistoryCursor,
+    }),
+  };
+}
+
 export function planGmailHistoryCatchup(input: {
   replicaState: GmailReplicaState;
   initialHistoryId: string;
@@ -54,14 +83,13 @@ export function planGmailHistoryCatchup(input: {
     };
   }
   if (input.replicaState === "repairing" && input.repairStartingHistoryCursor) {
-    const startHistoryId =
-      BigInt(expectedCursor) > BigInt(input.repairStartingHistoryCursor)
-        ? expectedCursor
-        : input.repairStartingHistoryCursor;
     return {
       kind: "apply",
       expectedCursor,
-      startHistoryId,
+      startHistoryId: gmailHistoryReplayStart({
+        expectedCursor,
+        baselineHistoryId: input.repairStartingHistoryCursor,
+      }),
       stateAfterApply: "repairing",
       ingestionMode: "initial",
       shouldRepairExpiredCursor: false,
