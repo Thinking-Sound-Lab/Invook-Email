@@ -8,7 +8,7 @@ import {
   type AgentApprovalDecision,
   type InvookAgentUIMessage,
 } from "@invook/contracts";
-import { lastAssistantMessageIsCompleteWithApprovalResponses } from "ai";
+import { isToolUIPart, lastAssistantMessageIsCompleteWithApprovalResponses } from "ai";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { v4 as uuidv4 } from "uuid";
 
@@ -54,7 +54,14 @@ export function AgentConversation({
   const endRef = useRef<HTMLDivElement>(null);
   const isWorking = status === "submitted" || status === "streaming";
   const retryRequest = isWorking ? null : getAgentRetryRequest(messages);
-  const lastMessageId = messages.at(-1)?.id;
+  const lastMessage = messages.at(-1);
+  const lastMessageId = lastMessage?.id;
+  // Metadata starts the SDK's streaming state before there is visible content.
+  const isWaitingForResponse = status === "submitted" ||
+    lastMessage?.role !== "assistant" ||
+    !lastMessage.parts.some((part) =>
+      (part.type === "text" && part.text.length > 0) || isToolUIPart(part),
+    );
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
@@ -122,9 +129,9 @@ export function AgentConversation({
                 onRetry={handleRetry}
               />
             ))}
-            {status === "submitted" ? (
+            {isWorking ? (
               <p className="text-xs text-muted-foreground" role="status">
-                Working…
+                {isWaitingForResponse ? "Working…" : "Responding…"}
               </p>
             ) : null}
           </div>

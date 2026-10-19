@@ -99,6 +99,7 @@ function harness(input: {
   model: MockLanguageModelV4;
   history?: StoredAgentMessage[];
   overrides?: Partial<AgentTurnDependencies>;
+  onFrame?: (frame: AgentServerFrame) => void;
 }) {
   const events: string[] = [];
   const savedMessages: Array<{ messages: StoredAgentMessage[]; finishRun: boolean }> = [];
@@ -180,7 +181,10 @@ function harness(input: {
         sessionId,
         frame,
         abortSignal: new AbortController().signal,
-        send: (serverFrame) => frames.push(serverFrame),
+        send: (serverFrame) => {
+          frames.push(serverFrame);
+          input.onFrame?.(serverFrame);
+        },
       },
       dependencies,
     );
@@ -218,8 +222,52 @@ test("a message turn streams the answer and stores it before reporting the end",
   });
   // The open email is re-read under the user's scope and given to the model.
   assert.deepEqual(toolCalls, [{ name: "readThread", input: { threadId } }]);
-  const system = model.doStreamCalls[0]?.prompt.find((message) => message.role === "system");
-  assert.match(String(system?.content), /<open_thread>.*"threadId":"55555555/);
+  const prompt = model.doStreamCalls[0]?.prompt;
+  const system = prompt?.find((message) => message.role === "system");
+  assert.match(String(system?.content), /You are Invook/);
+  assert.ok(!String(system?.content).includes(threadId));
+  const context = prompt?.[1];
+  assert.ok(context?.role === "user");
+  const content = context.content[0];
+  assert.ok(content?.type === "text");
+  assert.ok(content.text.includes(JSON.stringify(openThread)));
+  assert.ok(!JSON.stringify(savedMessages).includes('"openThread"'));
+});
+
+test("text deltas are sent while the model stream is still open", async () => {
+  let modelStream: ReadableStreamDefaultController<StreamPart> | undefined;
+  const model = new MockLanguageModelV4({
+    doStream: async () => ({
+      stream: new ReadableStream<StreamPart>({
+        start: (controller) => {
+          modelStream = controller;
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "text-1" });
+          controller.enqueue({ type: "text-delta", id: "text-1", delta: "First words" });
+        },
+      }),
+    }),
+  });
+  let resolveFirstDelta: () => void = () => {};
+  const firstDelta = new Promise<void>((resolve) => { resolveFirstDelta = resolve; });
+  const active = harness({ model, onFrame: (frame) => {
+    if (frame.type === "chunk" && frame.chunk.type === "text-delta") resolveFirstDelta();
+  } });
+
+  const completion = active.run(messageFrame);
+  await firstDelta;
+
+  assert.equal(active.savedMessages.length, 0);
+  assert.ok(!active.frames.some((frame) => frame.type === "end"));
+  assert.ok(modelStream);
+  modelStream.enqueue({ type: "text-delta", id: "text-1", delta: " arrive now." });
+  modelStream.enqueue({ type: "text-end", id: "text-1" });
+  modelStream.enqueue({ type: "finish", finishReason: { unified: "stop", raw: undefined }, usage });
+  modelStream.close();
+  await completion;
+
+  assert.equal(active.frames.at(-1)?.type, "end");
+  assert.equal(active.savedMessages.length, 1);
 });
 
 test("a send stops at the approval card, then runs once the user approves", async () => {
