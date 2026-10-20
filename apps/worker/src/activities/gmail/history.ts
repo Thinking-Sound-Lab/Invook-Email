@@ -94,6 +94,10 @@ export async function applyHistoryRange(options: {
     .map(([providerMessageId, change]) => ({
       providerMessageId,
       providerHistoryId: change.providerHistoryId,
+      // Only Gmail's explicit delete is durable. A 404 while fetching a
+      // label or upsert payload may be transient, so those inferred deletes
+      // can still be restored by a later snapshot.
+      tombstone: true,
     }));
   const upsertIds = Array.from(messageActions)
     .filter(([, change]) => change.action === "upsert")
@@ -132,6 +136,7 @@ export async function applyHistoryRange(options: {
         deletedMessageIds.push({
           providerMessageId,
           providerHistoryId: change.providerHistoryId,
+          tombstone: false,
         });
         continue;
       }
@@ -167,6 +172,7 @@ export async function applyHistoryRange(options: {
           providerMessageId: gmailMessage.messageId,
           providerHistoryId:
             messageActions.get(gmailMessage.messageId)?.providerHistoryId ?? null,
+          tombstone: false,
         });
         continue;
       }

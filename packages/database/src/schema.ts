@@ -11,6 +11,7 @@ import {
   smallint,
   text,
   timestamp,
+  primaryKey,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -249,6 +250,28 @@ export const gmailReplicaStates = pgTable("gmail_replica_states", {
     sql`${table.state} in ('pending', 'snapshotting', 'replaying', 'ready', 'repairing', 'failed', 'deleting')`,
   ),
 ]);
+
+/**
+ * Gmail message IDs that live history already deleted. A later snapshot
+ * ingest of a thread fetched before that delete must not insert them again.
+ */
+export const gmailDeletedMessages = pgTable(
+  "gmail_deleted_messages",
+  {
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => connectedAccounts.id, { onDelete: "cascade" }),
+    providerMessageId: text("provider_message_id").notNull(),
+    providerHistoryId: text("provider_history_id"),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: "gmail_deleted_messages_account_message_pk",
+      columns: [table.accountId, table.providerMessageId],
+    }),
+  ],
+);
 
 export const gmailWatchStates = pgTable("gmail_watch_states", {
   accountId: uuid("account_id")

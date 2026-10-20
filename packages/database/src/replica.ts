@@ -765,7 +765,11 @@ export async function applyGmailHistoryBatch(
       providerHistoryId: string | null;
       gmailLabels: Array<{ providerLabelId: string; name: string }>;
     }>;
-    deletedMessageIds: Array<{ providerMessageId: string; providerHistoryId: string | null }>;
+    deletedMessageIds: Array<{
+      providerMessageId: string;
+      providerHistoryId: string | null;
+      tombstone?: boolean;
+    }>;
     stateAfterApply?: "ready" | "snapshotting" | "replaying" | "repairing";
   },
   database: Database = getDatabase(),
@@ -847,6 +851,7 @@ export async function applyGmailHistoryBatch(
           accountId: input.accountId,
           providerMessageId: deletion.providerMessageId,
           providerHistoryId: deletion.providerHistoryId,
+          tombstone: deletion.tombstone,
         },
         executor,
       );
