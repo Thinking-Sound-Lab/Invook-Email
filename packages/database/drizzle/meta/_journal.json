@@ -295,6 +295,13 @@
       "when": 1792325852056,
       "tag": "0041_agent_conversations",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1792414339863,
+      "tag": "0042_mcp_oauth",
+      "breakpoints": true
     }
   ]
 }

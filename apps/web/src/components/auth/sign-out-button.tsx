@@ -2,12 +2,12 @@
 
 import { Logout01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { SIGN_IN_PATH } from "@invook/contracts";
 import axios from "axios";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { SIGN_IN_PATH } from "@/lib/app-routes";
 import { cn } from "@/lib/utils";
 
 interface SignOutButtonProps {

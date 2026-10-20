@@ -186,7 +186,7 @@ export async function runAgentTurn(
   try {
     const capabilities = dependencies.createCapabilities({
       userId: input.userId,
-      conversationId,
+      writeScopeId: conversationId,
       ensureRunActive,
     });
     const validation = await safeValidateUIMessages<InvookAgentUIMessage>({

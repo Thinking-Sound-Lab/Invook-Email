@@ -72,7 +72,7 @@ pnpm dlx vercel link
 pnpm dlx vercel deploy --prod
 ```
 
-Use the stable production `*.vercel.app` alias for `APP_URL`, rather than the URL of one build. Requests, Google callbacks and SSE use that origin through the Next.js proxies. The AWS-generated `ApiUrl` supplies HTTPS without requiring a custom API domain. API Gateway streams responses through its private ALB integration; SSE handlers on Vercel have a 300-second maximum duration and browsers reconnect when a stream closes.
+Use the stable production `*.vercel.app` alias for `APP_URL`, rather than the URL of one build. Requests, Google callbacks and SSE use that origin through the Next.js proxies. Connected AI agents also use it: the proxy forwards `APP_URL/mcp` and the OAuth discovery documents under `/.well-known/` to the API, so agents need no other address. The AWS-generated `ApiUrl` supplies HTTPS without requiring a custom API domain. API Gateway streams responses through its private ALB integration; SSE handlers on Vercel have a 300-second maximum duration and browsers reconnect when a stream closes.
 
 Vercel deployments can finish before the API is activated, but the application cannot serve sessions or mail until the AWS API is running.
 

@@ -34,6 +34,11 @@ import { registerGooglePubSubRoutes } from "./routes/google-pubsub";
 import { registerMailboxEventRoutes } from "./routes/mailbox-events";
 import { registerMailSearchRoutes } from "./routes/mail-search";
 import { registerMailboxRoutes } from "./routes/mailbox";
+import { registerMcpRoutes, type McpRouteDependencies } from "./routes/mcp";
+import {
+  registerMcpConnectionRoutes,
+  type McpConnectionRouteDependencies,
+} from "./routes/mcp-connections";
 import { registerSessionRoutes } from "./routes/session";
 import { registerThreadLabelRoutes } from "./routes/thread-labels";
 import { InvalidJsonBodyError, sendProblem } from "./responses";
@@ -55,6 +60,8 @@ export async function buildApi(options: {
   attachmentRoutes?: AttachmentRouteDependencies;
   auth?: AuthService;
   labelRoutes?: LabelRouteDependencies;
+  mcpRoutes?: Partial<McpRouteDependencies>;
+  mcpConnectionRoutes?: Partial<McpConnectionRouteDependencies>;
 } = {}) {
   const api = Fastify({
     bodyLimit: MAXIMUM_REQUEST_BODY_BYTES,
@@ -128,6 +135,8 @@ export async function buildApi(options: {
   await api.register(registerComposeDraftRoutes);
   await api.register(registerGmailProviderRoutes);
   await api.register(registerAgentRoutes(options.agentRoutes));
+  await api.register(registerMcpRoutes(options.mcpRoutes));
+  await api.register(registerMcpConnectionRoutes(options.mcpConnectionRoutes));
 
   api.setNotFoundHandler(async (request, reply) => {
     await sendProblem(request, reply, 404, "Route not found");

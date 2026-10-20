@@ -2,6 +2,7 @@ import type { FastifyRequest } from "fastify";
 
 import {
   createInvookAuth,
+  getAuthorizationServerMetadataResponse,
   getInvookSession,
   type InvookAuth,
   type InvookSessionResolution,
@@ -12,6 +13,17 @@ import { getMissingApiConfiguration, getPublicAppOrigin } from "../config";
 export interface AuthService {
   handle(request: Request): Promise<Response>;
   getSession(headers: Headers): Promise<InvookSessionResolution>;
+  /** RFC 8414 metadata for the MCP authorization server. */
+  getAuthorizationServerMetadata(request: Request): Promise<Response>;
+}
+
+function unconfiguredResponse(): Promise<Response> {
+  return Promise.resolve(
+    Response.json(
+      { message: "Invook authentication is not configured." },
+      { status: 503 },
+    ),
+  );
 }
 
 export function createWebHeaders(
@@ -43,14 +55,7 @@ export function createAuthService(): AuthService {
 
   return {
     handle: (request) => {
-      if (getMissingApiConfiguration().length > 0) {
-        return Promise.resolve(
-          Response.json(
-            { message: "Invook authentication is not configured." },
-            { status: 503 },
-          ),
-        );
-      }
+      if (getMissingApiConfiguration().length > 0) return unconfiguredResponse();
       return getAuth().handler(request);
     },
     getSession: (headers) => {
@@ -58,6 +63,10 @@ export function createAuthService(): AuthService {
         return Promise.resolve({ session: null, setCookies: [] });
       }
       return getInvookSession(getAuth(), headers);
+    },
+    getAuthorizationServerMetadata: (request) => {
+      if (getMissingApiConfiguration().length > 0) return unconfiguredResponse();
+      return getAuthorizationServerMetadataResponse(getAuth(), request);
     },
   };
 }

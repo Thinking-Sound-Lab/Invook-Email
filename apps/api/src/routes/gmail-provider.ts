@@ -26,7 +26,7 @@ import {
 import { parseRequiredMailboxAccountId } from "../mailbox-account-scope";
 import { sendJson, sendProblem } from "../responses";
 import type { GmailProviderAccess } from "../services/gmail-provider";
-import { setGmailThreadReadState } from "../services/gmail-thread-read-state";
+import { applyGmailThreadAction } from "../services/gmail-thread-actions";
 import {
   getGmailProviderAccessForAccountRequest,
   sendGmailWriteProblem,
@@ -236,11 +236,11 @@ export const registerGmailProviderRoutes: FastifyPluginAsync = async (api) => {
       );
       if (!access) return;
       try {
-        const result = await setGmailThreadReadState({
+        const result = await applyGmailThreadAction({
           userId: session.userId,
           access,
           context,
-          isRead: readState.isRead,
+          action: readState.isRead ? "mark_read" : "mark_unread",
         });
         if (result.status === "not_found") {
           await sendProblem(request, reply, 404, "Gmail thread not found");

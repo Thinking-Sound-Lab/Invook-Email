@@ -1,4 +1,4 @@
-import { SIGN_IN_PATH } from "@/lib/app-routes";
+import { SIGN_IN_PATH } from "@invook/contracts";
 
 import { MarketingCta } from "./marketing-cta";
 import { GITHUB_REPOSITORY_URL } from "./marketing-links";

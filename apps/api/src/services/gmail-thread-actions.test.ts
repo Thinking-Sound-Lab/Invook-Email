@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  setGmailThreadReadState,
-  type GmailThreadReadStateDependencies,
-} from "./gmail-thread-read-state";
+  applyGmailThreadAction,
+  type GmailThreadActionDependencies,
+} from "./gmail-thread-actions";
 
 const userId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
@@ -17,7 +17,7 @@ const access = {
 test("an owned thread is marked read with one provider write and one catch-up", async () => {
   const providerWrites: unknown[][] = [];
   const catchups: unknown[] = [];
-  const dependencies: GmailThreadReadStateDependencies = {
+  const dependencies: GmailThreadActionDependencies = {
     modifyThreadLabels: async (...input) => {
       providerWrites.push(input);
     },
@@ -27,14 +27,14 @@ test("an owned thread is marked read with one provider write and one catch-up", 
     },
   };
 
-  const result = await setGmailThreadReadState(
+  const result = await applyGmailThreadAction(
     {
       access,
       context: {
         accountId,
         providerThreadId: "provider-thread",
       },
-      isRead: true,
+      action: "mark_read",
       userId,
     },
     dependencies,
@@ -52,7 +52,7 @@ test("an owned thread is marked read with one provider write and one catch-up", 
 test("an unowned thread never reaches Gmail or the catch-up workflow", async () => {
   let providerWriteCount = 0;
   let catchupCount = 0;
-  const dependencies: GmailThreadReadStateDependencies = {
+  const dependencies: GmailThreadActionDependencies = {
     modifyThreadLabels: async () => {
       providerWriteCount += 1;
     },
@@ -62,14 +62,14 @@ test("an unowned thread never reaches Gmail or the catch-up workflow", async () 
     },
   };
 
-  const result = await setGmailThreadReadState(
+  const result = await applyGmailThreadAction(
     {
       access,
       context: {
         accountId: "33333333-3333-4333-8333-333333333333",
         providerThreadId: "other-provider-thread",
       },
-      isRead: true,
+      action: "mark_read",
       userId,
     },
     dependencies,
@@ -80,20 +80,20 @@ test("an unowned thread never reaches Gmail or the catch-up workflow", async () 
   assert.equal(catchupCount, 0);
 });
 
-test("thread read state maps unread through the same provider boundary", async () => {
+test("marking a thread unread uses the same provider boundary", async () => {
   const providerWrites: unknown[][] = [];
-  const dependencies: GmailThreadReadStateDependencies = {
+  const dependencies: GmailThreadActionDependencies = {
     modifyThreadLabels: async (...input) => {
       providerWrites.push(input);
     },
     enqueueHistoryCatchup: async () => "catchup-step",
   };
 
-  await setGmailThreadReadState(
+  await applyGmailThreadAction(
     {
       access,
       context: { accountId, providerThreadId: "provider-thread" },
-      isRead: false,
+      action: "mark_unread",
       userId,
     },
     dependencies,
@@ -101,5 +101,29 @@ test("thread read state maps unread through the same provider boundary", async (
 
   assert.deepEqual(providerWrites, [
     ["access-token", "provider-thread", { addLabelIds: ["UNREAD"] }],
+  ]);
+});
+
+test("archiving removes the thread from the Inbox and nothing else", async () => {
+  const providerWrites: unknown[][] = [];
+  const dependencies: GmailThreadActionDependencies = {
+    modifyThreadLabels: async (...input) => {
+      providerWrites.push(input);
+    },
+    enqueueHistoryCatchup: async () => "catchup-step",
+  };
+
+  await applyGmailThreadAction(
+    {
+      access,
+      context: { accountId, providerThreadId: "provider-thread" },
+      action: "archive",
+      userId,
+    },
+    dependencies,
+  );
+
+  assert.deepEqual(providerWrites, [
+    ["access-token", "provider-thread", { removeLabelIds: ["INBOX"] }],
   ]);
 });

@@ -1,3 +1,4 @@
+import { SIGN_IN_PATH } from "@invook/contracts";
 import { redirect } from "next/navigation";
 
 import { MailWorkspace } from "@/components/mail/mail-workspace";
@@ -7,7 +8,6 @@ import {
   normalizeMailboxView,
 } from "@/components/mail/mailbox-location";
 import { getMailboxThreadPage } from "@/lib/api";
-import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 interface MailPageProps {
   searchParams: Promise<{

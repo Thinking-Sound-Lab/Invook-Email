@@ -154,7 +154,11 @@ function toAgentThreadContent(thread: StoredThread): AgentThreadContent {
   };
 }
 
-function describeProviderFailure(error: unknown): string | null {
+/**
+ * The user-facing reason for a failed mailbox operation, or null when the
+ * error is unexpected and must be logged and reported generically instead.
+ */
+export function describeProviderFailure(error: unknown): string | null {
   if (error instanceof AgentToolRejection) return error.reason;
   if (error instanceof GmailProviderConfigurationError) {
     return "Gmail writes are not configured on this Invook server.";
@@ -193,7 +197,11 @@ function describeProviderFailure(error: unknown): string | null {
 
 export interface AgentCapabilityScope {
   userId: string;
-  conversationId: string;
+  /**
+   * Namespaces the idempotency keys of this scope's Gmail writes: the
+   * conversation for the agent pane, or the OAuth client for an MCP agent.
+   */
+  writeScopeId: string;
   /**
    * Confirms this turn still owns the conversation before a Gmail write. A
    * turn whose lease another turn took over must not keep changing mail.
@@ -205,16 +213,16 @@ const RUN_SUPERSEDED_REASON =
   "This conversation continued elsewhere, so Invook stopped before changing Gmail.";
 
 /**
- * Binds the agent's tools to one signed-in user and conversation. Every read
- * and write is scoped by the server-resolved user ID; model output can only
- * name records that this scope then authorizes.
+ * Binds the agent's tools to one signed-in user. Every read and write is
+ * scoped by the server-resolved user ID; model output can only name records
+ * that this scope then authorizes.
  */
 export function createAgentCapabilities(
   scope: AgentCapabilityScope,
   dependencies: AgentCapabilityDependencies = defaultDependencies,
 ): MailAgentCapabilities {
   const writeKey = (toolCallId: string, purpose: string) =>
-    uuidv5(`${scope.conversationId}:${toolCallId}:${purpose}`, AGENT_WRITE_NAMESPACE);
+    uuidv5(`${scope.writeScopeId}:${toolCallId}:${purpose}`, AGENT_WRITE_NAMESPACE);
 
   async function getAccess(accountId: string): Promise<GmailProviderAccess> {
     if (!validateUuid(accountId)) {
@@ -311,7 +319,7 @@ export function createAgentCapabilities(
     const reason = describeProviderFailure(error);
     if (reason) return failed(reason);
     console.error("api: agent tool failed", {
-      conversationId: scope.conversationId,
+      writeScopeId: scope.writeScopeId,
       tool,
       name: error instanceof Error ? error.name : "UnknownError",
     });

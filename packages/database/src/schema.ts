@@ -1246,3 +1246,137 @@ export const agentSocketTickets = pgTable(
     index("agent_socket_tickets_session_idx").on(table.sessionId),
   ],
 );
+
+/**
+ * OAuth clients of Invook's MCP authorization server. Agents usually register
+ * themselves anonymously through dynamic client registration, so `userId` is
+ * null for them. Better Auth's OAuth provider plugin owns these rows; property
+ * names match its model fields.
+ */
+export const oauthClients = pgTable(
+  "oauth_clients",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // A constraint rather than an index, so the foreign keys that reference it
+    // can be created in the same migration.
+    clientId: text("client_id").notNull().unique("oauth_clients_client_id_key"),
+    clientSecret: text("client_secret"),
+    disabled: boolean("disabled").default(false),
+    skipConsent: boolean("skip_consent"),
+    enableEndSession: boolean("enable_end_session"),
+    subjectType: text("subject_type"),
+    scopes: text("scopes").array(),
+    userId: uuid("user_id").references(() => profiles.id, { onDelete: "cascade" }),
+    name: text("name"),
+    uri: text("uri"),
+    icon: text("icon"),
+    contacts: text("contacts").array(),
+    tos: text("tos"),
+    policy: text("policy"),
+    softwareId: text("software_id"),
+    softwareVersion: text("software_version"),
+    softwareStatement: text("software_statement"),
+    redirectUris: text("redirect_uris").array().notNull(),
+    postLogoutRedirectUris: text("post_logout_redirect_uris").array(),
+    tokenEndpointAuthMethod: text("token_endpoint_auth_method"),
+    grantTypes: text("grant_types").array(),
+    responseTypes: text("response_types").array(),
+    public: boolean("public"),
+    type: text("type"),
+    requirePKCE: boolean("require_pkce"),
+    referenceId: text("reference_id"),
+    metadata: jsonb("metadata").$type<JsonObject>(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [index("oauth_clients_user_idx").on(table.userId)],
+);
+
+/** Refresh tokens, stored only as hashes. A refresh revokes the token it replaces. */
+export const oauthRefreshTokens = pgTable(
+  "oauth_refresh_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    token: text("token").notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => authSessions.id, {
+      onDelete: "set null",
+    }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => profiles.id, { onDelete: "cascade" }),
+    referenceId: text("reference_id"),
+    expiresAt: timestampWithTimezone("expires_at").notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    revoked: timestampWithTimezone("revoked"),
+    authTime: timestampWithTimezone("auth_time"),
+    scopes: text("scopes").array().notNull(),
+  },
+  (table) => [
+    uniqueIndex("oauth_refresh_tokens_token_idx").on(table.token),
+    index("oauth_refresh_tokens_client_user_idx").on(table.clientId, table.userId),
+    index("oauth_refresh_tokens_user_idx").on(table.userId),
+    index("oauth_refresh_tokens_session_idx").on(table.sessionId),
+  ],
+);
+
+/**
+ * Opaque access tokens, stored only as hashes. The MCP server looks each
+ * request's token up here, so deleting a row revokes it immediately.
+ */
+export const oauthAccessTokens = pgTable(
+  "oauth_access_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    token: text("token").notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").references(() => authSessions.id, {
+      onDelete: "set null",
+    }),
+    userId: uuid("user_id").references(() => profiles.id, { onDelete: "cascade" }),
+    referenceId: text("reference_id"),
+    refreshId: uuid("refresh_id").references(() => oauthRefreshTokens.id, {
+      onDelete: "cascade",
+    }),
+    expiresAt: timestampWithTimezone("expires_at").notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    scopes: text("scopes").array().notNull(),
+  },
+  (table) => [
+    uniqueIndex("oauth_access_tokens_token_idx").on(table.token),
+    index("oauth_access_tokens_client_user_idx").on(table.clientId, table.userId),
+    index("oauth_access_tokens_user_idx").on(table.userId),
+    index("oauth_access_tokens_session_idx").on(table.sessionId),
+    index("oauth_access_tokens_refresh_idx").on(table.refreshId),
+  ],
+);
+
+/** The scopes a user granted one OAuth client on Invook's consent screen. */
+export const oauthConsents = pgTable(
+  "oauth_consents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => profiles.id, { onDelete: "cascade" }),
+    referenceId: text("reference_id"),
+    scopes: text("scopes").array().notNull(),
+    createdAt: timestampWithTimezone("created_at").notNull().defaultNow(),
+    updatedAt: timestampWithTimezone("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (table) => [
+    uniqueIndex("oauth_consents_user_client_idx").on(table.userId, table.clientId),
+    index("oauth_consents_client_idx").on(table.clientId),
+  ],
+);

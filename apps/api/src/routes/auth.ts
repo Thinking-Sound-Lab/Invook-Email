@@ -1,12 +1,8 @@
-import type {
-  FastifyPluginAsync,
-  FastifyReply,
-  FastifyRequest,
-} from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 
 import { createWebHeaders } from "../auth/auth-service";
 import { getPublicAppOrigin } from "../config";
-import { sendProblem } from "../responses";
+import { sendProblem, sendWebResponse } from "../responses";
 
 function requestBody(request: FastifyRequest): string | undefined {
   if (request.method === "GET" || request.method === "HEAD") return undefined;
@@ -38,27 +34,16 @@ function hasDisallowedGoogleAuthInput(request: FastifyRequest): boolean {
   );
 }
 
-async function sendAuthResponse(
-  response: Response,
-  reply: FastifyReply,
-): Promise<void> {
-  const setCookies = response.headers.getSetCookie();
-  response.headers.forEach((value, name) => {
-    if (name !== "set-cookie" && name !== "content-length") {
-      reply.header(name, value);
-    }
-  });
-  if (setCookies.length > 0) reply.header("set-cookie", setCookies);
-
-  reply.status(response.status);
-  if (!response.body) {
-    await reply.send();
-    return;
-  }
-  await reply.send(Buffer.from(await response.arrayBuffer()));
-}
-
 export const registerAuthRoutes: FastifyPluginAsync = async (api) => {
+  // OAuth token and revocation requests are form-encoded (RFC 6749 4.1.3,
+  // RFC 7009). Only this plugin's routes accept them, as the raw body that
+  // Better Auth parses itself; every other route still requires JSON.
+  api.addContentTypeParser(
+    "application/x-www-form-urlencoded",
+    { parseAs: "string" },
+    async (_request: FastifyRequest, body: string) => body,
+  );
+
   api.all("/v1/auth/*", async (request, reply) => {
     if (hasDisallowedGoogleAuthInput(request)) {
       await sendProblem(
@@ -72,6 +57,6 @@ export const registerAuthRoutes: FastifyPluginAsync = async (api) => {
     const response = await request.server.invookAuth.handle(
       createAuthRequest(request),
     );
-    await sendAuthResponse(response, reply);
+    await sendWebResponse(response, reply);
   });
 };

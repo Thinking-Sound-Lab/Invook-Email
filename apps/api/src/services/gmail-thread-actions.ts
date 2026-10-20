@@ -11,14 +11,18 @@ interface GmailThreadMutationContext {
   providerThreadId: string;
 }
 
-export interface SetGmailThreadReadStateInput {
+/** Thread-wide changes that apply to every message in a Gmail thread. */
+export const gmailThreadActions = ["mark_read", "mark_unread", "archive"] as const;
+export type GmailThreadAction = (typeof gmailThreadActions)[number];
+
+export interface ApplyGmailThreadActionInput {
   access: GmailProviderAccess;
   context: GmailThreadMutationContext | null;
-  isRead: boolean;
+  action: GmailThreadAction;
   userId: string;
 }
 
-export interface GmailThreadReadStateDependencies {
+export interface GmailThreadActionDependencies {
   enqueueHistoryCatchup: (input: {
     userId: string;
     accountId: string;
@@ -34,23 +38,28 @@ export interface GmailThreadReadStateDependencies {
   ) => Promise<void>;
 }
 
-const defaultDependencies: GmailThreadReadStateDependencies = {
+const defaultDependencies: GmailThreadActionDependencies = {
   enqueueHistoryCatchup: enqueueGmailHistoryCatchup,
   modifyThreadLabels: modifyGmailThreadLabels,
 };
 
-function gmailThreadReadStateMutation(isRead: boolean): {
+function gmailThreadActionMutation(action: GmailThreadAction): {
   addLabelIds?: GmailSystemLabelId[];
   removeLabelIds?: GmailSystemLabelId[];
 } {
-  return isRead
-    ? { removeLabelIds: ["UNREAD"] }
-    : { addLabelIds: ["UNREAD"] };
+  switch (action) {
+    case "mark_read":
+      return { removeLabelIds: ["UNREAD"] };
+    case "mark_unread":
+      return { addLabelIds: ["UNREAD"] };
+    case "archive":
+      return { removeLabelIds: ["INBOX"] };
+  }
 }
 
-export async function setGmailThreadReadState(
-  input: SetGmailThreadReadStateInput,
-  dependencies: GmailThreadReadStateDependencies = defaultDependencies,
+export async function applyGmailThreadAction(
+  input: ApplyGmailThreadActionInput,
+  dependencies: GmailThreadActionDependencies = defaultDependencies,
 ): Promise<
   | { status: "not_found" }
   | { status: "complete"; stepId: string }
@@ -62,7 +71,7 @@ export async function setGmailThreadReadState(
   await dependencies.modifyThreadLabels(
     input.access.accessToken,
     input.context.providerThreadId,
-    gmailThreadReadStateMutation(input.isRead),
+    gmailThreadActionMutation(input.action),
   );
   const stepId = await dependencies.enqueueHistoryCatchup({
     userId: input.userId,

@@ -1,3 +1,4 @@
+import { SIGN_IN_PATH } from "@invook/contracts";
 import { redirect } from "next/navigation";
 import type { ReactNode } from "react";
 
@@ -7,7 +8,6 @@ import { MailboxEventSubscriber } from "@/components/mail/mailbox-event-subscrib
 import { MailShellProvider } from "@/components/mail/mail-shell-provider";
 import { MailSidebar } from "@/components/mail/mail-sidebar";
 import { getMailboxShell, getMailboxSidebarCounts } from "@/lib/api";
-import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 interface MailLayoutProps {
   children: ReactNode;

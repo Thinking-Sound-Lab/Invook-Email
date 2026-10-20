@@ -20,5 +20,13 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/v1/:path*", "/connections/gmail/callback"],
+  // Agents reach Invook's MCP server and its OAuth discovery documents on the
+  // application origin, which owns the authorization server's issuer URL.
+  matcher: [
+    "/v1/:path*",
+    "/connections/gmail/callback",
+    "/mcp",
+    "/.well-known/oauth-protected-resource/:path*",
+    "/.well-known/oauth-authorization-server/:path*",
+  ],
 };
