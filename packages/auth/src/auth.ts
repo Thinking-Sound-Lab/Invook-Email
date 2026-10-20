@@ -7,11 +7,32 @@ import {
   authSessions,
   authVerifications,
   getDatabase,
+  oauthAccessTokens,
+  oauthClients,
+  oauthConsents,
+  oauthRefreshTokens,
   profiles,
   type Database,
 } from "@invook/database";
 
+import {
+  createMcpAuthorizationServer,
+  UNUSED_OAUTH_PROVIDER_PATHS,
+} from "./mcp-authorization";
+
 export const GOOGLE_IDENTITY_SCOPES = ["openid", "email", "profile"] as const;
+
+/** Where Better Auth's routes live on the application origin. */
+export const AUTH_BASE_PATH = "/v1/auth";
+
+/**
+ * The OAuth issuer of Invook's MCP authorization server: Better Auth's base
+ * URL. Agents find its metadata at /.well-known/oauth-authorization-server
+ * followed by this path (RFC 8414).
+ */
+export function getAuthorizationServerIssuer(appOrigin: string): string {
+  return `${new URL(appOrigin).origin}${AUTH_BASE_PATH}`;
+}
 
 const GOOGLE_IDENTITY_ACCOUNT_SCOPE = GOOGLE_IDENTITY_SCOPES.join(",");
 
@@ -76,7 +97,7 @@ export function createInvookAuth(
   return betterAuth({
     appName: "Invook",
     baseURL: appUrl.origin,
-    basePath: "/v1/auth",
+    basePath: AUTH_BASE_PATH,
     secret,
     database: drizzleAdapter(database, {
       provider: "pg",
@@ -85,6 +106,10 @@ export function createInvookAuth(
         authAccounts,
         authSessions,
         authVerifications,
+        oauthClients,
+        oauthRefreshTokens,
+        oauthAccessTokens,
+        oauthConsents,
       },
       transaction: true,
     }),
@@ -93,7 +118,7 @@ export function createInvookAuth(
       database: { generateId: () => uuidv4() },
       useSecureCookies: appUrl.protocol === "https:",
     },
-    disabledPaths: ["/link-social"],
+    disabledPaths: ["/link-social", ...UNUSED_OAUTH_PROVIDER_PATHS],
     trustedOrigins: [appUrl.origin],
     socialProviders: {
       google: {
@@ -125,6 +150,7 @@ export function createInvookAuth(
       },
     },
     verification: { modelName: "authVerifications" },
+    plugins: [createMcpAuthorizationServer(appUrl.origin)],
     databaseHooks: {
       account: {
         create: {

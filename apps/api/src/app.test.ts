@@ -85,6 +85,12 @@ const testAuth: AuthService = {
   }),
   handle: async (request) => {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/v1/auth/oauth2/token") {
+      return Response.json({
+        contentType: request.headers.get("content-type"),
+        body: await request.text(),
+      });
+    }
     if (request.method === "POST" && url.pathname === "/v1/auth/sign-out") {
       return new Response(JSON.stringify({ success: true }), {
         status: 200,
@@ -100,6 +106,8 @@ const testAuth: AuthService = {
       headers: { "content-type": "application/json" },
     });
   },
+  getAuthorizationServerMetadata: async () =>
+    new Response(null, { status: 404 }),
 };
 
 before(async () => {
@@ -301,6 +309,34 @@ test("global Google authentication rejects caller-supplied Gmail scopes", async 
     response.json().title,
     "Google authentication accepts identity scopes only",
   );
+});
+
+test("OAuth token requests reach Better Auth as the form body the agent sent", async () => {
+  const form = "grant_type=authorization_code&code=abc&code_verifier=xyz&client_id=agent";
+  const response = await api.inject({
+    method: "POST",
+    url: "/v1/auth/oauth2/token",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    payload: form,
+  });
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), {
+    contentType: "application/x-www-form-urlencoded",
+    body: form,
+  });
+});
+
+test("routes outside authentication still accept JSON bodies only", async () => {
+  const response = await api.inject({
+    method: "POST",
+    url: "/mcp",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    payload: "grant_type=authorization_code",
+  });
+
+  assert.equal(response.statusCode, 400);
+  assert.match(response.body, /Invalid JSON request body/);
 });
 
 test("authentication runs before JSON body parsing", async () => {

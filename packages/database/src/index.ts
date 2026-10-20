@@ -22,6 +22,7 @@ export * from "./recent-thread-label-recovery";
 export * from "./mail-sync-progress";
 export * from "./mailbox-change-events";
 export * from "./mailbox-resources";
+export * from "./mcp-connections";
 export * from "./gmail-watch";
 export * from "./gmail-identity";
 export * from "./repositories";

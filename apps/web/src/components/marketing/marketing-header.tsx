@@ -1,6 +1,5 @@
+import { SIGN_IN_PATH } from "@invook/contracts";
 import Link from "next/link";
-
-import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 import { InvookWordmark } from "./invook-wordmark";
 import { MarketingCta } from "./marketing-cta";

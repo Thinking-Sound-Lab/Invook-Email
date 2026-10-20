@@ -1,9 +1,9 @@
 import { AlertCircleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { SIGN_IN_PATH } from "@invook/contracts";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
-import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 type AuthenticationErrorPageProps = {
   searchParams: Promise<{ reason?: string }>;

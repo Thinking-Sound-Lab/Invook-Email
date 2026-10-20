@@ -22,7 +22,7 @@ const accountId = "22222222-2222-4222-8222-222222222222";
 const conversationId = "33333333-3333-4333-8333-333333333333";
 const replyMessageId = "44444444-4444-4444-8444-444444444444";
 const access = { accountId, accessToken: "access-token", email: "owner@example.com" };
-const scope = { userId, conversationId, ensureRunActive: async () => true };
+const scope = { userId, writeScopeId: conversationId, ensureRunActive: async () => true };
 const email: AgentEmailInput = {
   accountId,
   to: ["recipient@example.com"],

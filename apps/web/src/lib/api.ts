@@ -69,3 +69,23 @@ export async function getMailboxThreadPage(input: {
   }
   return response.data;
 }
+
+/** The name an agent registered with, for the consent page; null when it gave none. */
+export async function getAgentClientName(
+  clientId: string,
+): Promise<{ name: string | null } | null> {
+  const query = new URLSearchParams({ client_id: clientId });
+  const response = await apiRequest<unknown>(
+    `/v1/auth/oauth2/public-client?${query.toString()}`,
+  );
+  if (response.status === 401 || response.status === 404) return null;
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`The agent client API returned ${response.status}.`);
+  }
+  const client: unknown = response.data;
+  if (typeof client !== "object" || client === null) {
+    throw new Error("The agent client API returned an invalid response.");
+  }
+  const name = "client_name" in client ? client.client_name : undefined;
+  return { name: typeof name === "string" && name.trim() ? name.trim() : null };
+}

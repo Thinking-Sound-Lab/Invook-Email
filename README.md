@@ -52,6 +52,12 @@ Invook brings your Gmail accounts into one workspace and organizes your inbox wi
       Open the Agent pane to reply to the email you are reading, write new email, or find mail and attachments. Drafts land in Gmail for you to review. The agent never sends without your approval of the exact email, and conversations are saved so you can return to them.
     </td>
   </tr>
+  <tr>
+    <td colspan="2" valign="top">
+      <h3>Your mail in any AI agent</h3>
+      Connect Claude Code, Codex, Cursor, ChatGPT, Claude, or any MCP client to Invook. Copy the Invook skill from Settings, Agents, and paste it into a coding agent, which connects itself; chat apps add Invook as a custom connector. You approve each agent in your browser and can disconnect it at any time.
+    </td>
+  </tr>
 </table>
 
 **You stay in control.** Invook's AI labels are separate from Gmail labels, and you keep the final say over every assignment.
@@ -112,6 +118,10 @@ Mailbox data lives in your configured PostgreSQL database; attachment bytes live
 
 Sign-in sessions live in PostgreSQL. The browser also holds a signed copy that the API trusts for five minutes, so most requests skip the session lookup. Signing out clears that copy immediately; a session deleted directly in the database can keep working for up to five minutes.
 
+### Connected agents
+
+Invook serves a remote MCP server at `APP_URL/mcp`. Agents sign in with OAuth 2.1: they register themselves, you sign in to Invook and approve each agent on a consent page, and Invook issues opaque tokens that it stores only as SHA-256 hashes. An agent gets the same accounts and mail you see in Invook, and can search, read, archive, mark read or unread, save drafts, and send. Sending is marked as an action that needs confirmation; each agent asks for that confirmation according to its own settings, so it is not Invook's approval card. Mail an agent reads leaves Invook for that agent's model provider. Disconnecting an agent in Settings, Agents, or at `APP_URL/settings/agents` before any Gmail account is connected, deletes its consent and tokens, and its next request is refused.
+
 Sender-hosted images currently load directly from their original URLs. Opening an email can reveal your browser's IP address and the request time to the image host.
 
 ## Built for contributors
@@ -119,6 +129,8 @@ Sender-hosted images currently load directly from their original URLs. Opening a
 When upgrading across the label-policy migration, stop API and worker processes before migrating, then restart them together with the updated web build. The migration retires automatic label jobs, preserves completed assignments and pending explicit settings requests, and removes imported Gmail label metadata. The worker resumes eligible recent labeling and saved settings requests after startup.
 
 Shared-mailbox support adds migration `0038_shared_gmail_connections` after label-policy migrations 0036/0037. Apply them in order with API and workers stopped, then deploy the updated API, worker, and web together. Do not run the older single-recipient push or unconditional watch-stop implementation after enabling multi-user connections. Migration 0038 preserves existing IDs and data while changing provider-identity uniqueness to `(user_id, provider, provider_account_id)`.
+
+Migration `0042_mcp_oauth` adds the OAuth client, consent, access token, and refresh token tables behind connected agents. It only creates tables and needs no new environment variables. Deploy the API and web together: the web proxy forwards `/mcp` and the OAuth discovery documents under `/.well-known/` to the API.
 
 Migration `0041_agent_conversations` adds agent conversation history and single-use socket tickets. It only creates tables, and the API needs `OPENAI_API_KEY` and `AGENT_SOCKET_URL` for the agent pane; without them the pane reports that the agent is not configured.
 

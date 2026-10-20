@@ -1,6 +1,7 @@
 export * from "./agent";
 export * from "./gmail-compose";
 export * from "./mailbox-events";
+export * from "./mcp";
 
 export type AccountSyncStage = "pending" | "running" | "complete" | "failed";
 

@@ -41,6 +41,7 @@ let turnBehavior: TurnBehavior;
 
 const testAuth: AuthService = {
   handle: async () => new Response(null, { status: 404 }),
+  getAuthorizationServerMetadata: async () => new Response(null, { status: 404 }),
   getSession: async (headers) => {
     if (!headers.get("cookie")?.includes("test_session=1")) {
       return { session: null, setCookies: [] };

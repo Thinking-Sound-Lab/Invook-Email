@@ -61,11 +61,19 @@ function assertBefore(source: string, earlier: string, later: string): void {
   assert.ok(earlierIndex < laterIndex, `${earlier} must precede ${later}`);
 }
 
-test("the Drizzle schema has exactly the 30 owned tables without embedding or Memory storage", async () => {
+test("the Drizzle schema has exactly the 34 owned tables without embedding or Memory storage", async () => {
   const source = await readFile(schemaUrl, "utf8");
-  assert.equal(source.match(/\bpgTable\s*\(/g)?.length, 30);
+  assert.equal(source.match(/\bpgTable\s*\(/g)?.length, 34);
   for (const agentTable of ["agent_conversations", "agent_messages", "agent_socket_tickets"]) {
     assert.match(source, new RegExp(`pgTable\\(\\s*"${agentTable}"`));
+  }
+  for (const oauthTable of [
+    "oauth_clients",
+    "oauth_refresh_tokens",
+    "oauth_access_tokens",
+    "oauth_consents",
+  ]) {
+    assert.match(source, new RegExp(`pgTable\\(\\s*"${oauthTable}"`));
   }
   assert.doesNotMatch(source, /memoryEntries/);
   assert.doesNotMatch(source, /memoryPendingEvidence/);

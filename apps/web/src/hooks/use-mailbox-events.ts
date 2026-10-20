@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  SIGN_IN_PATH,
   parseMailboxChangeEvent,
   parseMailboxStreamReadyEvent,
 } from "@invook/contracts";
@@ -13,7 +14,6 @@ import { useMailShell } from "@/components/mail/mail-shell-provider";
 import { planMailboxEvent } from "@/components/mail/mailbox-event-plan";
 import { normalizeMailboxView } from "@/components/mail/mailbox-location";
 import { getMailboxShell } from "@/lib/api/mailbox-shell";
-import { SIGN_IN_PATH } from "@/lib/app-routes";
 import {
   getMailboxSidebarCounts,
   getMailboxThreadPage,

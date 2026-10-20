@@ -2,18 +2,26 @@
 
 import { GoogleIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { SIGN_IN_PATH } from "@invook/contracts";
 import axios from "axios";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { SIGN_IN_PATH } from "@/lib/app-routes";
 
 type GoogleSignInResponse = {
   redirect: boolean;
   url?: string;
 };
 
-export function GoogleSignInButton() {
+export interface GoogleSignInButtonProps {
+  /**
+   * True when an agent's OAuth authorization sent the browser here. Sign-in
+   * then carries the signed request along, and Invook resumes it afterwards.
+   */
+  isAuthorizingAgent: boolean;
+}
+
+export function GoogleSignInButton({ isAuthorizingAgent }: GoogleSignInButtonProps) {
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
 
@@ -27,6 +35,9 @@ export function GoogleSignInButton() {
           provider: "google",
           callbackURL: SIGN_IN_PATH,
           errorCallbackURL: "/auth/error?reason=identity",
+          ...(isAuthorizingAgent
+            ? { oauth_query: window.location.search.slice(1) }
+            : {}),
         },
       );
       if (!response.data.redirect || !response.data.url) {

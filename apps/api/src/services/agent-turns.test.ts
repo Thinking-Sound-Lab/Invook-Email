@@ -165,7 +165,7 @@ function harness(input: {
     },
     createCapabilities: (scope) => {
       assert.equal(scope.userId, userId);
-      assert.equal(scope.conversationId, conversationId);
+      assert.equal(scope.writeScopeId, conversationId);
       return capabilities;
     },
     getModel: () => ({ model: input.model }),

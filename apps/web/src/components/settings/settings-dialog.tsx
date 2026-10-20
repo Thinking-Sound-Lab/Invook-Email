@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AiNetworkIcon,
   CreditCardIcon,
   Settings01Icon,
   TagsIcon,
@@ -32,11 +33,13 @@ import {
 } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
+import { AgentSettings } from "./agent-settings";
 import { LabelSettings } from "./label-settings";
 
 const settingsSections = [
   { value: "account", label: "Account", icon: UserAccountIcon },
   { value: "labels", label: "Labels", icon: TagsIcon },
+  { value: "agents", label: "Agents", icon: AiNetworkIcon },
   { value: "billing", label: "Billing", icon: CreditCardIcon },
 ] as const;
 
@@ -225,7 +228,7 @@ export function SettingsDialog({
         <DialogHeader className="sr-only">
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>
-            Manage your account, labels, and billing.
+            Manage your account, labels, connected agents, and billing.
           </DialogDescription>
         </DialogHeader>
         <Tabs
@@ -289,6 +292,9 @@ export function SettingsDialog({
                 onChanged={loadSettings}
               />
             ) : settingsUnavailable}
+          </TabsContent>
+          <TabsContent value="agents" className="min-h-0 overflow-y-auto">
+            <AgentSettings />
           </TabsContent>
           <TabsContent value="billing" className="min-h-0 overflow-y-auto">
             <BillingSettings />
