@@ -1,4 +1,9 @@
-import { MCP_MAIL_SCOPE, MCP_OFFLINE_ACCESS_SCOPE } from "@invook/contracts";
+import {
+  AGENT_SETTINGS_PATH,
+  MCP_MAIL_SCOPE,
+  MCP_OFFLINE_ACCESS_SCOPE,
+} from "@invook/contracts";
+import Link from "next/link";
 import { connection } from "next/server";
 
 import { AgentConsentForm } from "@/components/auth/agent-consent-form";
@@ -105,7 +110,11 @@ export default async function AgentConsentPage({ searchParams }: AgentConsentPag
           <p className="mt-4 text-xs leading-5 text-muted-foreground">
             Invook marks sending as an action that needs your confirmation, and the
             agent asks for it according to its own settings. Disconnect an agent
-            anytime in Invook under Settings, Agents.
+            anytime from{" "}
+            <Link href={AGENT_SETTINGS_PATH} className="underline underline-offset-2">
+              Invook&apos;s agent settings
+            </Link>
+            .
           </p>
         ) : null}
 

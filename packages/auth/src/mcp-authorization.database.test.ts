@@ -424,3 +424,177 @@ test(
     }
   },
 );
+
+/** A Google ID token as Google's token endpoint returns it over TLS. */
+function googleIdToken(claims: Record<string, unknown>): string {
+  const encode = (value: object) => base64Url(Buffer.from(JSON.stringify(value)));
+  return `${encode({ alg: "RS256", kid: "test" })}.${encode(claims)}.signature`;
+}
+
+test(
+  "a signed-out person signs in with Google and the agent's authorization resumes",
+  { skip: !testDatabaseUrl },
+  async (context) => {
+    if (!testDatabaseUrl) return;
+    const databaseClient = postgres(testDatabaseUrl, { max: 2, prepare: false });
+    const database = drizzle(databaseClient, { schema: databaseSchema });
+    const auth = createInvookAuth(
+      {
+        appUrl: appOrigin,
+        secret: testSecret,
+        googleClientId: "database-test-client-id",
+        googleClientSecret: "database-test-client-secret",
+      },
+      database,
+    );
+    const adapter = (await auth.$context).internalAdapter;
+    const call = (path: string, init: RequestInit = {}) =>
+      auth.handler(new Request(`${appOrigin}${path}`, init));
+    const email = `mcp-google-${uuidv4()}@example.test`;
+    let clientId: string | null = null;
+
+    // Google's token endpoint is the only network call the callback makes.
+    const originalFetch = globalThis.fetch;
+    const tokenRequests: string[] = [];
+    context.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.startsWith("https://oauth2.googleapis.com/token")) {
+        return originalFetch(input, init);
+      }
+      tokenRequests.push(url);
+      return Response.json({
+        access_token: "google-access-token",
+        expires_in: 3599,
+        token_type: "Bearer",
+        scope: "openid email profile",
+        id_token: googleIdToken({
+          iss: "https://accounts.google.com",
+          aud: "database-test-client-id",
+          sub: `google-${uuidv4()}`,
+          email,
+          email_verified: true,
+          name: "Signed Out Person",
+          exp: Math.floor(Date.now() / 1_000) + 3_600,
+        }),
+      });
+    });
+
+    try {
+      const registration = await call("/v1/auth/oauth2/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          client_name: "Signed Out Agent",
+          redirect_uris: [redirectUri],
+          grant_types: ["authorization_code", "refresh_token"],
+          token_endpoint_auth_method: "none",
+          scope: "mail offline_access",
+        }),
+      });
+      clientId = ((await registration.json()) as { client_id: string }).client_id;
+
+      const pkce = createPkce();
+      const authorize = await call(
+        `/v1/auth/oauth2/authorize?${new URLSearchParams({
+          response_type: "code",
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          scope: "mail offline_access",
+          state: "signed-out-agent",
+          code_challenge: pkce.challenge,
+          code_challenge_method: "S256",
+          resource,
+        })}`,
+      );
+      const signInPage = new URL(authorize.headers.get("location") ?? "", appOrigin);
+      assert.equal(signInPage.pathname, "/sign-in");
+
+      // The sign-in page starts Google sign-in with the signed request.
+      const signIn = await call("/v1/auth/sign-in/social", {
+        method: "POST",
+        headers: { origin: appOrigin, "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "google",
+          callbackURL: "/sign-in",
+          oauth_query: signInPage.search.slice(1),
+        }),
+      });
+      assert.equal(signIn.status, 200);
+      const googleUrl = new URL(((await signIn.json()) as { url: string }).url);
+      const stateCookie = signIn.headers
+        .getSetCookie()
+        .map((cookie) => cookie.split(";")[0])
+        .find((cookie) => cookie?.startsWith("invook.state="));
+      assert.ok(stateCookie);
+
+      // Google returns the browser to Invook, which resumes the agent's request.
+      const callback = await call(
+        `/v1/auth/callback/google?${new URLSearchParams({
+          code: "google-authorization-code",
+          state: googleUrl.searchParams.get("state") ?? "",
+        })}`,
+        {
+          headers: {
+            cookie: stateCookie,
+            accept: "text/html",
+            "sec-fetch-mode": "navigate",
+          },
+        },
+      );
+      assert.equal(callback.status, 302);
+      assert.equal(tokenRequests.length, 1);
+      const consentPage = new URL(callback.headers.get("location") ?? "", appOrigin);
+      assert.equal(consentPage.pathname, "/oauth/consent");
+      assert.equal(consentPage.searchParams.get("client_id"), clientId);
+      const sessionCookie = callback.headers
+        .getSetCookie()
+        .map((cookie) => cookie.split(";")[0])
+        .find((cookie) => cookie?.startsWith("invook.session_token="));
+      assert.ok(sessionCookie);
+
+      const consent = await call("/v1/auth/oauth2/consent", {
+        method: "POST",
+        headers: {
+          cookie: sessionCookie,
+          origin: appOrigin,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ accept: true, oauth_query: consentPage.search.slice(1) }),
+      });
+      const agentCallback = new URL(((await consent.json()) as { url: string }).url);
+      assert.equal(agentCallback.searchParams.get("state"), "signed-out-agent");
+      const code = agentCallback.searchParams.get("code");
+      assert.ok(code);
+
+      const exchange = await call("/v1/auth/oauth2/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirectUri,
+          client_id: clientId,
+          code_verifier: pkce.verifier,
+          resource,
+        }),
+      });
+      assert.equal(exchange.status, 200);
+      const tokens = (await exchange.json()) as TokenResponse;
+      const user = await adapter.findUserByEmail(email);
+      assert.ok(user);
+      assert.deepEqual(
+        await getMcpAccessGrant({ tokenHash: hashOAuthToken(tokens.access_token) }, database),
+        { userId: user.user.id, clientId, scopes: ["mail", "offline_access"] },
+      );
+    } finally {
+      const user = await adapter.findUserByEmail(email);
+      if (user) await adapter.deleteUser(user.user.id);
+      if (clientId) {
+        await database
+          .delete(databaseSchema.oauthClients)
+          .where(eq(databaseSchema.oauthClients.clientId, clientId));
+      }
+      await databaseClient.end();
+    }
+  },
+);

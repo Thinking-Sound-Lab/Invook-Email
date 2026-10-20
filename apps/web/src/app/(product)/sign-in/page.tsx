@@ -1,3 +1,5 @@
+import { AGENT_SETTINGS_PATH } from "@invook/contracts";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { connection } from "next/server";
 
@@ -40,6 +42,9 @@ export default async function SignInPage({ searchParams }: SignInPageProps) {
                 Connect Gmail
               </Button>
             </form>
+            <Button asChild variant="ghost" size="sm" className="mt-3 text-xs text-muted-foreground">
+              <Link href={AGENT_SETTINGS_PATH}>Manage connected agents</Link>
+            </Button>
           </div>
         ) : (
           <GoogleSignInButton isAuthorizingAgent={false} />

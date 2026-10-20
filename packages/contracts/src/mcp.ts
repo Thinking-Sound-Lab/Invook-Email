@@ -4,6 +4,13 @@ export const SIGN_IN_PATH = "/sign-in";
 /** Web page where a person approves or denies an agent's access to their mail. */
 export const MCP_CONSENT_PATH = "/oauth/consent";
 
+/**
+ * Web page where a signed-in person sets up and disconnects agents. It does
+ * not require Gmail, because an agent can be approved before Gmail is
+ * connected and must stay manageable after every account is removed.
+ */
+export const AGENT_SETTINGS_PATH = "/settings/agents";
+
 /** Path of Invook's MCP server on the application origin. */
 export const MCP_PATH = "/mcp";
 

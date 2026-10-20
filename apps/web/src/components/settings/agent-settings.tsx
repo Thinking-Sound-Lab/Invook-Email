@@ -36,23 +36,32 @@ async function loadAgentSettings(): Promise<AgentSettingsState> {
 
 const connectedAtFormat = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
+  timeStyle: "short",
 });
+
+/** Agents choose their own names, so the client ID tells two installations apart. */
+const CLIENT_ID_PREFIX_LENGTH = 8;
 
 interface ConnectedAgentRowProps {
   connection: McpConnection;
   isPending: boolean;
+  isDisabled: boolean;
   onDisconnect: () => void;
 }
 
-function ConnectedAgentRow({ connection, isPending, onDisconnect }: ConnectedAgentRowProps) {
+function ConnectedAgentRow({
+  connection,
+  isPending,
+  isDisabled,
+  onDisconnect,
+}: ConnectedAgentRowProps) {
   const name = connection.name ?? "Unnamed agent";
+  const detail = `Connected ${connectedAtFormat.format(new Date(connection.connectedAt))} · ID ${connection.clientId.slice(0, CLIENT_ID_PREFIX_LENGTH)}`;
   return (
     <article className="flex min-h-14 items-center gap-3 rounded-lg px-2.5 py-2 transition-colors hover:bg-muted/35">
       <div className="min-w-0 flex-1">
         <p className="truncate text-[13px] font-semibold">{name}</p>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          Connected {connectedAtFormat.format(new Date(connection.connectedAt))}
-        </p>
+        <p className="mt-0.5 text-xs text-muted-foreground">{detail}</p>
       </div>
       <AlertDialog>
         <AlertDialogTrigger asChild>
@@ -60,7 +69,7 @@ function ConnectedAgentRow({ connection, isPending, onDisconnect }: ConnectedAge
             type="button"
             variant="ghost"
             size="sm"
-            disabled={isPending}
+            disabled={isDisabled}
             className="text-xs text-muted-foreground"
           >
             {isPending ? "Disconnecting…" : "Disconnect"}
@@ -70,8 +79,8 @@ function ConnectedAgentRow({ connection, isPending, onDisconnect }: ConnectedAge
           <AlertDialogHeader>
             <AlertDialogTitle>Disconnect {name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              It loses access to your mail on its next request. Drafts and email it
-              already wrote stay in Gmail.
+              {detail}. It loses access to your mail on its next request. Drafts
+              and email it already wrote stay in Gmail.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter className="border-0">
@@ -105,6 +114,7 @@ export function AgentSettings() {
   }
 
   async function handleDisconnect(clientId: string) {
+    if (pendingClientId !== null) return;
     setPendingClientId(clientId);
     setError(null);
     try {
@@ -180,6 +190,9 @@ export function AgentSettings() {
                 <ConnectedAgentRow
                   connection={connection}
                   isPending={pendingClientId === connection.clientId}
+                  // One disconnect at a time, so a slower reload cannot
+                  // bring back an agent a later disconnect removed.
+                  isDisabled={pendingClientId !== null}
                   onDisconnect={() => void handleDisconnect(connection.clientId)}
                 />
               </div>
