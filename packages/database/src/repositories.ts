@@ -43,6 +43,7 @@ import { createHistoricalThreadLabelScan } from "./historical-thread-label-batch
 import { enqueueDailyGmailWatchRenewal } from "./gmail-watch";
 import { GmailConnectionDeletingError, withGmailIdentityLock } from "./gmail-identity";
 import { deriveMailSyncProgress } from "./mail-sync-progress";
+import { isStaleGmailSnapshotAfterDelete } from "./gmail-deleted-messages";
 import { getOrCreateGmailLabels } from "./gmail-labels";
 import {
   inboxThreadCondition,
@@ -52,6 +53,7 @@ import {
   accountSecrets,
   connectedAccounts,
   gmailConnectionRequests,
+  gmailDeletedMessages,
   gmailReplicaStates,
   gmailWatchStates,
   labels,
@@ -962,6 +964,9 @@ async function upsertMailboxMessageWithTransaction(
     await transaction.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerThreadId}`}, 0))`,
     );
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerMessageId}`}, 0))`,
+    );
     const [existingThread] = await transaction
       .select({ id: threads.id })
       .from(threads)
@@ -972,6 +977,39 @@ async function upsertMailboxMessageWithTransaction(
         ),
       )
       .limit(1);
+    const [deletedMessage] = await transaction
+      .select({ providerHistoryId: gmailDeletedMessages.providerHistoryId })
+      .from(gmailDeletedMessages)
+      .where(
+        and(
+          eq(gmailDeletedMessages.accountId, input.accountId),
+          eq(gmailDeletedMessages.providerMessageId, input.providerMessageId),
+        ),
+      )
+      .limit(1);
+    if (
+      deletedMessage &&
+      isStaleGmailSnapshotAfterDelete(
+        input.providerHistoryId,
+        deletedMessage.providerHistoryId,
+      )
+    ) {
+      return {
+        messageId: "",
+        threadId: existingThread?.id ?? "",
+        changed: false,
+      };
+    }
+    if (deletedMessage) {
+      await transaction
+        .delete(gmailDeletedMessages)
+        .where(
+          and(
+            eq(gmailDeletedMessages.accountId, input.accountId),
+            eq(gmailDeletedMessages.providerMessageId, input.providerMessageId),
+          ),
+        );
+    }
 
     let threadId = existingThread?.id;
     if (!threadId) {
@@ -1276,18 +1314,19 @@ export async function upsertMailboxThreadMessages(
         transaction,
         input.activeRunId,
       );
-      if (threadId && stored.threadId !== threadId) {
-        throw new Error("Gmail thread messages mapped to different local threads.");
+      if (stored.threadId) {
+        if (threadId && stored.threadId !== threadId) {
+          throw new Error("Gmail thread messages mapped to different local threads.");
+        }
+        threadId = stored.threadId;
       }
-      threadId = stored.threadId;
       changed ||= stored.changed;
     }
-    if (!threadId) throw new Error("The Gmail thread stored no messages.");
     await enqueueLiveInboxThreadLabelAnalyses(
       {
         userId: firstMessage.userId,
         accountId: firstMessage.accountId,
-        threadIds: [threadId],
+        threadIds: threadId ? [threadId] : [],
         referenceAt: run.createdAt,
       },
       transaction,
@@ -1303,7 +1342,7 @@ export async function upsertMailboxThreadMessages(
       transaction,
     );
     if (!completed) throw new InactiveMailSyncRunError(input.activeRunId);
-    return { threadId, changed };
+    return { threadId: threadId ?? "", changed };
   });
 }
 
@@ -1312,10 +1351,39 @@ export async function deleteIndexedMessage(
     accountId: string;
     providerMessageId: string;
     providerHistoryId?: string | null;
+    /**
+     * Persist the Gmail `messagesDeleted` event so a later snapshot of the
+     * same thread cannot insert this message again. Repair and 404-inferred
+     * deletes leave this unset so a later provider fetch can restore them.
+     */
+    tombstone?: boolean;
   },
   database: Database = getDatabase(),
 ) {
   return database.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerMessageId}`}, 0))`,
+    );
+    if (input.tombstone) {
+      await transaction
+        .insert(gmailDeletedMessages)
+        .values({
+          accountId: input.accountId,
+          providerMessageId: input.providerMessageId,
+          providerHistoryId: input.providerHistoryId ?? null,
+        })
+        .onConflictDoUpdate({
+          target: [
+            gmailDeletedMessages.accountId,
+            gmailDeletedMessages.providerMessageId,
+          ],
+          set: {
+            providerHistoryId:
+              input.providerHistoryId ??
+              sql`${gmailDeletedMessages.providerHistoryId}`,
+          },
+        });
+    }
     const [storedMessage] = await transaction
       .select({
         id: messages.id,
