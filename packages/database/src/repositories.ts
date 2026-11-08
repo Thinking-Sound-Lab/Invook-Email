@@ -1323,15 +1323,10 @@ export async function deleteIndexedMessage(
         threadId: messages.threadId,
         providerThreadId: threads.providerThreadId,
         providerHistoryId: messages.providerHistoryId,
-        assignmentId: threadLabelAssignments.id,
         updatedAt: messages.updatedAt,
       })
       .from(messages)
       .innerJoin(threads, eq(threads.id, messages.threadId))
-      .leftJoin(
-        threadLabelAssignments,
-        eq(threadLabelAssignments.threadId, threads.id),
-      )
       .where(
         and(
           eq(threads.accountId, input.accountId),
@@ -1340,7 +1335,7 @@ export async function deleteIndexedMessage(
       )
       .limit(1);
     if (!storedMessage) {
-      return { changed: false, threadId: null, wasVisible: false };
+      return { changed: false, threadId: null };
     }
 
     const attachmentObjects = await transaction
@@ -1378,7 +1373,6 @@ export async function deleteIndexedMessage(
       changed: true,
       threadId: storedMessage.threadId,
       objectKeys,
-      wasVisible: storedMessage.assignmentId !== null,
     };
   });
 }

@@ -850,7 +850,9 @@ export async function applyGmailHistoryBatch(
         },
         executor,
       );
-      if (result.changed && result.threadId && result.wasVisible) {
+      // Inbox/All/Sent/Trash show unlabeled threads, so a live delete must
+      // notify even when the conversation has no Invook label assignment.
+      if (result.changed && result.threadId) {
         changedThreadIds.add(result.threadId);
       }
     }

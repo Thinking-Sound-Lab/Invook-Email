@@ -3,6 +3,33 @@ import { test } from "node:test";
 
 import { gmailHistoryChanges } from "@invook/gmail";
 
+test("a delete in the same history record wins over labels on that message", () => {
+  assert.deepEqual(
+    gmailHistoryChanges({
+      id: "110",
+      labelsRemoved: [
+        {
+          message: {
+            id: "deleted",
+            threadId: "thread-4",
+            labelIds: ["INBOX"],
+          },
+          labelIds: ["INBOX"],
+        },
+      ],
+      messagesDeleted: [{ message: { id: "deleted", threadId: "thread-4" } }],
+    }),
+    [
+      {
+        messageId: "deleted",
+        action: "delete",
+        providerLabelIds: ["INBOX"],
+        isDraftRelated: false,
+      },
+    ],
+  );
+});
+
 test("Gmail history exposes additions, label changes, and deletions", () => {
   assert.deepEqual(
     gmailHistoryChanges({
