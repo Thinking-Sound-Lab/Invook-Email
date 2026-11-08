@@ -767,6 +767,54 @@ test(
 );
 
 test(
+  "deleting unlabeled inbox mail still publishes a mailbox change",
+  { skip: !testDatabaseUrl },
+  async () => {
+    await withPartialReplicaFixture(async (fixture) => {
+      const { database, userId, accountId, threadId, messageId } = fixture;
+      await database
+        .delete(threadLabelAssignments)
+        .where(eq(threadLabelAssignments.threadId, threadId));
+
+      const result = await applyGmailHistoryBatch(
+        {
+          userId,
+          accountId,
+          expectedCursor: "100",
+          nextCursor: "130",
+          messages: [],
+          labelChanges: [],
+          deletedMessageIds: [
+            {
+              providerMessageId: `provider-message-${messageId}`,
+              providerHistoryId: "130",
+            },
+          ],
+        },
+        database,
+      );
+
+      assert.equal(result.applied, true);
+      assert.deepEqual(result.changedThreadIds, [threadId]);
+      assert.ok(result.eventId);
+      const [event] = await database
+        .select({ payload: mailboxChangeEvents.payload })
+        .from(mailboxChangeEvents)
+        .where(eq(mailboxChangeEvents.id, result.eventId));
+      assert.deepEqual(event?.payload, {
+        reason: "history_catchup",
+        changedThreadIds: [threadId],
+        refreshedThreadIds: [threadId],
+      });
+      assert.equal(
+        await getMailboxThreadDetail(userId, threadId, accountId, database),
+        null,
+      );
+    });
+  },
+);
+
+test(
   "provider-write reconciliation stays durable and retry-safe during initial sync",
   { skip: !testDatabaseUrl },
   async () => {
