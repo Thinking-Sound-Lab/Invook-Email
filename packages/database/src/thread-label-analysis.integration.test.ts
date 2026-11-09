@@ -995,6 +995,146 @@ test(
   },
 );
 
+test(
+  "historical apply-to-past does not claim or overwrite a current manual assignment",
+  integrationOptions,
+  async () => {
+    await withContext(async (context) => {
+      const { database, userId, referenceAt } = context;
+      const rows = await insertThreads(
+        context,
+        Array.from({ length: 2 }, () => ({
+          sentAt: new Date(referenceAt.getTime() - 20 * DAY_MS),
+        })),
+      );
+      const [manual, unlabeled] = rows;
+      assert.ok(manual && unlabeled);
+      const manualLabel = await createInvookLabel(
+        {
+          userId,
+          accountId: context.accountId,
+          name: "Manual choice",
+          description: "Keep this manual choice",
+        },
+        database,
+      );
+      assert.ok(manualLabel);
+      await setUserThreadLabel(
+        { userId, threadId: manual.threadId, labelId: manualLabel.id },
+        database,
+      );
+      const request = await createHistoricalRequest(context);
+      const batch = await claimBatch(context, request.scan.id, openingScope);
+      assert.deepEqual(
+        batch.candidates.map((entry) => entry.threadId),
+        [unlabeled.threadId],
+      );
+      const completed = await finish(context, batch.submissionId, [
+        {
+          threadId: unlabeled.threadId,
+          labelId: request.label.id,
+          confidence: 90,
+        },
+        {
+          threadId: manual.threadId,
+          labelId: request.label.id,
+          confidence: 90,
+        },
+      ]);
+      assert.equal(completed.appliedCount, 1);
+      const [choice] = await database
+        .select()
+        .from(threadLabelAssignments)
+        .where(eq(threadLabelAssignments.threadId, manual.threadId));
+      assert.equal(choice?.labelId, manualLabel.id);
+      assert.equal(choice?.source, "user");
+      const [applied] = await database
+        .select()
+        .from(threadLabelAssignments)
+        .where(eq(threadLabelAssignments.threadId, unlabeled.threadId));
+      assert.equal(applied?.labelId, request.label.id);
+      assert.equal(applied?.source, "ai");
+    });
+  },
+);
+
+test(
+  "historical Batch finalize leaves a captured manual assignment unchanged",
+  integrationOptions,
+  async () => {
+    await withContext(async (context) => {
+      const { database, userId, accountId, referenceAt } = context;
+      const [manual] = await insertThreads(context, [
+        { sentAt: new Date(referenceAt.getTime() - 20 * DAY_MS) },
+      ]);
+      assert.ok(manual);
+      const manualLabel = await createInvookLabel(
+        {
+          userId,
+          accountId,
+          name: "Manual choice",
+          description: "Keep this manual choice",
+        },
+        database,
+      );
+      assert.ok(manualLabel);
+      const assignment = await setUserThreadLabel(
+        { userId, threadId: manual.threadId, labelId: manualLabel.id },
+        database,
+      );
+      assert.ok(assignment);
+      const [thread] = await database
+        .select({
+          contentVersion: threads.contentVersion,
+          assignmentVersion: threadLabelAssignments.assignmentVersion,
+        })
+        .from(threads)
+        .innerJoin(
+          threadLabelAssignments,
+          eq(threadLabelAssignments.threadId, threads.id),
+        )
+        .where(eq(threads.id, manual.threadId));
+      assert.ok(thread);
+      const request = await createHistoricalRequest(context);
+      const [submission] = await database
+        .insert(threadLabelBatchSubmissions)
+        .values({
+          userId,
+          accountId,
+          historicalScanId: request.scan.id,
+          modelId: "test-model",
+          definitionHash: "a".repeat(64),
+          requestCount: 1,
+          manifest: [
+            {
+              threadId: manual.threadId,
+              contentVersion: thread.contentVersion,
+              assignmentVersion: thread.assignmentVersion,
+              fallbackLabelId: `no-match:${request.label.id}`,
+            },
+          ],
+          status: "submitted",
+        })
+        .returning();
+      assert.ok(submission);
+      const completed = await finish(context, submission.id, [
+        {
+          threadId: manual.threadId,
+          labelId: request.label.id,
+          confidence: 90,
+        },
+      ]);
+      assert.equal(completed.appliedCount, 0);
+      const [choice] = await database
+        .select()
+        .from(threadLabelAssignments)
+        .where(eq(threadLabelAssignments.threadId, manual.threadId));
+      assert.equal(choice?.labelId, manualLabel.id);
+      assert.equal(choice?.source, "user");
+    });
+  },
+);
+
 for (const action of ["edit", "disable"] as const) {
   test(
     `a label ${action} supersedes outstanding historical Batch results`,

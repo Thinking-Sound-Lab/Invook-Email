@@ -14,6 +14,7 @@ import { insertMailboxChange } from "./mailbox-change-events";
 import { enqueueWorkflowStepWithExecutor } from "./workflows";
 
 import {
+  automaticThreadLabelAssignmentAllowed,
   automaticThreadLabelCutoff,
   inboxMessageCondition,
   recentInboxThreadCondition,
@@ -251,14 +252,6 @@ function connectedThreadAccountCondition() {
     where account.id = ${threads.accountId}
       and account.user_id = ${threads.userId}
       and account.status = 'connected'
-  )`;
-}
-
-function automaticThreadLabelAssignmentAllowed() {
-  return sql<boolean>`not exists (
-    select 1 from ${threadLabelAssignments} manual_assignment
-    where manual_assignment.thread_id = ${threads.id}
-      and manual_assignment.source = 'user'
   )`;
 }
 
