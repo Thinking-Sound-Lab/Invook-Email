@@ -21,7 +21,10 @@ import {
   listInboxThreadMessages,
   type ThreadLabelDefinition,
 } from "./thread-label-analysis";
-import { recentInboxThreadCondition } from "./thread-label-eligibility";
+import {
+  automaticThreadLabelAssignmentAllowed,
+  recentInboxThreadCondition,
+} from "./thread-label-eligibility";
 import {
   enqueueWorkflowStepWithExecutor,
   readmitWorkflowStep,
@@ -217,6 +220,7 @@ async function hydrateCandidates(
         subject: threads.subject,
         contentVersion: threads.contentVersion,
         assignmentVersion: threadLabelAssignments.assignmentVersion,
+        assignmentSource: threadLabelAssignments.source,
       })
       .from(threads)
       .leftJoin(
@@ -235,6 +239,7 @@ async function hydrateCandidates(
       .limit(1);
     if (
       !thread ||
+      thread.assignmentSource === "user" ||
       thread.contentVersion !== checkpoint.contentVersion ||
       thread.assignmentVersion !== checkpoint.assignmentVersion
     )
@@ -353,9 +358,9 @@ export async function claimThreadLabelBatchSubmission(
           eq(threads.accountId, scan.accountId),
           lte(threads.createdAt, scan.before),
           recentInboxThreadCondition(scan.after, scan.before),
-          // A user decision made after the request was admitted always wins,
-          // including when it precedes a later page's candidate selection.
-          sql`(${threadLabelAssignments.source} is distinct from 'user' or ${threadLabelAssignments.assignedAt} < ${scan.before.toISOString()}::timestamptz)`,
+          // Manual assignments stay authoritative for the whole scan,
+          // including labels the user set before apply-to-past was admitted.
+          automaticThreadLabelAssignmentAllowed(),
           input.threadIds
             ? inArray(threads.id, input.threadIds)
             : scan.cursorThreadId
@@ -672,6 +677,7 @@ export async function finalizeThreadLabelBatchSubmission(
             id: threads.id,
             contentVersion: threads.contentVersion,
             assignmentVersion: threadLabelAssignments.assignmentVersion,
+            assignmentSource: threadLabelAssignments.source,
           })
           .from(threads)
           .leftJoin(
@@ -693,6 +699,7 @@ export async function finalizeThreadLabelBatchSubmission(
           .limit(1);
         if (
           !thread ||
+          thread.assignmentSource === "user" ||
           thread.contentVersion !== checkpoint.contentVersion ||
           thread.assignmentVersion !== checkpoint.assignmentVersion
         )
@@ -715,7 +722,7 @@ export async function finalizeThreadLabelBatchSubmission(
           continue;
         }
         if (result.labelId !== current.scan.labelId) continue;
-        await transaction
+        const [assignment] = await transaction
           .insert(threadLabelAssignments)
           .values({
             userId: current.scan.userId,
@@ -739,7 +746,10 @@ export async function finalizeThreadLabelBatchSubmission(
               assignedAt: new Date(),
               updatedAt: new Date(),
             },
-          });
+            setWhere: eq(threadLabelAssignments.source, "ai"),
+          })
+          .returning({ threadId: threadLabelAssignments.threadId });
+        if (!assignment) continue;
         await transaction
           .update(threads)
           .set({

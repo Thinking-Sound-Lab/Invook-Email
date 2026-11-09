@@ -1,6 +1,12 @@
 import { gte, lte, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 
-import { labels, messageLabels, messages, threads } from "./schema";
+import {
+  labels,
+  messageLabels,
+  messages,
+  threadLabelAssignments,
+  threads,
+} from "./schema";
 
 const AUTOMATIC_THREAD_LABEL_WINDOW_DAYS = 14;
 
@@ -28,6 +34,14 @@ export function inboxMessageCondition(
       and membership.account_id = ${accountId}
       and label.account_id = ${accountId}
       and label.kind = 'gmail' and label.provider_label_id in ('SPAM', 'TRASH')
+  )`;
+}
+
+export function automaticThreadLabelAssignmentAllowed(): SQL<boolean> {
+  return sql<boolean>`not exists (
+    select 1 from ${threadLabelAssignments} manual_assignment
+    where manual_assignment.thread_id = ${threads.id}
+      and manual_assignment.source = 'user'
   )`;
 }
 
