@@ -157,6 +157,105 @@ test("full-format normalization reuses Gmail's parsed parts and loads external b
   assert.deepEqual(parsed.attachments[0]?.content, attachmentBytes);
 });
 
+test("full-format HTML with Content-ID remains the message body", async () => {
+  const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  const html = '<p>Hello <img src="cid:photo@example.com"></p>';
+  const parsed = await normalizeGmailFullMessage(
+    {
+      id: "related-message-id",
+      threadId: "related-thread-id",
+      payload: {
+        mimeType: "multipart/related",
+        headers: [
+          { name: "From", value: "sender@example.com" },
+          { name: "To", value: "receiver@example.com" },
+          { name: "Subject", value: "Related html" },
+        ],
+        parts: [
+          {
+            partId: "0",
+            mimeType: "text/html",
+            headers: [{ name: "Content-ID", value: "<html-root@example.com>" }],
+            body: { data: Buffer.from(html).toString("base64url") },
+          },
+          {
+            partId: "1",
+            mimeType: "image/png",
+            filename: "photo.png",
+            headers: [
+              { name: "Content-ID", value: "<photo@example.com>" },
+              {
+                name: "Content-Disposition",
+                value: "inline; filename=photo.png",
+              },
+            ],
+            body: { data: imageBytes.toString("base64url") },
+          },
+        ],
+      },
+    },
+    async () => {
+      throw new Error("inline related parts should not load external attachments");
+    },
+  );
+
+  assert.equal(parsed.bodyHtml, html);
+  assert.equal(parsed.bodyText, null);
+  assert.equal(parsed.attachments.length, 1);
+  assert.equal(parsed.attachments[0]?.mimeType, "image/png");
+  assert.equal(parsed.attachments[0]?.cid, "photo@example.com");
+  assert.deepEqual(parsed.attachments[0]?.content, imageBytes);
+});
+
+test("full-format named HTML attachments keep Content-ID without becoming the body", async () => {
+  const html = "<p>Attached copy</p>";
+  const parsed = await normalizeGmailFullMessage(
+    {
+      id: "attached-html-id",
+      threadId: "attached-html-thread",
+      payload: {
+        mimeType: "multipart/mixed",
+        headers: [
+          { name: "From", value: "sender@example.com" },
+          { name: "To", value: "receiver@example.com" },
+          { name: "Subject", value: "Attached html" },
+        ],
+        parts: [
+          {
+            partId: "0",
+            mimeType: "text/plain",
+            body: {
+              data: Buffer.from("See attachment.").toString("base64url"),
+            },
+          },
+          {
+            partId: "1",
+            mimeType: "text/html",
+            filename: "copy.html",
+            headers: [
+              { name: "Content-ID", value: "<copy@example.com>" },
+              {
+                name: "Content-Disposition",
+                value: "attachment; filename=copy.html",
+              },
+            ],
+            body: { data: Buffer.from(html).toString("base64url") },
+          },
+        ],
+      },
+    },
+    async () => {
+      throw new Error("inline html attachments should not load external bytes");
+    },
+  );
+
+  assert.equal(parsed.bodyText, "See attachment.");
+  assert.equal(parsed.bodyHtml, null);
+  assert.equal(parsed.attachments.length, 1);
+  assert.equal(parsed.attachments[0]?.filename, "copy.html");
+  assert.equal(parsed.attachments[0]?.contentId, "<copy@example.com>");
+});
+
 test("raw MIME parsing reports absent body variants honestly", async () => {
   const plainOnly = Buffer.from(
     [
