@@ -380,12 +380,17 @@ async function normalizeGmailParts(input: {
   const disposition = contentDisposition(headers);
   const partContentId = contentId(headers);
   const filename = input.part.filename?.trim() || null;
+  // Content-ID marks related parts such as inline images. multipart/related
+  // also puts it on the text/html (and sometimes text/plain) root, which is
+  // the message body. Named or disposition=attachment text parts stay files.
+  const isTextBody = mimeType === "text/plain" || mimeType === "text/html";
   const isAttachment = Boolean(
     filename ||
       disposition === "attachment" ||
-      partContentId ||
-      (!mimeType.startsWith("text/") &&
-        (input.part.body?.attachmentId || input.part.body?.data)),
+      (!isTextBody &&
+        (partContentId ||
+          input.part.body?.attachmentId ||
+          input.part.body?.data)),
   );
   const content = await loadGmailPartBody({
     messageId: input.messageId,
