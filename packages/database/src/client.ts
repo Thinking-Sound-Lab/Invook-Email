@@ -84,15 +84,15 @@ function getControlLockClient(): ReturnType<typeof postgres> {
   return client;
 }
 
-export async function withGmailAccountControlLock<T>(
-  accountId: string,
+/**
+ * Session-level advisory lock on the dedicated control pool. Lock waiters must
+ * not occupy the query pool: a waiter that holds a query connection while the
+ * holder also needs one deadlocks the process.
+ */
+export async function withSessionAdvisoryLock<T>(
+  lockName: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const lockName = `gmail-control:${accountId}`;
-  // pg_advisory_lock blocks while holding a reserved connection, so lock
-  // acquisition must use a pool the locked operation never queries. Waiters
-  // on the shared query pool starve the active holder's queries and freeze
-  // every concurrent Activity in the process.
   const connection = await getControlLockClient().reserve();
   let locked = false;
   try {
@@ -108,6 +108,13 @@ export async function withGmailAccountControlLock<T>(
       connection.release();
     }
   }
+}
+
+export async function withGmailAccountControlLock<T>(
+  accountId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withSessionAdvisoryLock(`gmail-control:${accountId}`, operation);
 }
 
 async function listenForDatabaseNotifications(
