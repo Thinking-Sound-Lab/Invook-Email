@@ -1,7 +1,8 @@
-import { and, eq, isNull, or, sql } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 
 import {
   getDatabase,
+  withSessionAdvisoryLock,
   type Database,
 } from "./client";
 import { gmailDraftWriteOperations } from "./schema";
@@ -37,15 +38,15 @@ export class GmailDraftWriteConflictError extends Error {
 export async function withGmailDraftSendLock<Result>(
   input: { userId: string; idempotencyKey: string },
   operation: () => Promise<Result>,
-  database: Database = getDatabase(),
 ): Promise<Result> {
-  const lockKey = `gmail-draft-send:${input.userId}:${input.idempotencyKey}`;
-  return database.transaction(async (transaction) => {
-    await transaction.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`,
-    );
-    return operation();
-  });
+  // Compose send holds this lock across Gmail HTTP. A query-pool transaction
+  // would occupy one of the three production connections for that whole wait,
+  // so a handful of concurrent sends could deadlock beginWrite and freeze the
+  // API. The control pool exists so lock waiters never sit on the query pool.
+  return withSessionAdvisoryLock(
+    `gmail-draft-send:${input.userId}:${input.idempotencyKey}`,
+    operation,
+  );
 }
 
 export async function beginGmailDraftWrite(

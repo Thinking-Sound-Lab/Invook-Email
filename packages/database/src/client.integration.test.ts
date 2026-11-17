@@ -6,6 +6,22 @@ import { v4 as uuidv4 } from "uuid";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
 
+type DatabaseSingletonState = {
+  invookDatabaseConnection?: { client: { end: () => Promise<void> } };
+  invookControlLockConnection?: { client: { end: () => Promise<void> } };
+};
+
+async function closeDatabaseSingletons() {
+  const state = globalThis as typeof globalThis & DatabaseSingletonState;
+  try {
+    await state.invookDatabaseConnection?.client.end();
+    await state.invookControlLockConnection?.client.end();
+  } finally {
+    delete state.invookDatabaseConnection;
+    delete state.invookControlLockConnection;
+  }
+}
+
 test(
   "control lock waiters beyond the pool size do not starve the query pool",
   { skip: !testDatabaseUrl },
@@ -15,10 +31,6 @@ test(
     const { getDatabase, withGmailAccountControlLock } = await import(
       "./client"
     );
-    const state = globalThis as typeof globalThis & {
-      invookDatabaseConnection?: { client: { end: () => Promise<void> } };
-      invookControlLockConnection?: { client: { end: () => Promise<void> } };
-    };
     try {
       const accountId = uuidv4();
       // More concurrent lock requests than either pool holds. Every locked
@@ -41,8 +53,40 @@ test(
         Array.from({ length: 12 }, (_, index) => index),
       );
     } finally {
-      await state.invookDatabaseConnection?.client.end();
-      await state.invookControlLockConnection?.client.end();
+      await closeDatabaseSingletons();
+    }
+  },
+);
+
+test(
+  "draft send lock waiters beyond the pool size do not starve the query pool",
+  { skip: !testDatabaseUrl },
+  async () => {
+    if (!testDatabaseUrl) return;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const { getDatabase } = await import("./client");
+    const { withGmailDraftSendLock } = await import("./gmail-draft-writes");
+    try {
+      // Distinct sends each hold the lock across a query. If that lock sat on
+      // the query pool, three concurrent sends would exhaust the default pool
+      // of three and deadlock beginWrite the way production compose send does.
+      const results = await Promise.all(
+        Array.from({ length: 12 }, (_, index) =>
+          withGmailDraftSendLock(
+            { userId: uuidv4(), idempotencyKey: uuidv4() },
+            async () => {
+              await getDatabase().execute(sql`select 1`);
+              return index;
+            },
+          ),
+        ),
+      );
+      assert.deepEqual(
+        [...results].sort((left, right) => left - right),
+        Array.from({ length: 12 }, (_, index) => index),
+      );
+    } finally {
+      await closeDatabaseSingletons();
     }
   },
 );
