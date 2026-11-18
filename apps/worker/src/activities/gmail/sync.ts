@@ -10,6 +10,7 @@ import {
   completeMailSyncRun,
   completeGmailSynchronizationRecovery,
   deleteIndexedMessage,
+  deleteIndexedMessagesForProviderThread,
   enqueueDailyGmailWatchRenewal,
   failMailSyncThread,
   getIndexedMessageIds,
@@ -177,13 +178,19 @@ async function processInitialGmailThread(input: {
     );
   } catch (error) {
     if (!(error instanceof GmailApiError) || error.status !== 404) throw error;
+    // Repair finalize keeps local messages on listed threads, so a 404 must
+    // drop the replica rows before this item is marked complete.
+    const deleted = await deleteIndexedMessagesForProviderThread({
+      accountId: input.account.id,
+      providerThreadId: input.providerThreadId,
+    });
     const completed = await completeMailSyncThread({
       runId: input.runId,
       providerThreadId: input.providerThreadId,
     });
     return {
       status: completed ? "gone" : "inactive",
-      threadId: null,
+      threadId: deleted.threadId,
     };
   }
   if (
