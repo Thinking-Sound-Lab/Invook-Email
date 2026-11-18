@@ -1383,6 +1383,52 @@ export async function deleteIndexedMessage(
   });
 }
 
+/**
+ * Drops every stored message for a provider thread Gmail no longer returns.
+ *
+ * Repair finalize treats local messages on listed threads as still present at
+ * the provider, so a `threads.get` 404 must delete those rows here rather than
+ * only completing the sync item. The same thread lock ingest uses keeps a
+ * concurrent catch-up from resurrecting a message this pass is removing.
+ */
+export async function deleteIndexedMessagesForProviderThread(
+  input: { accountId: string; providerThreadId: string },
+  database: Database = getDatabase(),
+): Promise<{ threadId: string | null; deletedProviderMessageIds: string[] }> {
+  return database.transaction(async (transaction) => {
+    await transaction.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`${input.accountId}:${input.providerThreadId}`}, 0))`,
+    );
+    const storedMessages = await transaction
+      .select({ providerMessageId: messages.providerMessageId })
+      .from(messages)
+      .innerJoin(threads, eq(threads.id, messages.threadId))
+      .where(
+        and(
+          eq(threads.accountId, input.accountId),
+          eq(threads.providerThreadId, input.providerThreadId),
+        ),
+      );
+    const deletedProviderMessageIds: string[] = [];
+    let threadId: string | null = null;
+    const executor = transaction as unknown as Database;
+    for (const storedMessage of storedMessages) {
+      const deleted = await deleteIndexedMessage(
+        {
+          accountId: input.accountId,
+          providerMessageId: storedMessage.providerMessageId,
+        },
+        executor,
+      );
+      if (deleted.changed) {
+        deletedProviderMessageIds.push(storedMessage.providerMessageId);
+      }
+      if (deleted.threadId) threadId = deleted.threadId;
+    }
+    return { threadId, deletedProviderMessageIds };
+  });
+}
+
 export async function getIndexedMessageIds(
   accountId: string,
   database: Database = getDatabase(),
