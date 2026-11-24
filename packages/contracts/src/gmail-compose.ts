@@ -29,10 +29,18 @@ export type CreateGmailComposeDraftRequest = GmailComposeDraftFields &
     idempotencyKey: string;
   };
 
+/**
+ * Gmail sends a draft by ID. The caller must name the exact draft message it
+ * saved or approved, so a later Gmail edit is refused instead of sent.
+ */
 export type SendGmailComposeDraftRequest = {
   accountId: string;
   idempotencyKey: string;
+  expectedProviderMessageId: string;
 };
+
+export const GMAIL_COMPOSE_DRAFT_CHANGED_TITLE =
+  "The Gmail draft changed after it was saved, so it was not sent.";
 
 export type GmailComposeDraft = {
   providerDraftId: string;
