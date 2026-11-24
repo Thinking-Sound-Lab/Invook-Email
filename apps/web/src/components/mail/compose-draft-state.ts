@@ -36,7 +36,16 @@ export type ComposeDraftAction =
     }
   | { type: "sent" }
   | { type: "error"; message: string }
-  | { type: "send_error"; message: string; isReconnectRequired: boolean };
+  | {
+      type: "send_error";
+      message: string;
+      isReconnectRequired: boolean;
+      /**
+       * The Gmail draft this attempt named is gone or was replaced, so retrying
+       * the same send would either 409 forever or send different mail.
+       */
+      abandonAttempt?: boolean;
+    };
 
 export function createComposeDraftState(): ComposeDraftState {
   return {
@@ -98,6 +107,7 @@ export function composeDraftReducer(
     case "send_error":
       return {
         ...state,
+        attempt: action.abandonAttempt ? null : state.attempt,
         status: action.isReconnectRequired
           ? "reconnect_required"
           : "send_error",

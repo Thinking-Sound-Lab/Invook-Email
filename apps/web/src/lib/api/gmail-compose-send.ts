@@ -38,5 +38,6 @@ export async function sendGmailComposeAttempt(
   return dependencies.sendDraft(draft.providerDraftId, {
     accountId: attempt.request.accountId,
     idempotencyKey: attempt.sendIdempotencyKey,
+    expectedProviderMessageId: draft.providerMessageId,
   });
 }

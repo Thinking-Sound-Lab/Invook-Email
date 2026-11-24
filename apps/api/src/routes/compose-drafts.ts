@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import { validate as validateUuid } from "uuid";
 
 import {
+  GMAIL_COMPOSE_DRAFT_CHANGED_TITLE,
   validateGmailComposeDraftFields,
   type CreateGmailComposeDraftRequest,
   type GmailComposeDraftSource,
@@ -26,6 +27,7 @@ import {
   saveComposeDraft,
 } from "../services/compose-drafts";
 import {
+  GmailDraftChangedError,
   GmailDraftSendPendingError,
   sendComposeDraft,
 } from "../services/compose-send";
@@ -124,26 +126,35 @@ export function parseGmailComposeDraftRequest(
   };
 }
 
+function isGmailProviderId(value: string): boolean {
+  return /^[A-Za-z0-9_-]{1,256}$/.test(value);
+}
+
 export function parseGmailComposeSendRequest(
   body: unknown,
 ): SendGmailComposeDraftRequest | null {
   if (
     !isRecord(body) ||
     Object.keys(body).some(
-      (key) => key !== "accountId" && key !== "idempotencyKey",
+      (key) =>
+        key !== "accountId" &&
+        key !== "idempotencyKey" &&
+        key !== "expectedProviderMessageId",
     ) ||
     typeof body.accountId !== "string" ||
     !validateUuid(body.accountId) ||
     typeof body.idempotencyKey !== "string" ||
-    !validateUuid(body.idempotencyKey)
+    !validateUuid(body.idempotencyKey) ||
+    typeof body.expectedProviderMessageId !== "string" ||
+    !isGmailProviderId(body.expectedProviderMessageId)
   ) {
     return null;
   }
-  return { accountId: body.accountId, idempotencyKey: body.idempotencyKey };
-}
-
-function isProviderDraftId(value: string): boolean {
-  return /^[A-Za-z0-9_-]{1,256}$/.test(value);
+  return {
+    accountId: body.accountId,
+    idempotencyKey: body.idempotencyKey,
+    expectedProviderMessageId: body.expectedProviderMessageId,
+  };
 }
 
 async function sendComposeDraftError(
@@ -195,6 +206,10 @@ async function sendComposeDraftError(
       409,
       "Previous Gmail draft send is still being resolved",
     );
+    return true;
+  }
+  if (error instanceof GmailDraftChangedError) {
+    await sendProblem(request, reply, 409, GMAIL_COMPOSE_DRAFT_CHANGED_TITLE);
     return true;
   }
   if (error instanceof GmailApiError) {
@@ -274,7 +289,7 @@ export const registerComposeDraftRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      if (!isProviderDraftId(request.params.providerDraftId)) {
+      if (!isGmailProviderId(request.params.providerDraftId)) {
         await sendProblem(
           request,
           reply,
@@ -334,7 +349,7 @@ export const registerComposeDraftRoutes: FastifyPluginAsync = async (api) => {
     async (request, reply) => {
       const session = request.invookSession;
       if (!session) return;
-      if (!isProviderDraftId(request.params.providerDraftId)) {
+      if (!isGmailProviderId(request.params.providerDraftId)) {
         await sendProblem(
           request,
           reply,
@@ -365,6 +380,7 @@ export const registerComposeDraftRoutes: FastifyPluginAsync = async (api) => {
           access,
           idempotencyKey: send.idempotencyKey,
           providerDraftId: request.params.providerDraftId,
+          expectedProviderMessageId: send.expectedProviderMessageId,
         });
         await sendJson(reply, 200, result);
       } catch (error) {

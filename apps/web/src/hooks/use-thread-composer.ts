@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  GMAIL_COMPOSE_DRAFT_CHANGED_TITLE,
   parseGmailComposeRecipients,
   validateGmailComposeDraftFields,
   type GmailComposeDraftSource,
@@ -161,12 +162,12 @@ export function useThreadComposer({
       setNotice("Sent with Gmail.");
       await reloadThreadDetail();
     } catch (cause) {
-      setError(
-        apiErrorMessage(
-          cause,
-          "Invook could not confirm the send. Retry to safely resolve this attempt.",
-        ),
+      const message = apiErrorMessage(
+        cause,
+        "Invook could not confirm the send. Retry to safely resolve this attempt.",
       );
+      if (message === GMAIL_COMPOSE_DRAFT_CHANGED_TITLE) setAttempt(null);
+      setError(message);
       await reloadThreadDetail();
     } finally {
       busyRef.current = false;

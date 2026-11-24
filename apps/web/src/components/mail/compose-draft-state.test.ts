@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { GmailComposeSendAttempt } from "../../lib/api/gmail-compose-send";
+import { GMAIL_COMPOSE_DRAFT_CHANGED_TITLE } from "@invook/contracts";
 
+import type { GmailComposeSendAttempt } from "../../lib/api/gmail-compose-send";
 import {
   composeDraftReducer,
   createComposeDraftState,
@@ -126,6 +127,23 @@ test("a successful send is terminal without adding a success notice", () => {
   assert.equal(sent.attempt, null);
   assert.equal(isComposeDraftLocked(sent), true);
   assert.equal(sent.message, null);
+});
+
+test("a draft that changed after save is abandoned so a new send can rewrite it", () => {
+  const saved = composeDraftReducer(sendingState(), {
+    type: "attempt_saved",
+    attempt: sendPhaseAttempt,
+  });
+  const failed = composeDraftReducer(saved, {
+    type: "send_error",
+    message: GMAIL_COMPOSE_DRAFT_CHANGED_TITLE,
+    isReconnectRequired: false,
+    abandonAttempt: true,
+  });
+
+  assert.equal(failed.status, "send_error");
+  assert.equal(failed.attempt, null);
+  assert.equal(isComposeDraftLocked(failed), false);
 });
 
 test("a permanent auth failure requests reconnect and locks the message", () => {

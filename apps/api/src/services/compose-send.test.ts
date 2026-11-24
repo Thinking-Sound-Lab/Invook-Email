@@ -111,24 +111,51 @@ function memoryDependencies(input: {
   return { dependencies, counts };
 }
 
+const expectedProviderMessageId = "provider-draft-message";
 const sendInput = {
   userId,
   access,
   idempotencyKey,
   providerDraftId,
+  expectedProviderMessageId,
 };
 
-test("compose send admission accepts only an exact idempotency key", () => {
-  assert.deepEqual(parseGmailComposeSendRequest({ accountId, idempotencyKey }), {
-    accountId,
-    idempotencyKey,
-  });
+test("compose send admission requires the saved draft message and an exact idempotency key", () => {
+  assert.deepEqual(
+    parseGmailComposeSendRequest({
+      accountId,
+      idempotencyKey,
+      expectedProviderMessageId,
+    }),
+    { accountId, idempotencyKey, expectedProviderMessageId },
+  );
   assert.equal(
-    parseGmailComposeSendRequest({ accountId, idempotencyKey, unexpected: true }),
+    parseGmailComposeSendRequest({ accountId, idempotencyKey }),
     null,
   );
   assert.equal(
-    parseGmailComposeSendRequest({ accountId, idempotencyKey: "invalid" }),
+    parseGmailComposeSendRequest({
+      accountId,
+      idempotencyKey,
+      expectedProviderMessageId,
+      unexpected: true,
+    }),
+    null,
+  );
+  assert.equal(
+    parseGmailComposeSendRequest({
+      accountId,
+      idempotencyKey: "invalid",
+      expectedProviderMessageId,
+    }),
+    null,
+  );
+  assert.equal(
+    parseGmailComposeSendRequest({
+      accountId,
+      idempotencyKey,
+      expectedProviderMessageId: "not a gmail id",
+    }),
     null,
   );
 });

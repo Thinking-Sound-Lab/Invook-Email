@@ -6,6 +6,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+  GMAIL_COMPOSE_DRAFT_CHANGED_TITLE,
   GMAIL_COMPOSE_MAX_BODY_LENGTH,
   GMAIL_COMPOSE_MAX_SUBJECT_LENGTH,
   parseGmailComposeRecipients,
@@ -215,6 +216,7 @@ export function ComposeSurface() {
         type: "send_error",
         message,
         isReconnectRequired: message === "Gmail account must be reconnected",
+        abandonAttempt: message === GMAIL_COMPOSE_DRAFT_CHANGED_TITLE,
       });
     } finally {
       busyRef.current = false;

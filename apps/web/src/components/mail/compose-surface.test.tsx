@@ -279,6 +279,7 @@ test("sending the redesigned composer saves and sends one Gmail draft", async ()
   assert.ok(validateUuid(String(sendPayload.idempotencyKey)));
   assert.notEqual(sendPayload.idempotencyKey, payload.idempotencyKey);
   assert.equal(sendPayload.accountId, "account-1");
+  assert.equal(sendPayload.expectedProviderMessageId, "provider-message");
   assert.equal(button("Sent with Gmail").disabled, true);
   assert.equal(button("Sent with Gmail").querySelector("svg"), null);
   assert.equal(document.querySelector('[role="status"]'), null);

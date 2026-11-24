@@ -42,10 +42,10 @@ export interface SendComposeDraftInput {
   idempotencyKey: string;
   providerDraftId: string;
   /**
-   * The draft message the caller approved. Gmail sends a draft by ID, so a
-   * draft edited after approval is refused instead of sent.
+   * The draft message the caller saved or approved. Gmail sends a draft by ID,
+   * so a draft edited after that snapshot is refused instead of sent.
    */
-  expectedProviderMessageId?: string;
+  expectedProviderMessageId: string;
 }
 
 export interface ComposeSendDependencies {
@@ -213,10 +213,7 @@ async function prepareAndSend(
   if (target.providerDraftId !== input.providerDraftId) {
     throw new Error("Gmail returned a different draft than the requested send target.");
   }
-  if (
-    input.expectedProviderMessageId &&
-    target.providerMessageId !== input.expectedProviderMessageId
-  ) {
+  if (target.providerMessageId !== input.expectedProviderMessageId) {
     const wasAbandoned = await dependencies.abandonUnpreparedSend({
       operationId,
       userId: input.userId,

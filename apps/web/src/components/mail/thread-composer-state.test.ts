@@ -127,7 +127,11 @@ test("Send saves first and retries a failed send with the same provider draft an
     },
     sendDraft: async (
       draftId: string,
-      request: { accountId: string; idempotencyKey: string },
+      request: {
+        accountId: string;
+        idempotencyKey: string;
+        expectedProviderMessageId: string;
+      },
     ) => {
       sends += 1;
       assert.equal(attempt.phase, "send");
@@ -135,6 +139,7 @@ test("Send saves first and retries a failed send with the same provider draft an
       assert.deepEqual(request, {
         accountId: "account-1",
         idempotencyKey: "send-key",
+        expectedProviderMessageId: providerDraft.providerMessageId,
       });
       if (sends === 1) throw new Error("ambiguous send response");
       return {
